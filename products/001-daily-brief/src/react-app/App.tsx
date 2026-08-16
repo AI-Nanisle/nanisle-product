@@ -59,7 +59,7 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 
 	return (
 		<div className="mt-3">
-			<div className="flex items-center gap-4 font-mono-sc text-[11px] text-[var(--ink-3)]">
+			<div className="flex items-center gap-4 font-mono-sc text-[12px] text-[var(--ink-3)]">
 				<button
 					type="button"
 					onClick={() => cast("up")}
@@ -91,12 +91,12 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 						onChange={(e) => setText(e.target.value)}
 						onKeyDown={(e) => e.key === "Enter" && send()}
 						placeholder="例如:这条没什么细节 / 这类内容多来点"
-						className="flex-1 border border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-sm outline-none focus:border-[var(--line-strong)]"
+						className="flex-1 rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-sm outline-none focus:border-[var(--line-strong)]"
 					/>
 					<button
 						type="button"
 						onClick={send}
-						className="font-mono-sc text-[11px] px-3 border border-[var(--line-strong)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+						className="font-mono-sc text-[12px] px-3 rounded-md border border-[var(--line-strong)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
 					>
 						{sent ? "已收到" : "发送"}
 					</button>
@@ -111,7 +111,7 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 function Item({ item, date, index }: { item: BriefItem; date: string; index: number }) {
 	return (
 		<article className="rise py-6 first:pt-4" style={{ animationDelay: `${index * 80}ms` }}>
-			<div className="font-mono-sc text-[11px] text-[var(--ink-3)] mb-1.5">
+			<div className="font-mono-sc text-[12px] text-[var(--ink-3)] mb-1.5">
 				{item.source}
 				{item.relatesTo && (
 					<span className="ml-3 text-[var(--accent)]">◆ {item.relatesTo}</span>
@@ -125,11 +125,11 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 			<p className="mt-2 text-[15px] leading-relaxed text-[var(--ink-2)]">{item.whyClick}</p>
 			{item.caveat && (
 				<p className="mt-2 border-l-2 border-[var(--line-strong)] pl-3 text-[13px] leading-relaxed text-[var(--ink-3)]">
-					<span className="font-mono-sc text-[10px] mr-1.5 text-[var(--ink-3)]">原文存疑</span>
+					<span className="font-mono-sc text-[11px] mr-1.5 text-[var(--ink-3)]">原文存疑</span>
 					{item.caveat}
 				</p>
 			)}
-			<div className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1 font-mono-sc text-[11px]">
+			<div className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1 font-mono-sc text-[12px]">
 				<a href={`/go/${date}/${item.id}`} target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">
 					读原文 →
 				</a>
@@ -173,7 +173,7 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 			>
 				{item.title}
 			</a>
-			<span className="font-mono-sc text-[10px] text-[var(--ink-3)] shrink-0">{item.reason}</span>
+			<span className="font-mono-sc text-[11px] text-[var(--ink-3)] shrink-0">{item.reason}</span>
 			<button
 				type="button"
 				disabled={wanted}
@@ -181,7 +181,7 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 					setWanted(true);
 					void postFeedback(date, item.id, "want");
 				}}
-				className={`ml-auto shrink-0 font-mono-sc text-[10px] cursor-pointer ${wanted ? "text-[var(--accent)]" : "text-[var(--ink-3)] hover:text-[var(--accent)]"}`}
+				className={`ml-auto shrink-0 font-mono-sc text-[11px] cursor-pointer ${wanted ? "text-[var(--accent)]" : "text-[var(--ink-3)] hover:text-[var(--accent)]"}`}
 			>
 				{wanted ? "✓ 已记下" : "这条我要"}
 			</button>
@@ -199,6 +199,9 @@ export default function App() {
 	const [dates, setDates] = useState<string[]>([]);
 	const [state, setState] = useState<LoadState>("loading");
 	const [codeInput, setCodeInput] = useState("");
+	// 401 响应里带的主站登录地址；有它就主推「登录南屿」，访问码折叠成后备
+	const [lockLoginUrl, setLockLoginUrl] = useState("");
+	const [showCode, setShowCode] = useState(false);
 	const [view, setViewState] = useState<View>(() =>
 		window.location.hash === "#config" ? "config" : "brief",
 	);
@@ -214,6 +217,8 @@ export default function App() {
 		try {
 			const res = await fetch(`/api/brief${date ? `?date=${date}` : ""}`, { headers: apiHeaders() });
 			if (res.status === 401) {
+				const body = (await res.json().catch(() => ({}))) as { loginUrl?: string };
+				setLockLoginUrl(body.loginUrl ?? "");
 				setState("locked");
 				return;
 			}
@@ -271,32 +276,54 @@ export default function App() {
 			<div className="min-h-screen flex items-center justify-center px-6">
 				<div className="w-full max-w-sm">
 					<h1 className="font-serif-sc font-black text-3xl mb-1">每日简报</h1>
-					<p className="text-sm text-[var(--ink-2)] mb-6">这份简报是私人的。输入访问码继续。</p>
-					<div className="flex gap-2">
-						<input
-							type="password"
-							value={codeInput}
-							onChange={(e) => setCodeInput(e.target.value)}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") {
+					<p className="text-sm text-[var(--ink-2)] mb-6">
+						{lockLoginUrl ? "这份简报是私人的。登录南屿账号后阅读。" : "这份简报是私人的。输入访问码继续。"}
+					</p>
+					{lockLoginUrl && (
+						<>
+							{/* 去主站登录，登录后主站会带着手递 token 把人送回来 */}
+							<a
+								href={lockLoginUrl}
+								className="block w-full text-center rounded-md px-4 py-2.5 bg-[var(--ink)] text-[var(--paper)] text-sm hover:bg-[var(--accent)] transition-colors"
+							>
+								用南屿账号登录
+							</a>
+							<button
+								type="button"
+								onClick={() => setShowCode((v) => !v)}
+								className="mt-4 font-mono-sc text-[12px] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer"
+							>
+								{showCode ? "收起" : "我有访问码"}
+							</button>
+						</>
+					)}
+					{(!lockLoginUrl || showCode) && (
+						<div className={`flex gap-2 ${lockLoginUrl ? "mt-2" : ""}`}>
+							<input
+								type="password"
+								value={codeInput}
+								onChange={(e) => setCodeInput(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") {
+										localStorage.setItem(CODE_KEY, codeInput.trim());
+										void load();
+									}
+								}}
+								placeholder="访问码"
+								className="flex-1 rounded-md border border-[var(--line-strong)] bg-[var(--card)] px-3 py-2 text-sm outline-none focus:border-[var(--ink)]"
+							/>
+							<button
+								type="button"
+								onClick={() => {
 									localStorage.setItem(CODE_KEY, codeInput.trim());
 									void load();
-								}
-							}}
-							placeholder="访问码"
-							className="flex-1 border border-[var(--line-strong)] bg-[var(--card)] px-3 py-2 text-sm outline-none focus:border-[var(--ink)]"
-						/>
-						<button
-							type="button"
-							onClick={() => {
-								localStorage.setItem(CODE_KEY, codeInput.trim());
-								void load();
-							}}
-							className="px-4 py-2 bg-[var(--ink)] text-[var(--paper)] text-sm cursor-pointer hover:bg-[var(--accent)] transition-colors"
-						>
-							进入
-						</button>
-					</div>
+								}}
+								className="rounded-md px-4 py-2 bg-[var(--ink)] text-[var(--paper)] text-sm cursor-pointer hover:bg-[var(--accent)] transition-colors"
+							>
+								进入
+							</button>
+						</div>
+					)}
 				</div>
 			</div>
 		);
@@ -321,23 +348,28 @@ export default function App() {
 	const genTime = new Date(brief.generatedAt);
 
 	return (
-		<div className="mx-auto max-w-2xl px-5 pb-24">
+		<div className={`mx-auto px-5 pb-24 ${view === "config" ? "max-w-6xl" : "max-w-2xl"}`}>
 			{/* 报头 */}
 			<header className="pt-10 pb-4">
-				<div className="flex flex-wrap items-baseline justify-between gap-y-2 font-mono-sc text-[11px] text-[var(--ink-3)]">
-					<span>NANISLE · No.001</span>
-					<div className="flex items-baseline gap-3">
+				{/* 导航是给人点的,不是仪表读数:中文黑体、主站导航字号(13.5px),
+				    「立即生成」按主站 btn-ink 的样子做成主按钮 */}
+				<div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+					<span className="font-mono-sc inline-flex items-center gap-2 text-[11px] tracking-wider text-[var(--ink-3)]">
+						<span className="dot dot-accent" />
+						NANISLE · No.001
+					</span>
+					<div className="flex flex-wrap items-center gap-4">
 						<button
 							type="button"
 							onClick={() => setView("brief")}
-							className={`cursor-pointer ${view === "brief" ? "text-[var(--accent)] border-b border-[var(--accent)]" : "hover:text-[var(--ink)]"}`}
+							className={`cursor-pointer text-[13.5px] font-medium transition-colors ${view === "brief" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "text-[var(--ink-2)] hover:text-[var(--ink)]"}`}
 						>
 							简报
 						</button>
 						<button
 							type="button"
 							onClick={() => setView("config")}
-							className={`cursor-pointer ${view === "config" ? "text-[var(--accent)] border-b border-[var(--accent)]" : "hover:text-[var(--ink)]"}`}
+							className={`cursor-pointer text-[13.5px] font-medium transition-colors ${view === "config" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "text-[var(--ink-2)] hover:text-[var(--ink)]"}`}
 						>
 							配置
 						</button>
@@ -345,7 +377,7 @@ export default function App() {
 							type="button"
 							onClick={() => void generate()}
 							disabled={generating}
-							className="px-2.5 py-1 border border-[var(--line-strong)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer disabled:opacity-50"
+							className="cursor-pointer rounded-md bg-[var(--ink)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--paper)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
 						>
 							{generating ? "生成中…约半分钟" : "立即生成"}
 						</button>
@@ -353,7 +385,7 @@ export default function App() {
 							<select
 								value={brief.date}
 								onChange={(e) => void load(e.target.value)}
-								className="bg-transparent border border-[var(--line)] px-2 py-0.5 cursor-pointer outline-none"
+								className="font-mono-sc cursor-pointer rounded-md border border-[var(--line)] bg-transparent px-2 py-1 text-[12px] text-[var(--ink-2)] outline-none"
 							>
 								{!dates.includes(brief.date) && <option value={brief.date}>{brief.date}</option>}
 								{dates.map((d) => (
@@ -368,19 +400,19 @@ export default function App() {
 				<h1 className="font-serif-sc font-black text-[clamp(2.6rem,9vw,3.8rem)] leading-tight tracking-wide mt-3">
 					每日简报
 				</h1>
-				<div className="mt-2 mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono-sc text-[12px] text-[var(--ink-2)]">
+				<div className="mt-2 mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 font-mono-sc text-[13px] text-[var(--ink-2)]">
 					<span className="text-[var(--accent)] font-medium">{brief.date}</span>
 					<span>{weekdayOf(brief.date)}</span>
 					<span>
 						{brief.sourceCount} 源 · {totalItems} 条 · 读完即止
 					</span>
-					{brief.sample && <span className="px-1.5 border border-[var(--accent)] text-[var(--accent)]">示例数据</span>}
+					{brief.sample && <span className="rounded px-1.5 border border-[var(--accent)] text-[var(--accent)]">示例数据</span>}
 				</div>
 				<div className="rule-double" />
 			</header>
 
 			{genMsg && (
-				<p className="mb-4 font-mono-sc text-[12px] text-[var(--ink-2)] border border-[var(--line)] bg-[var(--card)] px-3 py-2">
+				<p className="mb-4 font-mono-sc text-[13px] text-[var(--ink-2)] rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-2">
 					{genMsg}
 				</p>
 			)}
@@ -390,7 +422,7 @@ export default function App() {
 			) : (
 				<>
 					{isStale(brief) && (
-				<div className="mb-6 border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3 text-sm text-[var(--accent)]">
+				<div className="mb-6 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3 text-sm text-[var(--accent)]">
 					今日未更新——最近一期生成于 {genTime.toLocaleString("zh-CN")}。管线可能出问题了。
 				</div>
 			)}
@@ -405,12 +437,13 @@ export default function App() {
 			{brief.sections.map(
 				(section, si) =>
 					section.items.length > 0 && (
-						<section key={section.key} className="mb-2">
-							<div className="flex items-baseline gap-3 border-t border-[var(--line-strong)] pt-3 mt-6">
+						<section key={section.key} className="mt-6 rounded-[10px] bg-[var(--card)] border border-[var(--line)] px-5">
+							<div className="flex items-baseline gap-3 border-b border-[var(--line)] pt-3 pb-2.5">
 								<span className="font-mono-sc text-[11px] text-[var(--accent)]">
 									{String(si + 1).padStart(2, "0")}
 								</span>
-								<h2 className="font-serif-sc font-bold text-lg tracking-widest">{section.title}</h2>
+								<h2 className="font-bold text-lg tracking-widest">{section.title}</h2>
+								<span className="font-mono-sc ml-auto text-[11px] text-[var(--ink-3)]">{section.items.length} 条</span>
 							</div>
 							<div className="divide-y divide-[var(--line)]">
 								{section.items.map((item, i) => (
@@ -423,7 +456,7 @@ export default function App() {
 
 			{/* 已替你筛掉 */}
 			<section className="mt-8">
-				<details className="dropped border border-[var(--line)] bg-[var(--paper-deep)] px-4 py-3">
+				<details className="dropped rounded-[10px] border border-[var(--line)] bg-[var(--paper-deep)] px-4 py-3">
 					<summary className="flex items-baseline gap-3">
 						<span className="chevron font-mono-sc text-[11px] text-[var(--ink-3)]">▸</span>
 						<span className="font-serif-sc font-bold text-sm tracking-widest">已替你筛掉</span>
@@ -449,7 +482,7 @@ export default function App() {
 					<br />
 					到此为止
 				</div>
-				<p className="font-mono-sc text-[10px] text-[var(--ink-3)]">
+				<p className="font-mono-sc text-[11px] text-[var(--ink-3)]">
 					生成于 {genTime.toLocaleString("zh-CN", { hour12: false })} · nanisle 每周一个产品 · 001
 				</p>
 			</footer>

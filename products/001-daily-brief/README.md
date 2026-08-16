@@ -19,6 +19,10 @@ Cloudflare Worker
 
 Sections: **今日大事** (don't miss it) · **项目弹药** (ammo for what you're building — every item must name which focus entry it relates to) · **教我新东西** (teach me something) · plus a collapsed **已替你筛掉** list so "saving you time" is a visible, auditable number.
 
+## Configuring by chat
+
+The 配置 page is a workbench: a chat agent on the left, the live config on the right. Tell it what you want to read — a URL (homepages work, `probeFeed` runs feed autodiscovery), or just a topic ("AI 创业"), and it translates intent into feed URLs (Google News search feeds for fuzzy topics, hnrss/reddit/`releases.atom` forms for platforms). Nothing enters the config unverified: explicit instructions execute directly (`add/update/remove/set_focus` tools), the agent's own recommendations go through `preview_sources` — fetched first, shown as cards with fresh-item counts, added only when you click 添加. `POST /api/chat` streams NDJSON events (text / tool / proposal / config); the panel updates live and stays fully hand-editable. Mock mode degrades to a clear notice; the panel keeps working.
+
 Anti-fabrication by construction: the model only returns candidate ids and text derived from fetched excerpts; every URL comes from a feed or the HN API.
 
 ## Run it

@@ -6,8 +6,13 @@
 AI_PROVIDER=mock
 AI_MODEL=claude-opus-5
 AI_MAX_OUTPUT_TOKENS=1024
-# Gate for /api/brief, /api/feedback and AI endpoints on hosted instances.
-# Leave unset locally for open access.
+# Shared with the nanisle main site: verifies SSO handoff tokens so readers can
+# sign in with their nanisle account. Leave unset locally for open access.
+#NANISLE_SSO_SECRET=same-value-as-main-site
+# Where the lock screen sends readers to sign in (default https://nanisle.com)
+#NANISLE_URL=http://localhost:3000
+# Owner credential: gates /api/generate and config writes; also a reader
+# fallback for self-hosted instances. Leave unset locally for open access.
 #ACCESS_CODE=change-me
 # Required by POST /api/ingest — the pipeline pushes briefs with it.
 #INGEST_TOKEN=change-me-too

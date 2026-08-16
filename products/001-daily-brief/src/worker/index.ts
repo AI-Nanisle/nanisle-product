@@ -1,22 +1,25 @@
 import { Hono } from "hono";
+import { setCookie } from "hono/cookie";
 import { AiError, complete, resolveProvider } from "./ai";
-import { accessGuard, aiGuard, safeEqual } from "./guard";
+import { SESSION_COOKIE, accessGuard, aiGuard, loginUrl, ownerGuard, safeEqual } from "./guard";
+import { signToken, verifyToken } from "./sso";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
 import { SAMPLE_BRIEF } from "./sample-brief";
 import {
-	SOURCE_CATEGORIES,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
 	fetchAllSources,
-	fetchFeed,
 	fnv1a,
 	mockEditorial,
 	parseEditorialJson,
 } from "../shared/pipeline-core";
-import type { FocusEntry, SourceConfig } from "../shared/pipeline-core";
-import { DEFAULT_FILTERS, DEFAULT_FOCUS, DEFAULT_SOURCES } from "../shared/default-sources";
+import type { SourceConfig } from "../shared/pipeline-core";
+import { DEFAULT_FILTERS } from "../shared/default-sources";
+import { MAX_SOURCES, cleanFocus, cleanSources, getFocus, getSources, saveFocus, saveSources } from "./config";
+import { probeFeed } from "./feeds";
+import { chatStream, parseChatBody } from "./chat";
 
 const app = new Hono<{ Bindings: AppEnv }>();
 
@@ -47,8 +50,43 @@ app.get("/api/health", (c) => {
 		ok: true,
 		provider,
 		accessCodeRequired: Boolean(c.env.ACCESS_CODE),
+		ssoConfigured: Boolean(c.env.NANISLE_SSO_SECRET),
 		ingestConfigured: Boolean(c.env.INGEST_TOKEN),
 	});
+});
+
+// 主站登录手递的落点（主站侧：nanisle 仓 web/app/api/launch/[slug]/route.ts）。
+// 验证主站签的短时 token，换成本域的长会话 cookie，然后回首页。
+// 会话本身就是签名 token，无服务端状态，30 天后自然过期、重走一遍手递即可。
+const SESSION_TTL_S = 30 * 24 * 3600;
+
+app.get("/auth/sso", async (c) => {
+	const secret = c.env.NANISLE_SSO_SECRET;
+	// 没配共享密钥的实例本来就不做登录门禁，直接回首页
+	if (!secret) return c.redirect("/", 302);
+	const payload = await verifyToken(secret, c.req.query("token") ?? "");
+	if (!payload) {
+		// 不自动跳回主站重签：两边密钥配错时会陷入 302 死循环，这里停下来说清楚
+		return c.html(
+			`<!doctype html><meta charset="utf-8"><body style="font-family:sans-serif;max-width:28em;margin:15vh auto;line-height:1.9">` +
+				`<p>登录链接无效或已过期。</p>` +
+				`<p><a href="${loginUrl(c.env)}">回南屿重新打开产品 →</a></p></body>`,
+			401,
+		);
+	}
+	const session = await signToken(secret, {
+		email: payload.email,
+		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+	});
+	setCookie(c, SESSION_COOKIE, session, {
+		path: "/",
+		httpOnly: true,
+		sameSite: "Lax",
+		// 本地 wrangler dev 走 http，Secure cookie 种不上，按协议区分
+		secure: new URL(c.req.url).protocol === "https:",
+		maxAge: SESSION_TTL_S,
+	});
+	return c.redirect("/", 302);
 });
 
 // The brief itself is personal content (it mirrors the owner's focus list),
@@ -178,110 +216,122 @@ app.get("/go/:date/:id", async (c) => {
 
 // ---------- config: sources & focus (the web UI is the source of truth) ----------
 
-async function getSources(env: AppEnv): Promise<SourceConfig[]> {
-	const raw = await env.BRIEFS.get("config:sources");
-	if (raw) return JSON.parse(raw) as SourceConfig[];
-	return DEFAULT_SOURCES;
-}
-
-async function getFocus(env: AppEnv): Promise<FocusEntry[]> {
-	const raw = await env.BRIEFS.get("config:focus");
-	if (raw) return JSON.parse(raw) as FocusEntry[];
-	return DEFAULT_FOCUS;
-}
-
 app.get("/api/sources", accessGuard, async (c) => {
 	const stored = await c.env.BRIEFS.get("config:sources");
 	return c.json({ sources: await getSources(c.env), customized: Boolean(stored) });
 });
 
-app.put("/api/sources", accessGuard, async (c) => {
+app.put("/api/sources", ownerGuard, async (c) => {
 	let body: { sources?: unknown };
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: "Body must be JSON: {\"sources\": [...]}" }, 400);
 	}
-	if (!Array.isArray(body.sources) || body.sources.length > 50) {
-		return c.json({ error: "sources must be an array (max 50)" }, 400);
+	const cleaned = cleanSources(body.sources);
+	if ("error" in cleaned) return c.json({ error: cleaned.error }, 400);
+	await saveSources(c.env, cleaned.sources);
+	return c.json({ ok: true, count: cleaned.sources.length });
+});
+
+// Verified add: probe (with feed discovery) first, persist only what parsed.
+// Used by the config panel's manual add and the chat proposal cards' 添加 button.
+app.post("/api/sources/add", ownerGuard, async (c) => {
+	let body: { sources?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON: {\"sources\": [...]}" }, 400);
 	}
-	const cleaned: SourceConfig[] = [];
-	for (const [i, s] of (body.sources as Record<string, unknown>[]).entries()) {
-		const name = typeof s.name === "string" ? s.name.trim() : "";
+	if (!Array.isArray(body.sources) || body.sources.length === 0 || body.sources.length > 8) {
+		return c.json({ error: "sources must be a non-empty array (max 8)" }, 400);
+	}
+	const current = await getSources(c.env);
+	const added: SourceConfig[] = [];
+	const failed: { name: string; url: string; error: string }[] = [];
+	for (const s of body.sources as Record<string, unknown>[]) {
+		const name = typeof s.name === "string" ? s.name.trim().slice(0, 100) : "";
 		const url = typeof s.url === "string" ? s.url.trim() : "";
 		const category = s.category as SourceConfig["category"];
-		if (!name || name.length > 100) return c.json({ error: `source #${i + 1}: name required (≤100 chars)` }, 400);
-		if (!/^https?:\/\/\S+$/.test(url) || url.length > 500) return c.json({ error: `source #${i + 1}: url must be http(s)` }, 400);
-		if (!SOURCE_CATEGORIES.includes(category)) return c.json({ error: `source #${i + 1}: bad category` }, 400);
-		const maxItems = typeof s.max_items === "number" && s.max_items >= 1 && s.max_items <= 50 ? Math.floor(s.max_items) : undefined;
-		cleaned.push({
-			key: typeof s.key === "string" && s.key ? s.key.slice(0, 64) : fnv1a(url),
-			name,
-			url,
-			category,
-			enabled: s.enabled === false ? false : undefined,
-			...(maxItems ? { max_items: maxItems } : {}),
-		});
+		if (!name || !url || url.length > 500 || !["news", "macro", "blog", "podcast", "paper"].includes(category)) {
+			failed.push({ name: name || "?", url, error: "字段不完整" });
+			continue;
+		}
+		const probe = await probeFeed(url);
+		if (!probe.ok) {
+			failed.push({ name, url, error: probe.error ?? "试抓失败" });
+			continue;
+		}
+		const key = fnv1a(probe.url);
+		if (current.some((x) => x.key === key || x.url === probe.url)) {
+			failed.push({ name, url: probe.url, error: "已在配置里" });
+			continue;
+		}
+		if (current.length >= MAX_SOURCES) {
+			failed.push({ name, url: probe.url, error: `源数量已达上限 ${MAX_SOURCES}` });
+			continue;
+		}
+		const source: SourceConfig = { key, name, url: probe.url, category };
+		current.push(source);
+		added.push(source);
 	}
-	await c.env.BRIEFS.put("config:sources", JSON.stringify(cleaned));
-	return c.json({ ok: true, count: cleaned.length });
+	if (added.length > 0) await saveSources(c.env, current);
+	return c.json({ ok: true, added, failed, sources: current });
 });
 
 // Try one feed and preview what it currently returns — the review step
 // before a source earns its place in the list.
-app.post("/api/sources/test", accessGuard, async (c) => {
+app.post("/api/sources/test", ownerGuard, async (c) => {
 	let url: unknown;
 	try {
 		({ url } = await c.req.json<{ url?: unknown }>());
 	} catch {
 		return c.json({ error: "Body must be JSON: {\"url\": \"...\"}" }, 400);
 	}
-	if (typeof url !== "string" || !/^https?:\/\/\S+$/.test(url)) {
-		return c.json({ error: "url must be http(s)" }, 400);
+	if (typeof url !== "string" || url.trim().length === 0 || url.length > 500) {
+		return c.json({ error: "url required" }, 400);
 	}
-	try {
-		const entries = await fetchFeed(url, 15_000);
-		const now = Date.now();
-		const freshCount = entries.filter(
-			(e) => e.publishedAt && now - e.publishedAt.getTime() <= DEFAULT_FILTERS.max_age_hours * 3600_000,
-		).length;
-		return c.json({
-			ok: true,
-			total: entries.length,
-			fresh: freshCount,
-			latest: entries.slice(0, 5).map((e) => ({
-				title: e.title,
-				publishedAt: e.publishedAt ? e.publishedAt.toISOString() : null,
-			})),
-		});
-	} catch (err) {
-		return c.json({ ok: false, error: String(err instanceof Error ? err.message : err) });
-	}
+	// probeFeed also runs feed discovery, so a homepage URL works here too.
+	return c.json(await probeFeed(url, 15_000));
 });
 
 app.get("/api/focus", accessGuard, async (c) => {
 	return c.json({ focus: await getFocus(c.env) });
 });
 
-app.put("/api/focus", accessGuard, async (c) => {
+app.put("/api/focus", ownerGuard, async (c) => {
 	let body: { focus?: unknown };
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: "Body must be JSON: {\"focus\": [...]}" }, 400);
 	}
-	if (!Array.isArray(body.focus) || body.focus.length > 20) {
-		return c.json({ error: "focus must be an array (max 20)" }, 400);
+	const cleaned = cleanFocus(body.focus);
+	if ("error" in cleaned) return c.json({ error: cleaned.error }, 400);
+	await saveFocus(c.env, cleaned.focus);
+	return c.json({ ok: true, count: cleaned.focus.length });
+});
+
+// ---------- config chat agent ----------
+
+// One request = one visible turn: the LLM runs a tool loop against the config
+// in KV and the response streams NDJSON events (text / tool / proposal /
+// config / done). Costs tokens → aiGuard (owner code + kill switch).
+app.post("/api/chat", aiGuard, async (c) => {
+	let body: unknown;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON: {\"messages\": [...]}" }, 400);
 	}
-	const cleaned: FocusEntry[] = [];
-	for (const f of body.focus as Record<string, unknown>[]) {
-		const name = typeof f.name === "string" ? f.name.trim() : "";
-		if (!name || name.length > 100) return c.json({ error: "every focus entry needs a name (≤100 chars)" }, 400);
-		const detail = typeof f.detail === "string" ? f.detail.trim().slice(0, 500) : undefined;
-		cleaned.push({ name, ...(detail ? { detail } : {}) });
-	}
-	await c.env.BRIEFS.put("config:focus", JSON.stringify(cleaned));
-	return c.json({ ok: true, count: cleaned.length });
+	const parsed = parseChatBody(body);
+	if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+	return new Response(chatStream(c.env, parsed.messages), {
+		headers: {
+			"content-type": "application/x-ndjson; charset=utf-8",
+			"cache-control": "no-store",
+		},
+	});
 });
 
 // ---------- one-click / scheduled generation ----------

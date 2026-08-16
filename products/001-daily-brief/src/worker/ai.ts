@@ -19,7 +19,7 @@ export function resolveProvider(env: AppEnv): AiProvider {
 	throw new AiError(`Unknown AI_PROVIDER "${p}" — use mock | anthropic | gateway`, 500);
 }
 
-function makeClient(env: AppEnv, provider: AiProvider): Anthropic {
+export function makeClient(env: AppEnv, provider: AiProvider): Anthropic {
 	if (provider === "gateway") {
 		if (!env.AI_GATEWAY_URL || !env.AI_GATEWAY_KEY) {
 			throw new AiError("gateway mode needs AI_GATEWAY_URL and AI_GATEWAY_KEY", 500);

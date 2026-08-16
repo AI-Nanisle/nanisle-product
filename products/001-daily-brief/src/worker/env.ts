@@ -15,6 +15,10 @@ export interface AppEnv {
 	AI_DISABLED?: string;
 	/** Secret. Comma-separated access codes; when set, brief/feedback/AI endpoints require `x-access-code`. */
 	ACCESS_CODE?: string;
+	/** Secret. Shared with the nanisle main site — verifies SSO handoff tokens and signs the session cookie. */
+	NANISLE_SSO_SECRET?: string;
+	/** Main-site origin used in login redirects (default https://nanisle.com). */
+	NANISLE_URL?: string;
 	/** Secret. Required by POST /api/ingest — the generation pipeline authenticates with it. */
 	INGEST_TOKEN?: string;
 	/** Timezone that defines "today" for /api/generate (default America/New_York). */
