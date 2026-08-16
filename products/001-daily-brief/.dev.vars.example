@@ -11,6 +11,8 @@ AI_MAX_OUTPUT_TOKENS=1024
 #NANISLE_SSO_SECRET=same-value-as-main-site
 # Where the lock screen sends readers to sign in (default https://nanisle.com)
 #NANISLE_URL=http://localhost:3000
+# Canonical browser mount. Vite serves the app below this path locally too.
+APP_URL=http://localhost:5199/products/daily-brief
 # Owner credential: gates /api/generate and config writes; also a reader
 # fallback for self-hosted instances. Leave unset locally for open access.
 #ACCESS_CODE=change-me

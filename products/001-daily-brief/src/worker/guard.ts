@@ -14,6 +14,13 @@ export function loginUrl(env: AppEnv): string {
 	return `${base}/api/launch/daily-brief`;
 }
 
+/** Canonical browser URL for the product mounted below nanisle.com. */
+export function appUrl(env: AppEnv, path = ""): string {
+	const base = (env.APP_URL ?? "https://nanisle.com/products/daily-brief").replace(/\/+$/, "");
+	const suffix = path.replace(/^\/+/, "");
+	return suffix ? `${base}/${suffix}` : base;
+}
+
 function parseCodes(env: AppEnv): string[] {
 	return (env.ACCESS_CODE ?? "")
 		.split(",")

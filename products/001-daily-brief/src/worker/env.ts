@@ -3,6 +3,8 @@
 // `wrangler secret put` (deployed) or .dev.vars (local, gitignored).
 // See docs/ai-access.md for the full matrix.
 export interface AppEnv {
+	/** Static client bundle, used when this Worker is called through a Service Binding. */
+	ASSETS: Fetcher;
 	/** KV namespace holding briefs (`brief:*`), feedback (`fb:*`) and clicks (`click:*`). */
 	BRIEFS: KVNamespace;
 	/** "mock" (default) | "anthropic" (BYOK) | "gateway" (Anthropic-compatible proxy) */
@@ -19,6 +21,8 @@ export interface AppEnv {
 	NANISLE_SSO_SECRET?: string;
 	/** Main-site origin used in login redirects (default https://nanisle.com). */
 	NANISLE_URL?: string;
+	/** Canonical public mount for this product (no trailing slash). */
+	APP_URL?: string;
 	/** Secret. Required by POST /api/ingest — the generation pipeline authenticates with it. */
 	INGEST_TOKEN?: string;
 	/** Timezone that defines "today" for /api/generate (default America/New_York). */

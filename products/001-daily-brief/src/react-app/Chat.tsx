@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { FocusEntry, SourceConfig } from "../shared/pipeline-core";
+import { apiPath } from "./paths";
 
 // 与 worker 的 ChatEvent 对应(src/worker/chat.ts)。
 export interface ProposalItem {
@@ -112,7 +113,7 @@ export default function Chat({ headers, provider, onConfig, addSources }: ChatPr
 		].slice(-30);
 		push({ kind: "user", text: content });
 		try {
-			const res = await fetch("/api/chat", {
+			const res = await fetch(apiPath("chat"), {
 				method: "POST",
 				headers: { "content-type": "application/json", ...headers() },
 				body: JSON.stringify({ messages: history }),

@@ -10,11 +10,17 @@
 	"upload_source_maps": true,
 	"assets": {
 		"directory": "./dist/client",
+		"binding": "ASSETS",
 		"not_found_handling": "single-page-application",
 		// SPA fallback swallows *navigation* requests (browser address bar / <a> clicks)
 		// before the Worker runs — these routes must hit the Worker: /auth/sso sets the
 		// session cookie, /go/* records the click and 302s, /api/* is plain JSON.
-		"run_worker_first": ["/api/*", "/auth/*", "/go/*"]
+		"run_worker_first": [
+			"/api/*",
+			"/auth/*",
+			"/go/*",
+			"/products/daily-brief/*"
+		]
 	},
 	// One KV namespace stores everything: briefs, feedback events, click events.
 	// Before your first real deploy: `wrangler kv namespace create BRIEFS`
@@ -36,6 +42,7 @@
 		"AI_PROVIDER": "mock",
 		"AI_MODEL": "claude-opus-5",
 		"AI_MAX_OUTPUT_TOKENS": "1024",
+		"APP_URL": "https://nanisle.com/products/daily-brief",
 		// Where the lock screen sends readers to sign in (the main site's launch gate)
 		"NANISLE_URL": "https://nanisle.com"
 		// "AI_GATEWAY_URL": "https://your-gateway.example.com"  // AI_PROVIDER=gateway only

@@ -4,6 +4,7 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
+	base: "/products/daily-brief/",
 	plugins: [react(), cloudflare(), tailwindcss()],
-	server: { port: 3000 },
+	server: { port: 5199 },
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Brief, BriefItem, DroppedItem, FeedbackKind } from "../shared/types";
 import Config from "./Config";
+import { apiPath, pathForView, productPath, type ProductView, viewFromPathname } from "./paths";
 
 const CODE_KEY = "daily-brief-access-code";
 
@@ -14,7 +15,7 @@ function apiHeaders(): Record<string, string> {
 }
 
 async function postFeedback(date: string, itemId: string, kind: FeedbackKind, text?: string) {
-	await fetch("/api/feedback", {
+	await fetch(apiPath("feedback"), {
 		method: "POST",
 		headers: { "content-type": "application/json", ...apiHeaders() },
 		body: JSON.stringify({ date, itemId, kind, ...(text ? { text } : {}) }),
@@ -118,7 +119,7 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 				)}
 			</div>
 			<h3 className="font-serif-sc font-bold text-xl leading-snug">
-				<a href={`/go/${date}/${item.id}`} target="_blank" rel="noreferrer" className="headline-link">
+				<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="headline-link">
 					{item.title}
 				</a>
 			</h3>
@@ -130,7 +131,7 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 				</p>
 			)}
 			<div className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1 font-mono-sc text-[12px]">
-				<a href={`/go/${date}/${item.id}`} target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">
+				<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">
 					读原文 →
 				</a>
 				{item.discussionUrl && (
@@ -166,7 +167,7 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 	return (
 		<li className="flex items-baseline gap-3 py-1.5 border-b border-[var(--line)] last:border-0">
 			<a
-				href={`/go/${date}/${item.id}`}
+				href={productPath(`go/${date}/${item.id}`)}
 				target="_blank"
 				rel="noreferrer"
 				className="text-[13px] text-[var(--ink-2)] hover:text-[var(--accent)] truncate"
@@ -192,7 +193,7 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 // ---------- app ----------
 
 type LoadState = "loading" | "ready" | "locked" | "error";
-type View = "brief" | "config";
+type View = ProductView;
 
 export default function App() {
 	const [brief, setBrief] = useState<Brief | null>(null);
@@ -202,12 +203,10 @@ export default function App() {
 	// 401 响应里带的主站登录地址；有它就主推「登录南屿」，访问码折叠成后备
 	const [lockLoginUrl, setLockLoginUrl] = useState("");
 	const [showCode, setShowCode] = useState(false);
-	const [view, setViewState] = useState<View>(() =>
-		window.location.hash === "#config" ? "config" : "brief",
-	);
+	const [view, setViewState] = useState<View>(() => viewFromPathname(window.location.pathname));
 	const setView = (v: View) => {
 		setViewState(v);
-		window.history.replaceState(null, "", v === "config" ? "#config" : "#");
+		window.history.pushState(null, "", pathForView(v));
 	};
 	const [generating, setGenerating] = useState(false);
 	const [genMsg, setGenMsg] = useState("");
@@ -215,7 +214,7 @@ export default function App() {
 	const load = useCallback(async (date?: string) => {
 		setState("loading");
 		try {
-			const res = await fetch(`/api/brief${date ? `?date=${date}` : ""}`, { headers: apiHeaders() });
+			const res = await fetch(`${apiPath("brief")}${date ? `?date=${date}` : ""}`, { headers: apiHeaders() });
 			if (res.status === 401) {
 				const body = (await res.json().catch(() => ({}))) as { loginUrl?: string };
 				setLockLoginUrl(body.loginUrl ?? "");
@@ -225,7 +224,7 @@ export default function App() {
 			if (!res.ok) throw new Error(String(res.status));
 			setBrief((await res.json()) as Brief);
 			setState("ready");
-			const dres = await fetch("/api/dates", { headers: apiHeaders() });
+			const dres = await fetch(apiPath("dates"), { headers: apiHeaders() });
 			if (dres.ok) setDates(((await dres.json()) as { dates: string[] }).dates);
 		} catch {
 			setState("error");
@@ -236,11 +235,17 @@ export default function App() {
 		void load();
 	}, [load]);
 
+	useEffect(() => {
+		const syncView = () => setViewState(viewFromPathname(window.location.pathname));
+		window.addEventListener("popstate", syncView);
+		return () => window.removeEventListener("popstate", syncView);
+	}, []);
+
 	const generate = async () => {
 		setGenerating(true);
 		setGenMsg("");
 		try {
-			const res = await fetch("/api/generate", { method: "POST", headers: apiHeaders() });
+			const res = await fetch(apiPath("generate"), { method: "POST", headers: apiHeaders() });
 			const data = (await res.json()) as {
 				ok?: boolean;
 				date?: string;

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
 import { AiError, complete, resolveProvider } from "./ai";
-import { SESSION_COOKIE, accessGuard, aiGuard, loginUrl, ownerGuard, safeEqual } from "./guard";
+import { SESSION_COOKIE, accessGuard, aiGuard, appUrl, loginUrl, ownerGuard, safeEqual } from "./guard";
 import { signToken, verifyToken } from "./sso";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
@@ -22,6 +22,7 @@ import { probeFeed } from "./feeds";
 import { chatStream, parseChatBody } from "./chat";
 
 const app = new Hono<{ Bindings: AppEnv }>();
+const PRODUCT_MOUNT = "/products/daily-brief/";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -62,8 +63,8 @@ const SESSION_TTL_S = 30 * 24 * 3600;
 
 app.get("/auth/sso", async (c) => {
 	const secret = c.env.NANISLE_SSO_SECRET;
-	// 没配共享密钥的实例本来就不做登录门禁，直接回首页
-	if (!secret) return c.redirect("/", 302);
+	// 没配共享密钥的实例本来就不做登录门禁，直接回配置页
+	if (!secret) return c.redirect(appUrl(c.env, "config"), 302);
 	const payload = await verifyToken(secret, c.req.query("token") ?? "");
 	if (!payload) {
 		// 不自动跳回主站重签：两边密钥配错时会陷入 302 死循环，这里停下来说清楚
@@ -78,15 +79,16 @@ app.get("/auth/sso", async (c) => {
 		email: payload.email,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
 	});
+	const cookiePath = new URL(appUrl(c.env)).pathname.replace(/\/+$/, "") || "/";
 	setCookie(c, SESSION_COOKIE, session, {
-		path: "/",
+		path: cookiePath,
 		httpOnly: true,
 		sameSite: "Lax",
 		// 本地 wrangler dev 走 http，Secure cookie 种不上，按协议区分
-		secure: new URL(c.req.url).protocol === "https:",
+		secure: new URL(appUrl(c.env)).protocol === "https:",
 		maxAge: SESSION_TTL_S,
 	});
-	return c.redirect("/", 302);
+	return c.redirect(appUrl(c.env, "config"), 302);
 });
 
 // The brief itself is personal content (it mirrors the owner's focus list),
@@ -398,6 +400,25 @@ app.post("/api/generate", aiGuard, async (c) => {
 	});
 });
 
-app.notFound((c) => c.json({ error: "Not found" }, 404));
+app.notFound((c) => {
+	const path = new URL(c.req.url).pathname;
+	const dynamicPrefix = /^\/(?:api|auth|go)(?:\/|$)/;
+	if ((c.req.method === "GET" || c.req.method === "HEAD") && !dynamicPrefix.test(path)) {
+		return c.env.ASSETS.fetch(c.req.raw);
+	}
+	return c.json({ error: "Not found" }, 404);
+});
 
-export default app;
+/** Accept both the Worker's native root paths and the public nanisle.com mount. */
+function unmountRequest(request: Request): Request {
+	const url = new URL(request.url);
+	if (!url.pathname.startsWith(PRODUCT_MOUNT)) return request;
+	url.pathname = `/${url.pathname.slice(PRODUCT_MOUNT.length)}`;
+	return new Request(url, request);
+}
+
+export default {
+	fetch(request, env, ctx) {
+		return app.fetch(unmountRequest(request), env, ctx);
+	},
+} satisfies ExportedHandler<AppEnv>;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FocusEntry, SourceCategory, SourceConfig } from "../shared/pipeline-core";
 import Chat from "./Chat";
+import { apiPath } from "./paths";
 
 // 配置工作台:左边和 AI 对话,右边是配置的实时状态。
 // 对话产生的每次变更服务端已落库,这里只负责把面板即时刷新;
@@ -51,9 +52,9 @@ export default function Config() {
 	useEffect(() => {
 		void (async () => {
 			const [sres, fres, hres] = await Promise.all([
-				fetch("/api/sources", { headers: headers() }),
-				fetch("/api/focus", { headers: headers() }),
-				fetch("/api/health"),
+				fetch(apiPath("sources"), { headers: headers() }),
+				fetch(apiPath("focus"), { headers: headers() }),
+				fetch(apiPath("health")),
 			]);
 			if (sres.ok) setSources(((await sres.json()) as { sources: SourceConfig[] }).sources);
 			if (fres.ok) setFocus(((await fres.json()) as { focus: FocusEntry[] }).focus);
@@ -74,7 +75,7 @@ export default function Config() {
 			setSources(next);
 			setSync("saving");
 			try {
-				const res = await fetch("/api/sources", {
+				const res = await fetch(apiPath("sources"), {
 					method: "PUT",
 					headers: headers(),
 					body: JSON.stringify({ sources: next }),
@@ -92,7 +93,7 @@ export default function Config() {
 			setFocus(next);
 			setSync("saving");
 			try {
-				const res = await fetch("/api/focus", {
+				const res = await fetch(apiPath("focus"), {
 					method: "PUT",
 					headers: headers(),
 					body: JSON.stringify({ focus: next.filter((f) => f.name.trim()) }),
@@ -108,7 +109,7 @@ export default function Config() {
 	// 聊天卡片「添加」与面板手动添加共用:服务端会先试抓验证
 	const addSources = useCallback(
 		async (items: { name: string; url: string; category: string }[]) => {
-			const res = await fetch("/api/sources/add", {
+			const res = await fetch(apiPath("sources/add"), {
 				method: "POST",
 				headers: headers(),
 				body: JSON.stringify({ sources: items }),
@@ -137,7 +138,7 @@ export default function Config() {
 	const testSource = async (url: string) => {
 		setTests((t) => ({ ...t, [url]: "testing" }));
 		try {
-			const res = await fetch("/api/sources/test", {
+			const res = await fetch(apiPath("sources/test"), {
 				method: "POST",
 				headers: headers(),
 				body: JSON.stringify({ url }),
