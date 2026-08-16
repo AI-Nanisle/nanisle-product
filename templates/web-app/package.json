@@ -1,0 +1,31 @@
+{
+	"name": "nanisle-product-template",
+	"description": "Weekly-product starter: React + Hono on Cloudflare Workers with a mock/BYOK/gateway AI seam",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "tsc -b && vite build",
+		"check": "tsc -b && vite build && wrangler deploy --dry-run",
+		"deploy": "npm run build && wrangler deploy",
+		"cf-typegen": "wrangler types"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.117.1",
+		"hono": "4.11.1",
+		"react": "19.2.1",
+		"react-dom": "19.2.1"
+	},
+	"devDependencies": {
+		"@cloudflare/vite-plugin": "1.52.1",
+		"@cloudflare/workers-types": "^5.20260816.1",
+		"@tailwindcss/vite": "^4.3.3",
+		"@types/react": "19.2.7",
+		"@types/react-dom": "19.2.3",
+		"@vitejs/plugin-react": "5.1.1",
+		"tailwindcss": "^4.3.3",
+		"typescript": "5.9.3",
+		"vite": "^7.0.0",
+		"wrangler": "4.123.0"
+	}
+}

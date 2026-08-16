@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.node.json",
+	"compilerOptions": {
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.pipeline.tsbuildinfo",
+		"types": ["node"],
+		// The pipeline runs via `node --experimental-strip-types`, which only
+		// erases types — no enums, no namespaces, explicit `import type`.
+		"erasableSyntaxOnly": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["pipeline", "src/shared"]
+}

@@ -1,0 +1,8 @@
+node_modules
+dist
+.dev.vars
+.wrangler
+# personal focus list — only the .example ships
+focus.yaml
+# generated briefs
+pipeline/out/

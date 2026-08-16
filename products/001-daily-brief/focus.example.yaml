@@ -1,0 +1,15 @@
+# Your current-focus list. The "项目弹药" (ammo) section only admits items
+# that clearly relate to one of these entries — an item that can't name its
+# connection doesn't get in.
+#
+# Copy to focus.yaml (gitignored — this is personal) and edit freely; the
+# next generation run picks it up immediately. Keep entries short and
+# concrete: a project, a decision you're facing, a position you hold.
+
+focus:
+  - name: 本周产品
+    detail: 正在做一个每日简报工具,关心信息聚合产品的留存设计、反馈回路、RSS 生态
+  - name: 长期投资
+    detail: 持有指数基金和一只保险控股股,关心利率、通胀数据和市场估值水平
+  - name: 内容创作
+    detail: 每周写 AI 实践类短文,需要有细节的一手案例,不要二手转述

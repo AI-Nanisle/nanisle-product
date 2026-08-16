@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+.wrangler/
+
+# secrets — never commit these (see SECURITY.md)
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# misc
+.DS_Store
+*.log
+*.tsbuildinfo

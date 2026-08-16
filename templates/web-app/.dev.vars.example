@@ -1,0 +1,18 @@
+# Local development config for `npm run dev`.
+# Copy to `.dev.vars` (gitignored) and edit. NEVER commit real values.
+
+# mock (default, zero keys) | anthropic (your own key) | gateway (Anthropic-compatible proxy)
+AI_PROVIDER=mock
+
+# --- AI_PROVIDER=anthropic: bring your own key from platform.claude.com ---
+# ANTHROPIC_API_KEY=sk-ant-...
+
+# --- AI_PROVIDER=gateway: any Anthropic-compatible endpoint (LiteLLM, own shim) ---
+# AI_GATEWAY_URL=https://your-gateway.example.com
+# AI_GATEWAY_KEY=your-virtual-key
+
+# --- Optional guards (always set ACCESS_CODE on publicly hosted instances) ---
+# ACCESS_CODE=pick-a-long-random-string
+# AI_MODEL=claude-opus-5
+# AI_MAX_OUTPUT_TOKENS=1024
+# AI_DISABLED=1

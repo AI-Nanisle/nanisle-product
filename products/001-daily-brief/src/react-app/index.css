@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+/* 晨报编辑风:纸色、墨字、一点朱红。宋体标题承担识别度,正文黑体保证长读舒适。 */
+:root {
+	--paper: #f6f3ec;
+	--paper-deep: #efeadf;
+	--card: #fdfcf8;
+	--ink: #211d17;
+	--ink-2: #57503f;
+	--ink-3: #8a8171;
+	--line: #ded7c6;
+	--line-strong: #b9ae96;
+	--accent: #b0432b;
+	--accent-soft: #f6e5df;
+	--serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+	--sans: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+	--mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+html {
+	background: var(--paper);
+}
+
+body {
+	margin: 0;
+	color: var(--ink);
+	font-family: var(--sans);
+	/* 纸面质感:极淡的横向纹理,滚动时跟随内容 */
+	background:
+		repeating-linear-gradient(0deg, transparent 0 27px, rgba(33, 29, 23, 0.025) 27px 28px),
+		var(--paper);
+	-webkit-font-smoothing: antialiased;
+}
+
+.font-serif-sc {
+	font-family: var(--serif);
+}
+.font-mono-sc {
+	font-family: var(--mono);
+}
+
+/* 报头双细线(经典报纸分隔) */
+.rule-double {
+	border-top: 3px solid var(--ink);
+	position: relative;
+}
+.rule-double::after {
+	content: "";
+	position: absolute;
+	top: 4px;
+	left: 0;
+	right: 0;
+	border-top: 1px solid var(--ink);
+}
+
+.headline-link {
+	text-decoration: none;
+	color: inherit;
+	background-image: linear-gradient(var(--accent), var(--accent));
+	background-repeat: no-repeat;
+	background-size: 0% 2px;
+	background-position: 0 100%;
+	transition: background-size 0.25s ease;
+}
+.headline-link:hover {
+	background-size: 100% 2px;
+	color: var(--accent);
+}
+
+/* 载入时逐分区浮现 */
+@keyframes rise-in {
+	from {
+		opacity: 0;
+		transform: translateY(10px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+.rise {
+	animation: rise-in 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+/* 「今日到此为止」圆形终点戳 */
+.end-stamp {
+	width: 7.5rem;
+	height: 7.5rem;
+	border: 2px solid var(--accent);
+	border-radius: 9999px;
+	color: var(--accent);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	transform: rotate(-6deg);
+	position: relative;
+}
+.end-stamp::after {
+	content: "";
+	position: absolute;
+	inset: 4px;
+	border: 1px solid var(--accent);
+	border-radius: 9999px;
+	opacity: 0.5;
+}
+
+details.dropped > summary {
+	cursor: pointer;
+	list-style: none;
+}
+details.dropped > summary::-webkit-details-marker {
+	display: none;
+}
+details.dropped > summary .chevron {
+	transition: transform 0.2s ease;
+	display: inline-block;
+}
+details.dropped[open] > summary .chevron {
+	transform: rotate(90deg);
+}

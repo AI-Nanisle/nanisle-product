@@ -1,0 +1,27 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// Rename per product: nanisle-NNN-slug (Worker names are unique per Cloudflare account)
+	"name": "nanisle-product-template",
+	"main": "./src/worker/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"assets": {
+		"directory": "./dist/client",
+		"not_found_handling": "single-page-application"
+	},
+	// Non-secret configuration. Secrets are NEVER written here or in any file —
+	// set them with `wrangler secret put <NAME>` (prod) or in .dev.vars (local, gitignored):
+	//   ACCESS_CODE          gate for AI endpoints on hosted instances (always set when hosting publicly)
+	//   ANTHROPIC_API_KEY    only for AI_PROVIDER=anthropic (bring your own key)
+	//   AI_GATEWAY_KEY       only for AI_PROVIDER=gateway (virtual key issued by the gateway)
+	"vars": {
+		"AI_PROVIDER": "mock",
+		"AI_MODEL": "claude-opus-5",
+		"AI_MAX_OUTPUT_TOKENS": "1024"
+		// "AI_GATEWAY_URL": "https://your-gateway.example.com"  // AI_PROVIDER=gateway only
+	}
+}

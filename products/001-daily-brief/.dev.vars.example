@@ -1,0 +1,27 @@
+# Copy to .dev.vars (gitignored) for local dev. Every variable the product
+# reads is listed here — worker vars and pipeline vars share this file.
+
+# --- worker (npm run dev) ---
+# AI seam mode: mock (default, zero keys) | anthropic | gateway
+AI_PROVIDER=mock
+AI_MODEL=claude-opus-5
+AI_MAX_OUTPUT_TOKENS=1024
+# Gate for /api/brief, /api/feedback and AI endpoints on hosted instances.
+# Leave unset locally for open access.
+#ACCESS_CODE=change-me
+# Required by POST /api/ingest — the pipeline pushes briefs with it.
+#INGEST_TOKEN=change-me-too
+# AI_PROVIDER=anthropic only:
+#ANTHROPIC_API_KEY=sk-ant-...
+# AI_PROVIDER=gateway only:
+#AI_GATEWAY_URL=https://your-gateway.example.com
+#AI_GATEWAY_KEY=vk-...
+
+# --- pipeline (npm run generate) ---
+# The pipeline reads this same file. Extra pipeline-only knobs:
+# Where to push the generated brief (omit both to only write pipeline/out/):
+#INGEST_URL=https://nanisle-001-daily-brief.<account>.workers.dev
+# Timezone that defines "today" for the brief:
+#BRIEF_TZ=America/New_York
+# Override the focus file path (default: focus.yaml, falling back to focus.example.yaml):
+#FOCUS_FILE=focus.yaml
