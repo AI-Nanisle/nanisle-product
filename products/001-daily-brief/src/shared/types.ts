@@ -2,8 +2,6 @@
 // (`brief:<date>`), served by GET /api/brief, rendered by the React app.
 // Shared between worker, pipeline and UI — keep it dependency-free.
 
-export type SectionKey = "headlines" | "ammo" | "learn";
-
 export interface BriefLink {
 	label: string;
 	url: string;
@@ -28,7 +26,7 @@ export interface BriefItem {
 	extras?: BriefLink[];
 	/** Doubts, caveats or disagreement present in the original — preserved, never flattened. */
 	caveat?: string;
-	/** "ammo" items only: which focus-list entry this relates to, and how (one clause). */
+	/** How this item relates to its tracker's question (one clause). */
 	relatesTo?: string;
 	/** When several sources covered the same event, the other reports merged into this item. */
 	mergedFrom?: BriefLink[];
@@ -44,8 +42,11 @@ export interface DroppedItem {
 }
 
 export interface BriefSection {
-	key: SectionKey;
+	/** Tracker key this section belongs to (built-ins use "headlines"/"learn"). */
+	key: string;
 	title: string;
+	/** Empty items[] means the tracker ran but found nothing today — the UI
+	 * still renders the section with a "no news" line, never hides it. */
 	items: BriefItem[];
 }
 
@@ -67,11 +68,15 @@ export interface Brief {
 	};
 	/** Number of sources fetched (for the header line). */
 	sourceCount: number;
-	/** True on the built-in sample served when KV has no data yet (mock/demo mode). */
-	sample?: boolean;
 }
 
-export type FeedbackKind = "up" | "down" | "text" | "want";
+/**
+ * Four one-click signals + free text + rescue-from-filtered:
+ * up/down = taste; known = right topic but stale (novelty signal, don't
+ * down-weight the topic); more = highest-quality positive signal, feeds the
+ * tracker's include-list; want = appeal from the filtered-out section.
+ */
+export type FeedbackKind = "up" | "down" | "known" | "more" | "text" | "want";
 
 export interface FeedbackEvent {
 	date: string;

@@ -9,7 +9,7 @@
  */
 
 import { XMLParser } from "fast-xml-parser";
-import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem, SectionKey } from "./types";
+import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem } from "./types";
 
 export const USER_AGENT =
 	"nanisle-001-daily-brief/0.1 (+https://github.com/AI-Nanisle/nanisle-product)";
@@ -37,9 +37,122 @@ export interface Filters {
 	noise_keywords: string[];
 }
 
+/** Legacy shape (v1 关注点). Kept only so stored configs migrate cleanly. */
 export interface FocusEntry {
 	name: string;
 	detail?: string;
+}
+
+export interface TrackerSourceRule {
+	/** Source this local rule belongs to. */
+	sourceKey: string;
+	/** Positive criteria that apply only inside this source. */
+	include?: string[];
+	/** Hard exclusions that apply only inside this source. */
+	exclude?: string[];
+}
+
+/**
+ * One clause of 「编辑的理解」. The user corrects a clause at a time — that is
+ * the whole point of showing the understanding instead of hiding it in a
+ * prompt — so each clause carries its own "the user rewrote this" mark.
+ */
+export interface IntentSegment {
+	text: string;
+	/** True once the user rewrote this clause; the dossier renders it in accent. */
+	edited?: boolean;
+}
+
+/** A line of a tracker's 变更记录 — newest first, capped by cleanTrackers. */
+export interface TrackerLogEntry {
+	/** ISO timestamp; the dossier renders MM-DD. */
+	at: string;
+	text: string;
+}
+
+/**
+ * A tracker is one long-term question the brief keeps watching — the unit the
+ * whole product revolves around (万物追踪-style). The definition fields below
+ * are the *visible, correctable* version of "what the editor thinks you
+ * want": the user edits the criteria, not the results.
+ */
+export interface Tracker {
+	/** Stable id — sections, feedback and quotas key on it. */
+	key: string;
+	/** Short display name; becomes the section title in the brief. */
+	name: string;
+	/** The long-term question in the user's own words. */
+	question?: string;
+	/** When that question was last written down (ISO) — dated in the dossier. */
+	askedAt?: string;
+	/** One-line restatement of the intent (AI-drafted later; hand-edited now). */
+	intent?: string;
+	/**
+	 * `intent` split into separately correctable clauses. `intent` stays the
+	 * joined string, so the editorial prompt and the chat agent never need to
+	 * know this field exists.
+	 */
+	intentSegments?: IntentSegment[];
+	/** Newest-first audit trail of definition edits — the dossier's 变更记录. */
+	changelog?: TrackerLogEntry[];
+	/** Legacy/global positive criteria. New UI prefers per-source rules. */
+	include?: string[];
+	/** Legacy/global negative criteria. New UI prefers per-source rules. */
+	exclude?: string[];
+	/** Whether this tracker watches the whole pool or only reviewed sources. */
+	sourceMode?: "all" | "selected";
+	/** Reviewed sources when sourceMode=selected. */
+	sourceKeys?: string[];
+	/** Source-scoped refinements: the same topic may be useful in one source and noise in another. */
+	sourceRules?: TrackerSourceRule[];
+	/** Verified candidates the user explicitly rejected for this tracker. */
+	rejectedSourceUrls?: string[];
+	/** Max items per issue for this tracker (1–3). */
+	quota: number;
+	/** Default true; false pauses the tracker without losing its definition. */
+	enabled?: boolean;
+	/** Ships with the product (今日大事/教我新东西). Informational only. */
+	builtin?: boolean;
+	/**
+	 * 向导草稿标记:有 stage 的追踪器还在三步向导里(刷新/换设备可续),
+	 * 不参与生成;「完成」时删掉该字段,追踪器才生效(docs/02 §7.1)。
+	 */
+	stage?: "understanding" | "tags" | "sources";
+}
+
+export const MAX_TRACKER_QUOTA = 3;
+/** The whole issue stays bounded no matter how many trackers exist. */
+export const TOTAL_ITEM_CAP = 10;
+/** 变更记录 is a recent-history strip, not an archive. */
+export const MAX_CHANGELOG = 20;
+/** How many clauses the editor's understanding may hold. */
+export const MAX_INTENT_SEGMENTS = 8;
+
+/**
+ * Clauses of the editor's understanding. Falls back to splitting a legacy
+ * one-line `intent` (also what happens after the chat agent rewrites it),
+ * so the dossier always has something to underline.
+ */
+export function trackerSegments(t: Tracker): IntentSegment[] {
+	if (t.intentSegments?.length) return t.intentSegments;
+	return (t.intent ?? "")
+		.split(/[;；]+/)
+		.map((s) => s.replace(/[。.]+$/, "").trim())
+		.filter(Boolean)
+		.slice(0, MAX_INTENT_SEGMENTS)
+		.map((text) => ({ text }));
+}
+
+/** The single-line form the editorial prompt consumes. */
+export function joinSegments(segments: IntentSegment[]): string {
+	return segments
+		.map((s) => s.text.trim())
+		.filter(Boolean)
+		.join(";");
+}
+
+export function focusEntryToTracker(f: FocusEntry): Tracker {
+	return { key: fnv1a(`focus:${f.name}`), name: f.name, question: f.detail ?? "", quota: 2 };
 }
 
 export interface Candidate {
@@ -246,58 +359,106 @@ export interface EditorialPick {
 }
 
 export interface EditorialResult {
-	sections: Record<SectionKey, EditorialPick[]>;
+	/** Tracker key → picks, in tracker order. */
+	sections: Record<string, EditorialPick[]>;
 	notableDrops: { id: string; reason: string }[];
 	droppedSummary: string;
 }
 
-export const QUOTAS: Record<SectionKey, number> = { headlines: 3, ammo: 3, learn: 2 };
-export const SECTION_TITLES: Record<SectionKey, string> = {
-	headlines: "今日大事",
-	ammo: "项目弹药",
-	learn: "教我新东西",
-};
+export function activeTrackers(trackers: Tracker[]): Tracker[] {
+	// 向导草稿(带 stage)不参与生成:定义还没确认完,不该按半成品选材
+	return trackers.filter((t) => t.enabled !== false && !t.stage);
+}
 
-export function mockEditorial(candidates: Candidate[]): EditorialResult {
-	const byCat = (cats: string[], n: number) =>
-		candidates.filter((c) => cats.includes(c.category)).slice(0, n);
-	const pick = (c: Candidate): EditorialPick => ({
-		id: c.id,
-		whyClick: `[mock] ${c.excerpt.slice(0, 120) || c.title}…(设 AI_PROVIDER=anthropic 或 gateway 获得真实编辑)`,
-	});
-	const sections: Record<SectionKey, EditorialPick[]> = {
-		headlines: byCat(["news", "macro"], QUOTAS.headlines).map(pick),
-		ammo: byCat(["blog"], QUOTAS.ammo).map((c) => ({ ...pick(c), relatesTo: "[mock] 示例关联" })),
-		learn: byCat(["podcast", "paper"], QUOTAS.learn).map(pick),
-	};
+/**
+ * No-AI stand-in: match each tracker's definition with dumb keyword search so
+ * the tracker → section shape is fully demoable before a real editor exists.
+ * A candidate goes to the first tracker (list order) that claims it.
+ */
+export function mockEditorial(candidates: Candidate[], trackers: Tracker[]): EditorialResult {
+	const used = new Set<string>();
+	const sections: Record<string, EditorialPick[]> = {};
+	for (const t of activeTrackers(trackers)) {
+		const include = (t.include ?? []).map((k) => k.toLowerCase()).filter(Boolean);
+		const exclude = (t.exclude ?? []).map((k) => k.toLowerCase()).filter(Boolean);
+		const matches = candidates.filter((c) => {
+			if (used.has(c.id)) return false;
+			if (t.sourceMode === "selected" && !(t.sourceKeys ?? []).includes(c.sourceKey)) return false;
+			const hay = `${c.title} ${c.excerpt}`.toLowerCase();
+			const sourceRule = t.sourceRules?.find((rule) => rule.sourceKey === c.sourceKey);
+			const localInclude = (sourceRule?.include ?? []).map((k) => k.toLowerCase()).filter(Boolean);
+			const localExclude = (sourceRule?.exclude ?? []).map((k) => k.toLowerCase()).filter(Boolean);
+			if ([...exclude, ...localExclude].some((k) => hay.includes(k))) return false;
+			if (localInclude.length > 0) return localInclude.some((k) => hay.includes(k));
+			if (include.length > 0) return include.some((k) => hay.includes(k));
+			// Definition-less trackers fall back to category heuristics so the
+			// built-ins still fill up out of the box.
+			if (t.key === "headlines") return c.category === "news" || c.category === "macro";
+			if (t.key === "learn") return c.category === "podcast" || c.category === "paper";
+			return c.category === "blog";
+		});
+		sections[t.key] = matches.slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA)).map((c) => {
+			used.add(c.id);
+			return {
+				id: c.id,
+				whyClick: `[mock] ${c.excerpt.slice(0, 120) || c.title}…(设 AI_PROVIDER=anthropic 或 gateway 获得真实编辑)`,
+				...(include.length > 0 ? { relatesTo: `[mock] 命中关键词` } : {}),
+			};
+		});
+	}
 	return {
 		sections,
 		notableDrops: [],
-		droppedSummary: `[mock] 无 AI 模式:按类别取了前几条,其余 ${candidates.length} 条候选未经编辑筛选。`,
+		droppedSummary: `[mock] 无 AI 模式:按追踪器定义做了关键词粗配,其余 ${candidates.length - used.size} 条候选未经编辑筛选。`,
 	};
 }
 
 export function buildEditorialPrompt(
 	candidates: Candidate[],
-	focus: FocusEntry[],
+	trackers: Tracker[],
 ): { system: string; user: string } {
 	const system = `你是一份个人每日简报的编辑。简报的哲学:它是当天信息的路由器,不是内容的终点。每条入选内容的任务是帮读者在 10 秒内决定"点进原文还是划过",绝不替读者把原文读完。
+
+读者维护了一组「追踪器」——每个追踪器是一个长期问题,带显式的选材定义(收什么/不收什么/优先信源)。你的任务是把今天的候选分给各追踪器,严格按定义选材。
 
 硬规则:
 1. whyClick 只回答"为什么值得点进去花 10 分钟",1-2 句;禁止复述原文内容梗概。
 2. 你写的每个字都必须有 excerpt 依据。excerpt 里没有的事实、数字、结论,一个都不许出现。
 3. caveat 字段:只有当 excerpt 里作者自己表达了限定、存疑、反方观点时才填,原样保留其怀疑;没有就省略。禁止自己编一个平衡观点。
-4. 每个分区宁缺毋滥:没有够格的候选就少选,不许凑数。
-5. 同一事件被多个源报道时,选最好的一篇为主,其余放进 merged。
-6. related 用于"拓展阅读":只能引用候选列表里的其他 id,不许出现任何列表外的链接或 id。
-7. ammo 区(项目弹药)的每条必须写 relatesTo:具体到关注点清单里的哪一条、什么关系。写不出具体关系就不选。
-8. 输出简体中文。只输出 JSON,不要任何其他文字。`;
+4. 每个追踪器宁缺毋滥:没有够格的候选就返回空数组,不许凑数。空着是正常结果,页面会显示「今天没有新内容」。
+5. 追踪器的「不收」列表是硬性排除——命中就绝对不选,这是读者明确拒绝过的内容。
+6. 同一事件被多个源报道时,选最好的一篇为主,其余放进 merged。
+7. related 用于"拓展阅读":只能引用候选列表里的其他 id,不许出现任何列表外的链接或 id。
+8. 每条写 relatesTo:一小句说明它和这个追踪器的问题是什么关系;内置追踪器(headlines/learn)可省略。
+9. 全刊总条数不超过 ${TOTAL_ITEM_CAP} 条:如果各追踪器合计超了,砍掉相对最弱的,把它们放进 notableDrops 并注明。
+10. 输出简体中文。只输出 JSON,不要任何其他文字。`;
 
-	const focusText = focus.map((f) => `- ${f.name}${f.detail ? `:${f.detail}` : ""}`).join("\n");
+	const trackerText = activeTrackers(trackers)
+		.map((t) => {
+			const lines = [`- key=${t.key} 「${t.name}」(每期最多 ${Math.min(t.quota, MAX_TRACKER_QUOTA)} 条)`];
+			if (t.question) lines.push(`  问题原话:${t.question}`);
+			if (t.intent) lines.push(`  意图:${t.intent}`);
+			if (t.include?.length) lines.push(`  全局收:${t.include.join("、")}`);
+			if (t.exclude?.length) lines.push(`  全局不收(硬排除):${t.exclude.join("、")}`);
+			if (t.sourceMode === "selected") {
+				lines.push(`  已确认信源 key:${(t.sourceKeys ?? []).join(", ") || "(尚未确认任何来源)"}`);
+			} else {
+				lines.push("  信源范围:全部已启用来源");
+			}
+			for (const rule of t.sourceRules ?? []) {
+				const parts = [];
+				if (rule.include?.length) parts.push(`只收:${rule.include.join("、")}`);
+				if (rule.exclude?.length) parts.push(`不收:${rule.exclude.join("、")}`);
+				if (parts.length) lines.push(`  来源 ${rule.sourceKey} 的局部规则:${parts.join(";")}`);
+			}
+			return lines.join("\n");
+		})
+		.join("\n");
 	const candidateText = JSON.stringify(
 		candidates.map((c) => ({
 			id: c.id,
 			source: c.source,
+			sourceKey: c.sourceKey,
 			category: c.category,
 			title: c.title,
 			publishedAt: c.publishedAt,
@@ -305,23 +466,16 @@ export function buildEditorialPrompt(
 		})),
 	);
 
-	const user = `读者的当前关注点清单:
-${focusText}
-
-分区与配额:
-- headlines(今日大事):当天真正重要的行业事件、宏观数据发布,最多 ${QUOTAS.headlines} 条
-- ammo(项目弹药):与关注点清单直接相关、看完能行动的内容,最多 ${QUOTAS.ammo} 条
-- learn(教我新东西):论文、深度内容,允许与当下关注无关但必须说清"新在哪",最多 ${QUOTAS.learn} 条
+	const user = `读者的追踪器(sections 的 key 必须逐一对应这里的 key):
+${trackerText}
 
 今天的候选(共 ${candidates.length} 条):
 ${candidateText}
 
-返回这个结构的 JSON:
+返回这个结构的 JSON(sections 里每个追踪器 key 都要出现,没有合格候选就给空数组):
 {
   "sections": {
-    "headlines": [{"id": "...", "whyClick": "...", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}],
-    "ammo": [{"id": "...", "whyClick": "...", "relatesTo": "关注点名:具体关系", "related": []}],
-    "learn": [{"id": "...", "whyClick": "...", "caveat": "可选"}]
+    "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
   },
   "notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
   "droppedSummary": "一句话:今天筛掉的主要是什么"
@@ -329,14 +483,18 @@ ${candidateText}
 	return { system, user };
 }
 
-export function parseEditorialJson(raw: string): EditorialResult {
+export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialResult {
 	const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
 	const parsed = JSON.parse(cleaned) as EditorialResult;
 	parsed.notableDrops ??= [];
 	parsed.droppedSummary ??= "";
-	for (const key of Object.keys(QUOTAS) as SectionKey[]) {
-		parsed.sections[key] = (parsed.sections[key] ?? []).slice(0, QUOTAS[key]);
+	// Keep only known trackers, clamp per-tracker quotas; unknown keys from the
+	// model are dropped, never invented into sections.
+	const sections: Record<string, EditorialPick[]> = {};
+	for (const t of activeTrackers(trackers)) {
+		sections[t.key] = (parsed.sections?.[t.key] ?? []).slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA));
 	}
+	parsed.sections = sections;
 	return parsed;
 }
 
@@ -361,6 +519,7 @@ export async function findHnDiscussion(url: string): Promise<string | undefined>
 export interface AssembleOptions {
 	date: string;
 	sourceCount: number;
+	trackers: Tracker[];
 	/** HN lookups cost one subrequest per item — callers can turn them off. */
 	lookupDiscussions?: boolean;
 }
@@ -373,13 +532,23 @@ export async function assembleBrief(
 	const byId = new Map(fetched.candidates.map((c) => [c.id, c]));
 	const usedIds = new Set<string>();
 	const sections: BriefSection[] = [];
+	// "超出额度" drops carry their own reason so the accountability section can
+	// tell "not good enough" apart from "good but the issue was full".
+	const overflowDrops = new Map<string, string>();
+	let total = 0;
 
-	for (const key of ["headlines", "ammo", "learn"] as SectionKey[]) {
+	for (const t of activeTrackers(opts.trackers)) {
 		const items: BriefItem[] = [];
-		for (const pick of editorial.sections[key] ?? []) {
+		for (const pick of editorial.sections[t.key] ?? []) {
 			const cand = byId.get(pick.id);
 			if (!cand || usedIds.has(pick.id)) continue; // unknown/duplicate id from the model — drop, never invent
+			if (total >= TOTAL_ITEM_CAP) {
+				usedIds.add(pick.id);
+				overflowDrops.set(pick.id, `入选了但超出今日额度(全刊 ≤${TOTAL_ITEM_CAP} 条)`);
+				continue;
+			}
 			usedIds.add(pick.id);
+			total++;
 			const mergedFrom: BriefLink[] = [];
 			for (const mid of pick.merged ?? []) {
 				const m = byId.get(mid);
@@ -406,20 +575,27 @@ export async function assembleBrief(
 				...(mergedFrom.length ? { mergedFrom } : {}),
 			});
 		}
-		sections.push({ key, title: SECTION_TITLES[key], items });
+		// Empty sections stay in: "the radar swept and found nothing" is part
+		// of the product's accountability, not something to hide.
+		sections.push({ key: t.key, title: t.name, items });
 	}
 
 	const dropReasons = new Map(editorial.notableDrops.map((d) => [d.id, d.reason]));
+	const pickedIds = new Set(sections.flatMap((s) => s.items.map((i) => i.id)));
 	const unselected: DroppedItem[] = fetched.candidates
-		.filter((c) => !usedIds.has(c.id))
+		.filter((c) => !pickedIds.has(c.id) && !usedIds.has(c.id))
 		.map((c) => ({
 			id: c.id,
 			title: c.title,
 			url: c.url,
 			source: c.source,
-			reason: dropReasons.get(c.id) ?? "未过入选线(每区配额有限)",
+			reason: dropReasons.get(c.id) ?? "未过入选线(各追踪器配额有限)",
 		}));
-	const filteredItems = [...unselected, ...fetched.ruleDropped].slice(0, 100);
+	const overflow: DroppedItem[] = [...overflowDrops].map(([id, reason]) => {
+		const c = byId.get(id)!;
+		return { id, title: c.title, url: c.url, source: c.source, reason };
+	});
+	const filteredItems = [...overflow, ...unselected, ...fetched.ruleDropped].slice(0, 100);
 
 	return {
 		date: opts.date,
@@ -427,8 +603,8 @@ export async function assembleBrief(
 		sections,
 		filteredOut: {
 			scanned: fetched.scanned,
-			dropped: fetched.scanned - usedIds.size,
-			summary: editorial.droppedSummary || `扫描 ${fetched.scanned} 条,入选 ${usedIds.size} 条。`,
+			dropped: Math.max(0, fetched.scanned - total),
+			summary: editorial.droppedSummary || `扫描 ${fetched.scanned} 条,入选 ${total} 条。`,
 			items: filteredItems,
 		},
 		sourceCount: opts.sourceCount,

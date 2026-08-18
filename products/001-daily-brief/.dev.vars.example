@@ -2,32 +2,46 @@
 # reads is listed here — worker vars and pipeline vars share this file.
 
 # --- worker (npm run dev) ---
-# AI seam mode: mock (default, zero keys) | anthropic | gateway
+# AI seam mode: deepseek (production default) | mock (zero keys) | anthropic | gateway.
+# deepseek without DEEPSEEK_API_KEY falls back to mock, so local dev needs no keys.
 AI_PROVIDER=mock
-AI_MODEL=claude-opus-5
-AI_MAX_OUTPUT_TOKENS=1024
+#AI_MODEL=deepseek-chat
+AI_MAX_OUTPUT_TOKENS=4096
 # Shared with the nanisle main site: verifies SSO handoff tokens so readers can
 # sign in with their nanisle account. Leave unset locally for open access.
 #NANISLE_SSO_SECRET=same-value-as-main-site
 # Where the lock screen sends readers to sign in (default https://nanisle.com)
 #NANISLE_URL=http://localhost:3000
-# Canonical browser mount. Vite serves the app below this path locally too.
-APP_URL=http://localhost:5199/products/daily-brief
-# Owner credential: gates /api/generate and config writes; also a reader
+# Canonical browser mount. Local dev goes through the main site's `next dev`
+# proxy, so the browser (and every redirect this app issues, e.g. after SSO)
+# must stay on :3000 — 5199 is only the internal Vite port.
+APP_URL=http://localhost:3000/products/daily-brief
+# Standalone dev without the main site running: browse Vite directly instead.
+#APP_URL=http://localhost:5199/products/daily-brief
+# Admin credential (x-access-code): manual full-run trigger; also a reader
 # fallback for self-hosted instances. Leave unset locally for open access.
 #ACCESS_CODE=change-me
-# Required by POST /api/ingest — the pipeline pushes briefs with it.
-#INGEST_TOKEN=change-me-too
+
+# --- AWS store + generate Lambda (production; cdk stack lives in the main repo's infra/) ---
+# Leave ALL of these unset locally: the store falls back to KV with a single
+# dev@local user, and generate falls back to the in-Worker mock path.
+#AWS_ACCESS_KEY_ID=AKIA...
+#AWS_SECRET_ACCESS_KEY=...
+#AWS_REGION=us-east-1
+#DDB_TABLE=nanisle-daily-brief
+# The generate Lambda's Function URL (the GenerateFunctionUrl output of `cdk deploy`):
+#GENERATE_URL=https://xxxx.lambda-url.us-east-1.on.aws/
+
+# AI_PROVIDER=deepseek only (the production default):
+#DEEPSEEK_API_KEY=sk-...
 # AI_PROVIDER=anthropic only:
 #ANTHROPIC_API_KEY=sk-ant-...
 # AI_PROVIDER=gateway only:
 #AI_GATEWAY_URL=https://your-gateway.example.com
 #AI_GATEWAY_KEY=vk-...
 
-# --- pipeline (npm run generate) ---
+# --- pipeline (npm run generate, 本地调试用;生产入口是 pipeline/lambda.ts) ---
 # The pipeline reads this same file. Extra pipeline-only knobs:
-# Where to push the generated brief (omit both to only write pipeline/out/):
-#INGEST_URL=https://nanisle-001-daily-brief.<account>.workers.dev
 # Timezone that defines "today" for the brief:
 #BRIEF_TZ=America/New_York
 # Override the focus file path (default: focus.yaml, falling back to focus.example.yaml):

@@ -29,7 +29,7 @@ Anti-fabrication by construction: the model only returns candidate ids and text 
 
 ```bash
 npm install
-npm run dev        # reading page at localhost:5173 with a built-in sample brief (mock, zero keys)
+npm run dev        # reading page at localhost:5199 with a built-in sample brief (mock, zero keys)
 npm run generate   # fetch real feeds → pipeline/out/brief-<date>.json (mock editorial without a key)
 ```
 

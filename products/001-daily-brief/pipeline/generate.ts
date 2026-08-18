@@ -1,32 +1,31 @@
 /**
- * CLI wrapper around the shared generation core (src/shared/pipeline-core.ts).
- * The web UI's POST /api/generate is the primary path; this CLI exists for
- * local runs, cron on a VM, or CI:
+ * 本地调试用的生成 CLI —— 生产入口是 lambda.ts(定时全量 + Worker 转调的
+ * 立即生成),这里只为在本机快速验证抓取与编辑质量(尤其是换模对照):
  *
  *   npm run generate
  *
  * Config: sources.yaml / focus.yaml when present, otherwise the same
- * defaults the worker seeds from. Output: pipeline/out/brief-<date>.json,
- * plus POST /api/ingest when INGEST_URL + INGEST_TOKEN are set.
+ * defaults the worker seeds from. Output: pipeline/out/brief-<date>.json —
+ * 只写文件,不再推送任何远端(旧 /api/ingest 通道已随多用户版退役)。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import Anthropic from "@anthropic-ai/sdk";
-import type { Brief } from "../src/shared/types.ts";
 import {
-	USER_AGENT,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
 	fetchAllSources,
+	focusEntryToTracker,
 	mockEditorial,
 	parseEditorialJson,
 } from "../src/shared/pipeline-core.ts";
-import type { Filters, FocusEntry, SourceConfig } from "../src/shared/pipeline-core.ts";
-import { DEFAULT_FILTERS, DEFAULT_FOCUS, DEFAULT_SOURCES } from "../src/shared/default-sources.ts";
+import type { Filters, FocusEntry, SourceConfig, Tracker } from "../src/shared/pipeline-core.ts";
+import { BUILTIN_TRACKERS, DEFAULT_FILTERS, DEFAULT_SOURCES, DEFAULT_TRACKERS } from "../src/shared/default-sources.ts";
+import { complete, resolveProvider } from "../src/shared/ai.ts";
+import type { AiConfig } from "../src/shared/ai.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -39,7 +38,7 @@ function loadDevVars(): void {
 	}
 }
 
-function loadConfig(): { sources: SourceConfig[]; filters: Filters; focus: FocusEntry[] } {
+function loadConfig(): { sources: SourceConfig[]; filters: Filters; trackers: Tracker[] } {
 	let sources = DEFAULT_SOURCES;
 	let filters = DEFAULT_FILTERS;
 	const sourcesPath = join(ROOT, "sources.yaml");
@@ -55,7 +54,9 @@ function loadConfig(): { sources: SourceConfig[]; filters: Filters; focus: Focus
 		console.log(`[config] built-in defaults: ${sources.length} sources`);
 	}
 
-	let focus = DEFAULT_FOCUS;
+	// A legacy focus.yaml still works: entries become plain trackers next to
+	// the built-in 今日大事/教我新东西. Without one, the shared defaults apply.
+	let trackers = DEFAULT_TRACKERS;
 	const focusPath = process.env.FOCUS_FILE
 		? join(ROOT, process.env.FOCUS_FILE)
 		: existsSync(join(ROOT, "focus.yaml"))
@@ -64,64 +65,28 @@ function loadConfig(): { sources: SourceConfig[]; filters: Filters; focus: Focus
 				? join(ROOT, "focus.example.yaml")
 				: null;
 	if (focusPath) {
-		focus = (parseYaml(readFileSync(focusPath, "utf8")) as { focus: FocusEntry[] }).focus ?? [];
-		console.log(`[config] focus: ${focusPath}`);
+		const focus = (parseYaml(readFileSync(focusPath, "utf8")) as { focus: FocusEntry[] }).focus ?? [];
+		trackers = [...BUILTIN_TRACKERS, ...focus.map(focusEntryToTracker)];
+		console.log(`[config] focus (legacy → trackers): ${focusPath}`);
 	}
-	return { sources, filters, focus };
+	return { sources, filters, trackers };
 }
 
-async function llmEditorial(candidates: Parameters<typeof buildEditorialPrompt>[0], focus: FocusEntry[]) {
-	const provider = (process.env.AI_PROVIDER ?? "mock").toLowerCase();
-	const model = process.env.AI_MODEL ?? "claude-opus-5";
-	let client: Anthropic;
-	if (provider === "gateway") {
-		if (!process.env.AI_GATEWAY_URL || !process.env.AI_GATEWAY_KEY) {
-			throw new Error("gateway mode needs AI_GATEWAY_URL and AI_GATEWAY_KEY");
-		}
-		client = new Anthropic({ baseURL: process.env.AI_GATEWAY_URL, authToken: process.env.AI_GATEWAY_KEY });
-	} else {
-		if (!process.env.ANTHROPIC_API_KEY) {
-			throw new Error("anthropic mode needs ANTHROPIC_API_KEY (or use AI_PROVIDER=mock)");
-		}
-		client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-	}
-
-	const { system, user } = buildEditorialPrompt(candidates, focus);
-	console.log(`[editorial] asking ${model} to pick from ${candidates.length} candidates…`);
-	const message = await client.messages.create({
-		model,
-		max_tokens: 4096,
-		system,
-		messages: [{ role: "user", content: user }],
-	});
-	if (message.stop_reason === "refusal") throw new Error("model declined the editorial request");
-	const raw = message.content
-		.filter((b) => b.type === "text")
-		.map((b) => b.text)
-		.join("");
-	return parseEditorialJson(raw);
-}
-
-async function pushToWorker(brief: Brief): Promise<void> {
-	const url = process.env.INGEST_URL;
-	const token = process.env.INGEST_TOKEN;
-	if (!url || !token) {
-		console.log("[push] INGEST_URL/INGEST_TOKEN not set — skipping push (file output only)");
-		return;
-	}
-	const res = await fetch(`${url.replace(/\/$/, "")}/api/ingest`, {
-		method: "POST",
-		headers: { "content-type": "application/json", "x-ingest-token": token, "user-agent": USER_AGENT },
-		body: JSON.stringify(brief),
-		signal: AbortSignal.timeout(30_000),
-	});
-	if (!res.ok) throw new Error(`ingest failed: HTTP ${res.status} ${await res.text()}`);
-	console.log(`[push] ingested to ${url} (${brief.date})`);
+function envAiConfig(): AiConfig {
+	return {
+		provider: process.env.AI_PROVIDER,
+		model: process.env.AI_MODEL,
+		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "4096",
+		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+		anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+		gatewayUrl: process.env.AI_GATEWAY_URL,
+		gatewayKey: process.env.AI_GATEWAY_KEY,
+	};
 }
 
 async function main(): Promise<void> {
 	loadDevVars();
-	const { sources, filters, focus } = loadConfig();
+	const { sources, filters, trackers } = loadConfig();
 	const fetched = await fetchAllSources(sources, filters, (m) => console.log(m));
 	console.log(
 		`[filter] ${fetched.scanned} scanned → ${fetched.candidates.length} candidates (${fetched.ruleDropped.length} rule-dropped, ${fetched.sourcesOk} sources ok)`,
@@ -130,13 +95,24 @@ async function main(): Promise<void> {
 		throw new Error("no candidates survived filtering — check feeds/network before shipping an empty brief");
 	}
 
-	const provider = (process.env.AI_PROVIDER ?? "mock").toLowerCase();
-	const editorial =
-		provider === "mock" ? mockEditorial(fetched.candidates) : await llmEditorial(fetched.candidates, focus);
+	// 编辑调用走 shared/ai.ts 的接缝——和 Lambda 生产路径同一段代码,本地拿
+	// 真 key 验证的就是生产会用的那条链路(deepseek / anthropic / gateway)。
+	const cfg = envAiConfig();
+	const provider = resolveProvider(cfg);
+	let editorial;
+	if (provider === "mock") {
+		editorial = mockEditorial(fetched.candidates, trackers);
+	} else {
+		const { system, user } = buildEditorialPrompt(fetched.candidates, trackers);
+		console.log(`[editorial] asking ${provider}/${cfg.model ?? "(default model)"} to pick from ${fetched.candidates.length} candidates…`);
+		const result = await complete(cfg, { prompt: user, system, json: true });
+		editorial = parseEditorialJson(result.text, trackers);
+	}
 
 	const brief = await assembleBrief(editorial, fetched, {
 		date: process.env.BRIEF_DATE ?? briefDate(process.env.BRIEF_TZ ?? "America/New_York"),
 		sourceCount: fetched.sourcesOk,
+		trackers,
 	});
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
 	console.log(`[assemble] ${picked} items across ${brief.sections.length} sections for ${brief.date}`);
@@ -146,8 +122,6 @@ async function main(): Promise<void> {
 	const outPath = join(outDir, `brief-${brief.date}.json`);
 	writeFileSync(outPath, JSON.stringify(brief, null, "\t"), "utf8");
 	console.log(`[write] ${outPath}`);
-
-	await pushToWorker(brief);
 }
 
 main().catch((err) => {

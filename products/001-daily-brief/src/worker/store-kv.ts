@@ -1,0 +1,107 @@
+// B3 · Store 的 KV 替身实现(docs/02-技术方案.md §4.3)。本地 dev / fork 用:
+// 未配 AWS 凭证时自动选它,配合固定用户 dev@local 跑单用户模式——公开仓的
+// 零配置规矩靠它保住。键语义与 store-dynamo.ts 逐一对齐,只是换了介质;
+// miniflare 本地有持久化,开发体验不降级。
+//
+// 键约定(全部带用户前缀,和旧版的全局键 config:*/brief:* 彻底分开):
+//   user:<email>:config           配置整存整取
+//   user:<email>:brief:<date>     每日简报 {brief, generatedAt, genCount}
+//   user:<email>:fb:<ts>:<uuid>   反馈事件(expirationTtl 90 天)
+//   user:<email>:click:<ts>:<uuid> 点击事件(同上)
+
+import type { Brief } from "../shared/types";
+import type { Store, StoredBrief } from "../shared/store";
+import { EVENT_TTL_S } from "../shared/store";
+import { dynamoStore } from "../shared/store-dynamo";
+import type { AppEnv } from "./env";
+
+export function kvStore(kv: KVNamespace): Store {
+	const briefKey = (email: string, date: string) => `user:${email}:brief:${date}`;
+
+	async function listDates(email: string): Promise<string[]> {
+		const prefix = `user:${email}:brief:`;
+		// KV list 按键名字典序升序;日期字符串字典序即时间序,反转即倒序。
+		// 单用户本地库,一页 1000 个键绰绰有余。
+		const list = await kv.list({ prefix, limit: 1000 });
+		return list.keys.map((k) => k.name.slice(prefix.length)).reverse();
+	}
+
+	return {
+		// KV 模式没有白名单:它只在本地 dev / fork 里出现,准入交给 userGuard
+		// 的零配置回落(所有人都是 dev@local 或持有效会话的自己)。
+		async isWhitelisted() {
+			return true;
+		},
+
+		async listWhitelist() {
+			// 定时全量只在 Lambda(必有 DynamoDB)里跑,这里只为接口完整
+			return [];
+		},
+
+		async getConfig(email) {
+			const raw = await kv.get(`user:${email}:config`);
+			return raw ? JSON.parse(raw) : null;
+		},
+
+		async putConfig(email, config) {
+			await kv.put(`user:${email}:config`, JSON.stringify(config));
+		},
+
+		async getBrief(email, date) {
+			let key: string | null = null;
+			if (date) {
+				key = briefKey(email, date);
+			} else {
+				const dates = await listDates(email);
+				if (dates.length > 0) key = briefKey(email, dates[0]);
+			}
+			if (!key) return null;
+			const raw = await kv.get(key);
+			return raw ? (JSON.parse(raw) as StoredBrief) : null;
+		},
+
+		async putBrief(email, brief: Brief, bumpGenCount) {
+			// 单用户本地库,读改写没有并发问题;原子性只有 DynamoDB 实现需要保证
+			const existing = await this.getBrief(email, brief.date);
+			const genCount = (existing?.genCount ?? 0) + (bumpGenCount ? 1 : 0);
+			const stored: StoredBrief = { brief, generatedAt: brief.generatedAt, genCount };
+			await kv.put(briefKey(email, brief.date), JSON.stringify(stored));
+			return genCount;
+		},
+
+		async appendEvent(email, ev) {
+			const kind = "kind" in ev ? "fb" : "click";
+			await kv.put(`user:${email}:${kind}:${ev.at}:${crypto.randomUUID()}`, JSON.stringify(ev), {
+				expirationTtl: EVENT_TTL_S,
+			});
+		},
+
+		async listBriefDates(email) {
+			return listDates(email);
+		},
+	};
+}
+
+/** Worker 里有没有一套完整的 AWS 侧配置(store 与 Lambda 转调共用这组判断)。 */
+export function awsConfigured(env: AppEnv): boolean {
+	return Boolean(env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY && env.DDB_TABLE);
+}
+
+/**
+ * 选择逻辑(§4.3):配了 AWS 凭证 → DynamoDB(生产),否则 KV 替身(dev/fork)。
+ * 每请求现建一个,无状态、零网络开销。
+ */
+export function makeStore(env: AppEnv): { store: Store; mode: "dynamo" | "kv" } {
+	if (awsConfigured(env)) {
+		return {
+			mode: "dynamo",
+			store: dynamoStore({
+				table: env.DDB_TABLE!,
+				region: env.AWS_REGION ?? "us-east-1",
+				accessKeyId: env.AWS_ACCESS_KEY_ID!,
+				secretAccessKey: env.AWS_SECRET_ACCESS_KEY!,
+			}),
+		};
+	}
+	return { mode: "kv", store: kvStore(env.BRIEFS) };
+}

@@ -1,32 +1,53 @@
-// Config storage + validation, shared by the REST handlers (PUT /api/sources,
-// PUT /api/focus) and the chat agent's tools — one set of rules, two entrances.
+// Config validation + per-user persistence, shared by the REST handlers
+// (PUT /api/sources, PUT /api/trackers) and the chat agent's tools — one set
+// of rules, two entrances. 存取一律经 Store 按会话邮箱隔离(docs/02 §4)。
 
-import { SOURCE_CATEGORIES, fnv1a } from "../shared/pipeline-core";
-import type { FocusEntry, SourceConfig } from "../shared/pipeline-core";
-import { DEFAULT_FOCUS, DEFAULT_SOURCES } from "../shared/default-sources";
-import type { AppEnv } from "./env";
+import {
+	MAX_CHANGELOG,
+	MAX_INTENT_SEGMENTS,
+	MAX_TRACKER_QUOTA,
+	SOURCE_CATEGORIES,
+	fnv1a,
+	joinSegments,
+} from "../shared/pipeline-core.ts";
+import type {
+	IntentSegment,
+	SourceConfig,
+	Tracker,
+	TrackerLogEntry,
+	TrackerSourceRule,
+} from "../shared/pipeline-core";
+import { BUILTIN_TRACKERS, DEFAULT_SOURCES } from "../shared/default-sources.ts";
+import type { Store, UserConfig } from "../shared/store";
 
 export const MAX_SOURCES = 50;
-export const MAX_FOCUS = 20;
+export const MAX_TRACKERS = 12;
 
-export async function getSources(env: AppEnv): Promise<SourceConfig[]> {
-	const raw = await env.BRIEFS.get("config:sources");
-	if (raw) return JSON.parse(raw) as SourceConfig[];
-	return DEFAULT_SOURCES;
+/**
+ * 读某人的配置;CONFIG 条目不存在时现场种一条(内置追踪器 + 默认源的深拷贝)
+ * 并落库。种子逻辑放在读路径而不是登录回调上,fork 本地零配置也能自然触发。
+ * 深拷贝是必须的:调用方会原地 push/改字段,不能把模块级默认数组交出去。
+ */
+export async function loadConfig(store: Store, email: string): Promise<UserConfig> {
+	const existing = await store.getConfig(email);
+	if (existing) return existing;
+	const seeded: UserConfig = {
+		trackers: structuredClone(BUILTIN_TRACKERS),
+		sources: structuredClone(DEFAULT_SOURCES),
+		updatedAt: new Date().toISOString(),
+	};
+	await store.putConfig(email, seeded);
+	return seeded;
 }
 
-export async function getFocus(env: AppEnv): Promise<FocusEntry[]> {
-	const raw = await env.BRIEFS.get("config:focus");
-	if (raw) return JSON.parse(raw) as FocusEntry[];
-	return DEFAULT_FOCUS;
+export async function saveSources(store: Store, email: string, sources: SourceConfig[]): Promise<void> {
+	const config = await loadConfig(store, email);
+	await store.putConfig(email, { ...config, sources, updatedAt: new Date().toISOString() });
 }
 
-export async function saveSources(env: AppEnv, sources: SourceConfig[]): Promise<void> {
-	await env.BRIEFS.put("config:sources", JSON.stringify(sources));
-}
-
-export async function saveFocus(env: AppEnv, focus: FocusEntry[]): Promise<void> {
-	await env.BRIEFS.put("config:focus", JSON.stringify(focus));
+export async function saveTrackers(store: Store, email: string, trackers: Tracker[]): Promise<void> {
+	const config = await loadConfig(store, email);
+	await store.putConfig(email, { ...config, trackers, updatedAt: new Date().toISOString() });
 }
 
 export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { error: string } {
@@ -55,16 +76,107 @@ export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { erro
 	return { sources: cleaned };
 }
 
-export function cleanFocus(raw: unknown): { focus: FocusEntry[] } | { error: string } {
-	if (!Array.isArray(raw) || raw.length > MAX_FOCUS) {
-		return { error: `focus must be an array (max ${MAX_FOCUS})` };
+function cleanKeywordList(raw: unknown, max = 12): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const list = raw
+		.filter((k): k is string => typeof k === "string")
+		.map((k) => k.trim().slice(0, 40))
+		.filter(Boolean)
+		.slice(0, max);
+	return list.length > 0 ? list : undefined;
+}
+
+function cleanSegments(raw: unknown): IntentSegment[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const list: IntentSegment[] = [];
+	for (const s of raw.slice(0, MAX_INTENT_SEGMENTS) as Record<string, unknown>[]) {
+		const text = typeof s?.text === "string" ? s.text.trim().slice(0, 200) : "";
+		if (text) list.push({ text, ...(s.edited === true ? { edited: true } : {}) });
 	}
-	const cleaned: FocusEntry[] = [];
-	for (const f of raw as Record<string, unknown>[]) {
-		const name = typeof f.name === "string" ? f.name.trim() : "";
-		if (!name || name.length > 100) return { error: "every focus entry needs a name (≤100 chars)" };
-		const detail = typeof f.detail === "string" ? f.detail.trim().slice(0, 500) : undefined;
-		cleaned.push({ name, ...(detail ? { detail } : {}) });
+	return list.length > 0 ? list : undefined;
+}
+
+/** Client-written history. Trusted enough to store, not enough to skip trimming. */
+function cleanChangelog(raw: unknown): TrackerLogEntry[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const list: TrackerLogEntry[] = [];
+	for (const e of raw.slice(0, MAX_CHANGELOG) as Record<string, unknown>[]) {
+		const at = typeof e?.at === "string" ? e.at.trim().slice(0, 40) : "";
+		const text = typeof e?.text === "string" ? e.text.trim().slice(0, 160) : "";
+		if (at && text) list.push({ at, text });
 	}
-	return { focus: cleaned };
+	return list.length > 0 ? list : undefined;
+}
+
+export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: string } {
+	if (!Array.isArray(raw) || raw.length > MAX_TRACKERS) {
+		return { error: `trackers must be an array (max ${MAX_TRACKERS})` };
+	}
+	const cleaned: Tracker[] = [];
+	const seen = new Set<string>();
+	for (const [i, t] of (raw as Record<string, unknown>[]).entries()) {
+		const name = typeof t.name === "string" ? t.name.trim() : "";
+		if (!name || name.length > 60) return { error: `tracker #${i + 1}: name required (≤60 chars)` };
+		let key = typeof t.key === "string" && t.key.trim() ? t.key.trim().slice(0, 64) : fnv1a(`tracker:${name}:${i}`);
+		if (seen.has(key)) key = fnv1a(`${key}:${i}`);
+		seen.add(key);
+		const quotaRaw = typeof t.quota === "number" ? Math.floor(t.quota) : 2;
+		const quota = Math.min(Math.max(quotaRaw, 1), MAX_TRACKER_QUOTA);
+		const question = typeof t.question === "string" ? t.question.trim().slice(0, 500) : undefined;
+		const askedAt = typeof t.askedAt === "string" ? t.askedAt.trim().slice(0, 40) : undefined;
+		const intentSegments = cleanSegments(t.intentSegments);
+		// The chat agent only knows about `intent`; when it rewrites the line the
+		// stale clauses are gone and the dossier re-splits from the new text.
+		const intentRaw = typeof t.intent === "string" ? t.intent.trim().slice(0, 400) : undefined;
+		const intent = intentRaw ?? (intentSegments ? joinSegments(intentSegments).slice(0, 400) : undefined);
+		const changelog = cleanChangelog(t.changelog);
+		const include = cleanKeywordList(t.include);
+		const exclude = cleanKeywordList(t.exclude);
+		const sourceKeys = Array.isArray(t.sourceKeys)
+			? [...new Set((t.sourceKeys as unknown[]).filter((k): k is string => typeof k === "string"))].slice(0, MAX_SOURCES)
+			: undefined;
+		const sourceMode = t.sourceMode === "selected" || sourceKeys ? "selected" : "all";
+		const sourceRules: TrackerSourceRule[] = [];
+		if (Array.isArray(t.sourceRules)) {
+			for (const rawRule of (t.sourceRules as Record<string, unknown>[]).slice(0, MAX_SOURCES)) {
+				const sourceKey = typeof rawRule.sourceKey === "string" ? rawRule.sourceKey.trim().slice(0, 64) : "";
+				if (!sourceKey || sourceRules.some((rule) => rule.sourceKey === sourceKey)) continue;
+				const localInclude = cleanKeywordList(rawRule.include);
+				const localExclude = cleanKeywordList(rawRule.exclude);
+				if (localInclude || localExclude) {
+					sourceRules.push({
+						sourceKey,
+						...(localInclude ? { include: localInclude } : {}),
+						...(localExclude ? { exclude: localExclude } : {}),
+					});
+				}
+			}
+		}
+		const rejectedSourceUrls = Array.isArray(t.rejectedSourceUrls)
+			? [...new Set((t.rejectedSourceUrls as unknown[])
+				.filter((url): url is string => typeof url === "string" && /^https?:\/\/\S+$/.test(url))
+				.map((url) => url.slice(0, 500)))].slice(0, MAX_SOURCES)
+			: [];
+		cleaned.push({
+			key,
+			name,
+			quota,
+			...(question ? { question } : {}),
+			...(askedAt ? { askedAt } : {}),
+			...(intent ? { intent } : {}),
+			...(intentSegments ? { intentSegments } : {}),
+			...(changelog ? { changelog } : {}),
+			...(include ? { include } : {}),
+			...(exclude ? { exclude } : {}),
+			...(sourceMode === "selected" ? { sourceMode, sourceKeys: sourceKeys ?? [] } : {}),
+			...(sourceRules.length ? { sourceRules } : {}),
+			...(rejectedSourceUrls.length ? { rejectedSourceUrls } : {}),
+			...(t.enabled === false ? { enabled: false } : {}),
+			...(t.builtin === true ? { builtin: true } : {}),
+			...(t.stage === "understanding" || t.stage === "tags" || t.stage === "sources"
+				? { stage: t.stage }
+				: {}),
+		});
+	}
+	return { trackers: cleaned };
 }

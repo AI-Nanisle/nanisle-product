@@ -1,4 +1,7 @@
-import type { Filters, FocusEntry, SourceConfig } from "./pipeline-core";
+// 值导入必须带 .ts:CLI(node --experimental-strip-types 直跑)不做无扩展名解析,
+// 只有 type 导入才能省(运行时被剥掉)。Vite/esbuild/tsc 对两种写法都无感。
+import { focusEntryToTracker } from "./pipeline-core.ts";
+import type { Filters, FocusEntry, SourceConfig, Tracker } from "./pipeline-core";
 
 /**
  * Seed configuration. The worker copies these into KV on first use; from
@@ -56,8 +59,38 @@ export const DEFAULT_FILTERS: Filters = {
 	],
 };
 
-export const DEFAULT_FOCUS: FocusEntry[] = [
+/** Legacy v1 shape — only feeds DEFAULT_TRACKERS below (KV `config:focus` migration happens in worker/config.ts). */
+const DEFAULT_FOCUS: FocusEntry[] = [
 	{ name: "本周产品", detail: "正在做一个每日简报工具,关心信息聚合产品的留存设计、反馈回路、RSS 生态" },
 	{ name: "长期投资", detail: "持有指数基金和一只保险控股股,关心利率、通胀数据和市场估值水平" },
 	{ name: "内容创作", detail: "每周写 AI 实践类短文,需要有细节的一手案例,不要二手转述" },
+];
+
+/**
+ * The two trackers every instance starts with. They are ordinary trackers —
+ * editable, pausable — the `builtin` flag only labels them in the UI.
+ * Definitions here are deliberately light: opinionated defaults belong to
+ * the user, not the seed data.
+ */
+export const BUILTIN_TRACKERS: Tracker[] = [
+	{
+		key: "headlines",
+		name: "今日大事",
+		question: "当天真正重要的行业事件和宏观数据发布,不错过大事,但只要真正的大事",
+		exclude: ["招聘", "webinar"],
+		quota: 3,
+		builtin: true,
+	},
+	{
+		key: "learn",
+		name: "教我新东西",
+		question: "论文、深度播客、博主观点——允许和当下项目无关,但必须说得清『新在哪』",
+		quota: 2,
+		builtin: true,
+	},
+];
+
+export const DEFAULT_TRACKERS: Tracker[] = [
+	...BUILTIN_TRACKERS,
+	...DEFAULT_FOCUS.map(focusEntryToTracker),
 ];

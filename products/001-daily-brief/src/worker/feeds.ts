@@ -3,9 +3,9 @@
 // carries. Every source the chat agent touches goes through here first:
 // nothing enters the config unless it actually parsed.
 
-import { parseFeed, USER_AGENT } from "../shared/pipeline-core";
+import { parseFeed, USER_AGENT } from "../shared/pipeline-core.ts";
 import type { RawEntry } from "../shared/pipeline-core";
-import { DEFAULT_FILTERS } from "../shared/default-sources";
+import { DEFAULT_FILTERS } from "../shared/default-sources.ts";
 
 export interface FeedProbe {
 	ok: boolean;

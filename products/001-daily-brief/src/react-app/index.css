@@ -61,11 +61,6 @@ textarea::placeholder {
 	font-family: var(--mono);
 }
 
-/* 兼容旧类名:改版后标题一律黑体加重,不再用衬线 */
-.font-serif-sc {
-	font-family: var(--sans);
-}
-
 /* 报头双细线(保留旧版的识别符号,换成新的墨色) */
 .rule-double {
 	border-top: 3px solid var(--ink);
@@ -128,19 +123,6 @@ textarea::placeholder {
 	box-shadow: 0 0 0 3px rgba(194, 71, 46, 0.14);
 }
 
-@keyframes pulse-dot {
-	0%,
-	100% {
-		opacity: 1;
-	}
-	50% {
-		opacity: 0.35;
-	}
-}
-.dot-busy {
-	animation: pulse-dot 1.1s ease-in-out infinite;
-}
-
 /* 终端式光标:agent 思考中 */
 @keyframes blink-caret {
 	0%,
@@ -198,22 +180,8 @@ details.dropped[open] > summary .chevron {
 	transform: rotate(90deg);
 }
 
-/* 对话滚动区:细轨道,贴合仪表风 */
-.chat-scroll {
-	scrollbar-width: thin;
-	scrollbar-color: var(--line-strong) transparent;
-}
-.chat-scroll::-webkit-scrollbar {
-	width: 6px;
-}
-.chat-scroll::-webkit-scrollbar-thumb {
-	background: var(--line-strong);
-	border-radius: 3px;
-}
-
 @media (prefers-reduced-motion: reduce) {
 	.rise,
-	.dot-busy,
 	.caret {
 		animation: none !important;
 	}

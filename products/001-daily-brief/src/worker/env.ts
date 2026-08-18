@@ -1,21 +1,24 @@
 // Everything the worker reads from the environment, in one place.
 // Non-secrets live in wrangler.jsonc `vars`; secrets come from
 // `wrangler secret put` (deployed) or .dev.vars (local, gitignored).
-// See docs/ai-access.md for the full matrix.
+// 密钥清单与轮换 runbook:主仓 infra/README.md。
+
+import type { AiConfig } from "../shared/ai";
+
 export interface AppEnv {
 	/** Static client bundle, used when this Worker is called through a Service Binding. */
 	ASSETS: Fetcher;
-	/** KV namespace holding briefs (`brief:*`), feedback (`fb:*`) and clicks (`click:*`). */
+	/** KV namespace — 本地 dev / fork 的替身存储(未配 AWS 凭证时启用,见 store-kv.ts)。 */
 	BRIEFS: KVNamespace;
-	/** "mock" (default) | "anthropic" (BYOK) | "gateway" (Anthropic-compatible proxy) */
+	/** "deepseek" (production default) | "mock" | "anthropic" | "gateway" */
 	AI_PROVIDER?: string;
-	/** Model ID sent on every request. */
+	/** Model ID sent on every request (deepseek-chat / claude-* …). */
 	AI_MODEL?: string;
 	/** Hard per-request output-token cap — cost guard for hosted instances. */
 	AI_MAX_OUTPUT_TOKENS?: string;
-	/** "1" turns all AI endpoints off (kill switch). */
+	/** "1" turns all AI endpoints off (kill switch, docs/02 §8.3). */
 	AI_DISABLED?: string;
-	/** Secret. Comma-separated access codes; when set, brief/feedback/AI endpoints require `x-access-code`. */
+	/** Secret. 站长凭证(x-access-code):手动触发全量生成等 admin 操作。 */
 	ACCESS_CODE?: string;
 	/** Secret. Shared with the nanisle main site — verifies SSO handoff tokens and signs the session cookie. */
 	NANISLE_SSO_SECRET?: string;
@@ -23,14 +26,42 @@ export interface AppEnv {
 	NANISLE_URL?: string;
 	/** Canonical public mount for this product (no trailing slash). */
 	APP_URL?: string;
-	/** Secret. Required by POST /api/ingest — the generation pipeline authenticates with it. */
-	INGEST_TOKEN?: string;
-	/** Timezone that defines "today" for /api/generate (default America/New_York). */
+	/** Timezone that defines "today" (default America/New_York). */
 	BRIEF_TZ?: string;
-	/** Secret. Your own key — AI_PROVIDER=anthropic only. */
+
+	// --- AWS 侧(主仓 infra/ 的 cdk stack;三个都配齐才走 DynamoDB,否则 KV 替身) ---
+	/** Secret. 最小权限 IAM 用户 nanisle-daily-brief-worker 的 access key。 */
+	AWS_ACCESS_KEY_ID?: string;
+	/** Secret. 同上。 */
+	AWS_SECRET_ACCESS_KEY?: string;
+	/** DynamoDB 单表名(nanisle-daily-brief)。 */
+	DDB_TABLE?: string;
+	/** us-east-1(表和 Lambda 所在 region)。 */
+	AWS_REGION?: string;
+	/** generate Lambda 的 Function URL(cdk deploy 的 GenerateFunctionUrl 输出)。 */
+	GENERATE_URL?: string;
+
+	// --- AI 凭证(按 AI_PROVIDER 二选一) ---
+	/** Secret. AI_PROVIDER=deepseek(生产默认)。 */
+	DEEPSEEK_API_KEY?: string;
+	/** Secret. AI_PROVIDER=anthropic only. */
 	ANTHROPIC_API_KEY?: string;
 	/** Base URL of an Anthropic-compatible endpoint — AI_PROVIDER=gateway only. */
 	AI_GATEWAY_URL?: string;
 	/** Secret. Virtual key issued by the gateway, sent as `Authorization: Bearer`. */
 	AI_GATEWAY_KEY?: string;
+}
+
+/** AppEnv → 运行时无关的 AiConfig(shared/ai.ts 的入参)。 */
+export function aiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConfig {
+	return {
+		provider: env.AI_PROVIDER,
+		model: env.AI_MODEL,
+		maxOutputTokens: env.AI_MAX_OUTPUT_TOKENS,
+		deepseekApiKey: env.DEEPSEEK_API_KEY,
+		anthropicApiKey: env.ANTHROPIC_API_KEY,
+		gatewayUrl: env.AI_GATEWAY_URL,
+		gatewayKey: env.AI_GATEWAY_KEY,
+		...overrides,
+	};
 }

@@ -33,18 +33,30 @@
 	// set them with `wrangler secret put <NAME>` (prod) or in .dev.vars (local, gitignored):
 	//   NANISLE_SSO_SECRET   shared with the nanisle main site — readers sign in with their
 	//                        nanisle account via SSO handoff (see src/worker/sso.ts)
-	//   ACCESS_CODE          owner credential: gates generate/config writes, and doubles as a
+	//   ACCESS_CODE          admin credential (x-access-code): manual full-run trigger; also a
 	//                        reader fallback for self-hosted instances without the main site
-	//   INGEST_TOKEN         required by POST /api/ingest (the pipeline pushes the daily brief with it)
+	//   AWS_ACCESS_KEY_ID    minimal-permission IAM user `nanisle-daily-brief-worker`:
+	//   AWS_SECRET_ACCESS_KEY  DynamoDB table access + invoking the generate Function URL
+	//                        (issued/rotated per the runbook in the main repo's infra/README.md)
+	//   DEEPSEEK_API_KEY     only for AI_PROVIDER=deepseek (the production default)
 	//   ANTHROPIC_API_KEY    only for AI_PROVIDER=anthropic (bring your own key)
 	//   AI_GATEWAY_KEY       only for AI_PROVIDER=gateway (virtual key issued by the gateway)
 	"vars": {
-		"AI_PROVIDER": "mock",
-		"AI_MODEL": "claude-opus-5",
-		"AI_MAX_OUTPUT_TOKENS": "1024",
+		// 生产默认 deepseek;没配 DEEPSEEK_API_KEY 时代码自动落回 mock(fork
+		// 零配置照样跑通,误配的实例在 /api/health 与 [mock] 前缀里看得见)
+		"AI_PROVIDER": "deepseek",
+		// model id 按 DeepSeek 控制台实际值填(docs/02 §6.1)
+		"AI_MODEL": "deepseek-chat",
+		"AI_MAX_OUTPUT_TOKENS": "4096",
 		"APP_URL": "https://nanisle.com/products/daily-brief",
 		// Where the lock screen sends readers to sign in (the main site's launch gate)
-		"NANISLE_URL": "https://nanisle.com"
+		"NANISLE_URL": "https://nanisle.com",
+		// AWS side (cdk stack in the main repo's infra/): DynamoDB via aws4fetch, and the
+		// generate Lambda's Function URL. Unset AWS credentials => KV fallback store (dev/fork).
+		"DDB_TABLE": "nanisle-daily-brief",
+		"AWS_REGION": "us-east-1",
+		// The generate Lambda's Function URL (the GenerateFunctionUrl output of `cdk deploy`)
+		"GENERATE_URL": "https://4zwg2qxwkmwg56rmb5awji4uiq0mibqt.lambda-url.us-east-1.on.aws/"
 		// "AI_GATEWAY_URL": "https://your-gateway.example.com"  // AI_PROVIDER=gateway only
 	}
 }

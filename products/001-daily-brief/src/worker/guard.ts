@@ -1,14 +1,40 @@
+// B4 · 门禁(docs/02-技术方案.md §5.2):从单用户时代的三道门改成两道。
+//
+//   userGuard   一切个人数据端点:有效会话 + 邮箱在白名单。会话未配置时
+//               (本地 dev / fork)回落为固定用户 dev@local——零配置规矩保留。
+//               白名单在 /auth/sso 之外每个请求再查一次:被移出名单的人,
+//               30 天会话没过期时也要立即失效。
+//   userAiGuard 花 token 的端点变体:AI_DISABLED 总闸 + userGuard。
+//   adminGuard  站长凭证(x-access-code):手动触发全量生成。白名单增删
+//               走主仓 infra/ 的脚本,不开 API。
+//
+// 旧的 accessGuard / ownerGuard / aiGuard 已退役:配置不再是站长的,
+// 是每个用户自己的,userGuard 按会话邮箱天然隔离。
+
 import { createMiddleware } from "hono/factory";
 import { getCookie } from "hono/cookie";
 import { safeEqual, verifyToken } from "./sso";
+import { DEV_USER } from "../shared/store";
+import type { Store } from "../shared/store";
+import { makeStore } from "./store-kv";
 import type { AppEnv } from "./env";
 
 export { safeEqual } from "./sso";
 
-/** 会话 cookie 名：/auth/sso 验签通过后种下，读接口凭它放行。 */
+/** 会话 cookie 名:/auth/sso 验签通过后种下,API 凭它认人。 */
 export const SESSION_COOKIE = "nanisle_session";
 
-/** 未登录 401 时引导去的地址：主站的登录闸口，登录后会自动带 token 跳回来。 */
+/** userGuard 通过后挂在请求上下文里的东西:当前用户 + 该请求用的 store。 */
+export type Guarded = {
+	Bindings: AppEnv;
+	Variables: {
+		email: string;
+		store: Store;
+		storeMode: "dynamo" | "kv";
+	};
+};
+
+/** 未登录 401 时引导去的地址:主站的登录闸口,登录后会自动带 token 跳回来。 */
 export function loginUrl(env: AppEnv): string {
 	const base = (env.NANISLE_URL ?? "https://nanisle.com").replace(/\/+$/, "");
 	return `${base}/api/launch/daily-brief`;
@@ -21,76 +47,62 @@ export function appUrl(env: AppEnv, path = ""): string {
 	return suffix ? `${base}/${suffix}` : base;
 }
 
-function parseCodes(env: AppEnv): string[] {
-	return (env.ACCESS_CODE ?? "")
+/**
+ * 从请求里解出会话邮箱(不做白名单判断)。/go 这类无门禁端点也用它:
+ * 有会话就认人,没有就匿名。
+ */
+export async function sessionEmail(env: AppEnv, cookie: string | undefined): Promise<string | null> {
+	if (!env.NANISLE_SSO_SECRET) return DEV_USER;
+	if (!cookie) return null;
+	const payload = await verifyToken(env.NANISLE_SSO_SECRET, cookie);
+	return payload?.email ?? null;
+}
+
+function makeUserGuard(requireAiEnabled: boolean) {
+	return createMiddleware<Guarded>(async (c, next) => {
+		const env = c.env;
+		if (requireAiEnabled && env.AI_DISABLED === "1") {
+			return c.json({ error: "AI is temporarily disabled on this instance." }, 503);
+		}
+		const { store, mode } = makeStore(env);
+		c.set("store", store);
+		c.set("storeMode", mode);
+
+		const email = await sessionEmail(env, getCookie(c, SESSION_COOKIE));
+		if (!email) {
+			return c.json({ error: "请先登录南屿账号。", loginUrl: loginUrl(env) }, 401);
+		}
+		if (email !== DEV_USER && !(await store.isWhitelisted(email))) {
+			// 403(不是 401):登录是有效的,拦下的是准入——前端两种态的文案不同
+			return c.json({ error: "产品内测中,你的账号还不在名单里。想试用请联系站长开通。" }, 403);
+		}
+		c.set("email", email);
+		await next();
+	});
+}
+
+/** 个人数据端点的门:简报读写、反馈、配置、日期列表。 */
+export const userGuard = makeUserGuard(false);
+
+/** 花 token 的端点的门:立即生成、向导、对编辑说一句。多一道 AI_DISABLED 总闸。 */
+export const userAiGuard = makeUserGuard(true);
+
+/**
+ * 站长端点的门:只认 x-access-code。ACCESS_CODE 没配置就开放(本地 dev /
+ * fork;托管实例必须设置)。
+ */
+export const adminGuard = createMiddleware<{ Bindings: AppEnv }>(async (c, next) => {
+	const codes = (c.env.ACCESS_CODE ?? "")
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
-}
-
-async function codeOk(env: AppEnv, given: string | undefined): Promise<boolean> {
-	let ok = false;
-	for (const code of parseCodes(env)) {
-		if (await safeEqual(code, given ?? "")) ok = true;
-	}
-	return ok;
-}
-
-async function sessionOk(env: AppEnv, cookie: string | undefined): Promise<boolean> {
-	if (!env.NANISLE_SSO_SECRET || !cookie) return false;
-	return (await verifyToken(env.NANISLE_SSO_SECRET, cookie)) !== null;
-}
-
-/**
- * 读端点的门（简报、日期列表、反馈、配置只读）：南屿登录会话 cookie 或
- * `x-access-code` 头，任一有效即放行。两套都没配置 → 完全开放（本地开发
- * 和 mock 演示）。401 会带上 loginUrl，前端锁屏靠它引导用户去主站登录。
- */
-export const accessGuard = createMiddleware<{ Bindings: AppEnv }>(async (c, next) => {
-	const env = c.env;
-	const codesConfigured = parseCodes(env).length > 0;
-	const ssoConfigured = Boolean(env.NANISLE_SSO_SECRET);
-	if (!codesConfigured && !ssoConfigured) return next();
-	if (ssoConfigured && (await sessionOk(env, getCookie(c, SESSION_COOKIE)))) return next();
-	if (codesConfigured && (await codeOk(env, c.req.header("x-access-code")))) return next();
-	return c.json(
-		{
-			error: "请先登录南屿账号，或提供访问码。",
-			...(ssoConfigured ? { loginUrl: loginUrl(env) } : {}),
-		},
-		401,
-	);
-});
-
-/**
- * 站长端点的门（改源、改关注点、试抓源）：只认访问码，不认登录会话——
- * 登录用户是读者，配置是站长的。ACCESS_CODE 没配置就开放（本地开发；
- * 托管实例只要设了 NANISLE_SSO_SECRET 就必须同时设 ACCESS_CODE）。
- */
-export const ownerGuard = createMiddleware<{ Bindings: AppEnv }>(async (c, next) => {
-	if (await ownerDenied(c.env, c.req.header("x-access-code"))) {
-		return c.json({ error: "这个操作需要站长访问码。" }, 401);
+	if (codes.length > 0) {
+		const given = c.req.header("x-access-code") ?? "";
+		let ok = false;
+		for (const code of codes) {
+			if (await safeEqual(code, given)) ok = true;
+		}
+		if (!ok) return c.json({ error: "这个操作需要站长访问码。" }, 401);
 	}
 	await next();
 });
-
-/**
- * 花 token 的端点的门（/api/generate）：站长访问码之上再加一道 AI 总闸——
- * AI_DISABLED=1 → 503，出事故时翻开关重部署即可止血，其余功能照常。
- */
-export const aiGuard = createMiddleware<{ Bindings: AppEnv }>(async (c, next) => {
-	if (c.env.AI_DISABLED === "1") {
-		return c.json({ error: "AI is temporarily disabled on this instance." }, 503);
-	}
-	if (await ownerDenied(c.env, c.req.header("x-access-code"))) {
-		return c.json({ error: "这个操作需要站长访问码。" }, 401);
-	}
-	await next();
-});
-
-/** true = 配置了访问码且给的都不对。 */
-async function ownerDenied(env: AppEnv, given: string | undefined): Promise<boolean> {
-	const codes = parseCodes(env);
-	if (codes.length === 0) return false;
-	return !(await codeOk(env, given));
-}
