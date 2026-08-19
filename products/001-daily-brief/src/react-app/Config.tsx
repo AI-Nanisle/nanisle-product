@@ -22,6 +22,9 @@ function headers(): Record<string, string> {
 	return { "content-type": "application/json" };
 }
 
+/** /api/sources/add 单次最多 8 个源,「全部加入」按这个分批。 */
+const ADOPT_BATCH = 8;
+
 /** 展示编号:按定义在目录里的位置,和左栏序号一致。 */
 function docId(index: number): string {
 	return `TRK-${String(index + 1).padStart(3, "0")}`;
@@ -128,11 +131,18 @@ export default function Config() {
 			items: { name: string; url: string; category: string }[],
 			trackerKey?: string,
 			rules?: { url: string; include?: string[]; exclude?: string[] }[],
+			/** "candidate" = 采纳 AI 候选卡,服务端据此记采纳率仪表。 */
+			origin?: "candidate",
 		) => {
 			const res = await fetch(apiPath("sources/add"), {
 				method: "POST",
 				headers: headers(),
-				body: JSON.stringify({ sources: items, ...(trackerKey ? { trackerKey } : {}), ...(rules ? { rules } : {}) }),
+				body: JSON.stringify({
+					sources: items,
+					...(trackerKey ? { trackerKey } : {}),
+					...(rules ? { rules } : {}),
+					...(origin ? { origin } : {}),
+				}),
 			});
 			if (!res.ok) {
 				const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -212,13 +222,61 @@ export default function Config() {
 	const adoptCandidate = async (t: Tracker, item: ProposalItem) => {
 		setCandidates((c) => ({ ...c, [t.key]: (c[t.key] ?? []).filter((x) => x.url !== item.url) }));
 		try {
-			const data = await addSources([{ name: item.name, url: item.url, category: item.category }], t.key);
+			const data = await addSources([{ name: item.name, url: item.url, category: item.category }], t.key, undefined, "candidate");
 			putTrackers(data.trackers.map((x) => (x.key === t.key ? withLog(x, `你采纳了候选来源「${item.name}」`) : x)));
 		} catch (err) {
 			setEditorNote(`加入失败:${err instanceof Error ? err.message : "未知错误"}`);
 			setCandidates((c) => ({ ...c, [t.key]: [...(c[t.key] ?? []), item] }));
 			throw err;
 		}
+	};
+
+	/**
+	 * 「全部加入」:一次采纳一整轮候选。服务端单次最多 8 个,所以按 8 分批;
+	 * 每批各自成败,不因一个坏源连累整轮。返回没加成的候选和一句人话交代——
+	 * 列表归谁管谁负责放回去(向导有自己的本地列表,档案页用 candidates 表)。
+	 */
+	const adoptCandidates = async (t: Tracker, items: ProposalItem[]) => {
+		const failed: ProposalItem[] = [];
+		const reasons: string[] = [];
+		let adopted = 0;
+		let latest: Tracker[] | null = null;
+		for (let i = 0; i < items.length; i += ADOPT_BATCH) {
+			const chunk = items.slice(i, i + ADOPT_BATCH);
+			try {
+				const data = await addSources(
+					chunk.map((x) => ({ name: x.name, url: x.url, category: x.category })),
+					t.key,
+					undefined,
+					"candidate",
+				);
+				adopted += data.adopted.length;
+				latest = data.trackers;
+				for (const f of data.failed) {
+					// 服务端可能把 URL 规范化过(feed 发现),名字兜底匹配。
+					const item = chunk.find((x) => x.url === f.url) ?? chunk.find((x) => x.name === f.name);
+					if (item) failed.push(item);
+					reasons.push(`${f.name}:${f.error}`);
+				}
+			} catch (err) {
+				failed.push(...chunk);
+				reasons.push(`${chunk.length} 个没加成(${err instanceof Error ? err.message : "未知错误"})`);
+			}
+		}
+		if (latest && adopted > 0) {
+			putTrackers(latest.map((x) => (x.key === t.key ? withLog(x, `你一键加入了 ${adopted} 个候选来源`) : x)));
+		}
+		return {
+			failed,
+			note: reasons.length > 0 ? `加入 ${adopted} 个 · ${reasons.join(" / ")}` : "",
+		};
+	};
+
+	/** 从精选目录加源并绑定定义:失败往上抛,由目录组件就地显示错误。 */
+	const addFromCatalog = async (t: Tracker, entry: { name: string; url: string; category: string }) => {
+		const data = await addSources([{ name: entry.name, url: entry.url, category: entry.category }], t.key);
+		if (data.adopted.length === 0) throw new Error(data.failed[0]?.error ?? "加入失败");
+		putTrackers(data.trackers.map((x) => (x.key === t.key ? withLog(x, `你从精选目录加入了「${entry.name}」`) : x)));
 	};
 
 	const rejectCandidate = (t: Tracker, item: ProposalItem) => {
@@ -330,6 +388,11 @@ export default function Config() {
 							const t = trackersRef.current.find((x) => x.key === trackerKey);
 							if (t) await adoptCandidate(t, item);
 						}}
+						onAdoptAll={async (trackerKey, items) => {
+							const t = trackersRef.current.find((x) => x.key === trackerKey);
+							if (!t) return { failed: items, note: "这份草稿不见了,刷新再试" };
+							return adoptCandidates(t, items);
+						}}
 						onFinish={(key) => {
 							patchTracker(key, { stage: undefined }, "向导完成,这份定义开始生效");
 							setSelected(key);
@@ -373,7 +436,23 @@ export default function Config() {
 							onTest={(url) => void testSource(url)}
 							onFindMore={() => findMore(current)}
 							onAdoptCandidate={(item) => void adoptCandidate(current, item).catch(() => {})}
+							onAdoptAllCandidates={() => {
+								const usable = (candidates[current.key] ?? []).filter((x) => x.ok);
+								if (usable.length === 0 || editorBusy) return;
+								setEditorBusy(true);
+								setEditorNote("");
+								setCandidates((c) => ({ ...c, [current.key]: (c[current.key] ?? []).filter((x) => !x.ok) }));
+								void adoptCandidates(current, usable)
+									.then(({ failed, note }) => {
+										if (failed.length > 0) {
+											setCandidates((c) => ({ ...c, [current.key]: [...(c[current.key] ?? []), ...failed] }));
+										}
+										setEditorNote(note);
+									})
+									.finally(() => setEditorBusy(false));
+							}}
 							onRejectCandidate={(item) => rejectCandidate(current, item)}
+							onAddCatalog={(entry) => addFromCatalog(current, entry)}
 							onSay={(text) => say(current, text)}
 						/>
 					) : (

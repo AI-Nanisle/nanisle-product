@@ -83,6 +83,13 @@ export interface Tracker {
 	name: string;
 	/** The long-term question in the user's own words. */
 	question?: string;
+	/**
+	 * R7 · 读者拿这份追踪干什么(向导步骤 1 追问出来的)。问法是口语的「你现在
+	 * 主要在忙这块的什么」,存的却是选材最需要的那一维:**什么变化会改变他的
+	 * 动作**。它必须同时进「找源」和「选材」两处提示词——只显示不进提示词,
+	 * 它就只是个装饰字段。空 = 读者选了「就是想跟上」,合法,不追问也不减分。
+	 */
+	purpose?: string;
 	/** When that question was last written down (ISO) — dated in the dossier. */
 	askedAt?: string;
 	/** One-line restatement of the intent (AI-drafted later; hand-edited now). */
@@ -111,8 +118,6 @@ export interface Tracker {
 	quota: number;
 	/** Default true; false pauses the tracker without losing its definition. */
 	enabled?: boolean;
-	/** Ships with the product (今日大事/教我新东西). Informational only. */
-	builtin?: boolean;
 	/**
 	 * 向导草稿标记:有 stage 的追踪器还在三步向导里(刷新/换设备可续),
 	 * 不参与生成;「完成」时删掉该字段,追踪器才生效(docs/02 §7.1)。
@@ -123,6 +128,13 @@ export interface Tracker {
 export const MAX_TRACKER_QUOTA = 3;
 /** The whole issue stays bounded no matter how many trackers exist. */
 export const TOTAL_ITEM_CAP = 10;
+/**
+ * X1 · 破茧的第一道约束:一期里同一个来源最多几条。和抓取层的
+ * `max_items_per_feed` 不是一回事——那个管「从这个 feed 取几条进候选池」,
+ * 这个管「最后见报几条」。提示词里说了一遍,`assembleBrief` 里再强制一遍:
+ * 能用代码挡住的不变量,不靠叮嘱模型。
+ */
+export const MAX_ITEMS_PER_SOURCE = 3;
 /** 变更记录 is a recent-history strip, not an archive. */
 export const MAX_CHANGELOG = 20;
 /** How many clauses the editor's understanding may hold. */
@@ -222,9 +234,16 @@ export interface RawEntry {
 	excerpt: string;
 }
 
-export function parseFeed(xml: string): RawEntry[] {
+export interface ParsedFeed {
+	/** Feed 自报的标题(rss channel title / atom feed title);解析不到为空串。 */
+	title: string;
+	entries: RawEntry[];
+}
+
+export function parseFeedMeta(xml: string): ParsedFeed {
 	const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
 	const doc = parser.parse(xml) as Record<string, any>;
+	const title = stripHtml(text(doc?.rss?.channel?.title) || text(doc?.feed?.title)).slice(0, 100);
 	const entries: RawEntry[] = [];
 
 	const rssItems = asArray(doc?.rss?.channel?.item);
@@ -255,7 +274,31 @@ export function parseFeed(xml: string): RawEntry[] {
 		});
 	}
 
-	return entries.filter((e) => e.title && e.url);
+	return { title, entries: entries.filter((e) => e.title && e.url) };
+}
+
+export function parseFeed(xml: string): RawEntry[] {
+	return parseFeedMeta(xml).entries;
+}
+
+/**
+ * 查询源:按关键词/分类构造的检索型 feed(docs/02 §7.3 第 1 层)。边界:GitHub
+ * releases、YouTube 频道这类构造出来的「具体实体 feed」不算——仪表要区分的是
+ * 检索侦察兵 vs 确定的源,供观察式发现(第 4 层)判断何时把前者升级成后者。
+ */
+export function isQueryFeedUrl(url: string): boolean {
+	let u: URL;
+	try {
+		u = new URL(url);
+	} catch {
+		return false;
+	}
+	const host = u.hostname.toLowerCase();
+	if (host === "news.google.com" && u.pathname.startsWith("/rss/search")) return true;
+	if ((host === "hnrss.org" || host.endsWith(".hnrss.org")) && u.searchParams.has("q")) return true;
+	if ((host === "reddit.com" || host.endsWith(".reddit.com")) && u.pathname.endsWith(".rss")) return true;
+	if (host === "rss.arxiv.org") return true;
+	return false;
 }
 
 export async function fetchFeed(url: string, timeoutMs = 20_000): Promise<RawEntry[]> {
@@ -361,9 +404,14 @@ export interface EditorialPick {
 export interface EditorialResult {
 	/** Tracker key → picks, in tracker order. */
 	sections: Record<string, EditorialPick[]>;
+	/** X2 · 轴外位:不属于任何追踪器、但编辑认为读者该看见的一条。 */
+	offAxis?: { id: string; whyClick: string; reason: string } | null;
 	notableDrops: { id: string; reason: string }[];
 	droppedSummary: string;
 }
+
+/** X2 · 连续多少期没人点轴外位就自动停掉——用点击率判死刑,不靠主观判断。 */
+export const OFF_AXIS_MISS_LIMIT = 10;
 
 export function activeTrackers(trackers: Tracker[]): Tracker[] {
 	// 向导草稿(带 stage)不参与生成:定义还没确认完,不该按半成品选材
@@ -416,6 +464,10 @@ export function mockEditorial(candidates: Candidate[], trackers: Tracker[]): Edi
 export function buildEditorialPrompt(
 	candidates: Candidate[],
 	trackers: Tracker[],
+	/** R2 · 近 7 天反馈段(feedbackPromptBlock 的产物)。空串 = 没有反馈可用。 */
+	feedbackBlock = "",
+	/** X2 · 是否要轴外位(读者可关,连续没人点也会自动关)。 */
+	offAxis = false,
 ): { system: string; user: string } {
 	const system = `你是一份个人每日简报的编辑。简报的哲学:它是当天信息的路由器,不是内容的终点。每条入选内容的任务是帮读者在 10 秒内决定"点进原文还是划过",绝不替读者把原文读完。
 
@@ -431,12 +483,26 @@ export function buildEditorialPrompt(
 7. related 用于"拓展阅读":只能引用候选列表里的其他 id,不许出现任何列表外的链接或 id。
 8. 每条写 relatesTo:一小句说明它和这个追踪器的问题是什么关系;内置追踪器(headlines/learn)可省略。
 9. 全刊总条数不超过 ${TOTAL_ITEM_CAP} 条:如果各追踪器合计超了,砍掉相对最弱的,把它们放进 notableDrops 并注明。
-10. 输出简体中文。只输出 JSON,不要任何其他文字。`;
+10. 同一个来源在全刊最多 ${MAX_ITEMS_PER_SOURCE} 条:超了就换别的来源的候选,实在没有就少给几条。读者订的是一份简报,不是某一个站的转发。
+11. 输出简体中文。只输出 JSON,不要任何其他文字。${
+		feedbackBlock
+			? `
+12. 用户消息里带了「读者近期反馈」段:那是读者亲口说的,权重高于你的猜测。四类信号方向不同,别混为一谈——「没用」下调同类;「已知道」只提高新鲜度要求、绝不下调那个话题;「有用/多找这种」加权同源同话题;「读者说缺了什么」是选材的空洞,优先补。反馈不能推翻追踪器的「不收」硬排除。`
+			: ""
+	}${
+		offAxis
+			? `
+13. 轴外位(offAxis):在所有追踪器之外,再挑 **1 条不属于任何追踪器**的候选——读者没定义过、也不会主动去找,但你判断他该看见的。reason 写清「为什么我觉得你该看见」,别写成又一条摘要。宁缺毋滥:没有真正够格的就给 null。它不占各追踪器的配额,也不受第 9 条总数限制。`
+			: ""
+	}`;
 
 	const trackerText = activeTrackers(trackers)
 		.map((t) => {
 			const lines = [`- key=${t.key} 「${t.name}」(每期最多 ${Math.min(t.quota, MAX_TRACKER_QUOTA)} 条)`];
 			if (t.question) lines.push(`  问题原话:${t.question}`);
+			// R7 · 读者拿它干什么。同一个话题,做产品的人和看投资的人该收到的
+			// 是完全不同的两批内容——这一行就是那个分岔口。
+			if (t.purpose) lines.push(`  读者在忙什么(选材时按这个取舍):${t.purpose}`);
 			if (t.intent) lines.push(`  意图:${t.intent}`);
 			if (t.include?.length) lines.push(`  全局收:${t.include.join("、")}`);
 			if (t.exclude?.length) lines.push(`  全局不收(硬排除):${t.exclude.join("、")}`);
@@ -468,7 +534,7 @@ export function buildEditorialPrompt(
 
 	const user = `读者的追踪器(sections 的 key 必须逐一对应这里的 key):
 ${trackerText}
-
+${feedbackBlock ? `\n${feedbackBlock}\n` : ""}
 今天的候选(共 ${candidates.length} 条):
 ${candidateText}
 
@@ -477,7 +543,7 @@ ${candidateText}
   "sections": {
     "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
   },
-  "notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
+  ${offAxis ? `"offAxis": {"id": "...", "whyClick": "...", "reason": "为什么我觉得你该看见(和任何追踪器都无关)"} 或 null,\n  ` : ""}"notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
   "droppedSummary": "一句话:今天筛掉的主要是什么"
 }`;
 	return { system, user };
@@ -495,6 +561,12 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 		sections[t.key] = (parsed.sections?.[t.key] ?? []).slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA));
 	}
 	parsed.sections = sections;
+	// X2 · 轴外位同样吃反捏造护栏:id 不在候选里就整条丢掉,绝不臆造
+	const off = parsed.offAxis;
+	parsed.offAxis =
+		off && typeof off.id === "string" && typeof off.whyClick === "string"
+			? { id: off.id, whyClick: off.whyClick, reason: typeof off.reason === "string" ? off.reason : "" }
+			: null;
 	return parsed;
 }
 
@@ -535,6 +607,8 @@ export async function assembleBrief(
 	// "超出额度" drops carry their own reason so the accountability section can
 	// tell "not good enough" apart from "good but the issue was full".
 	const overflowDrops = new Map<string, string>();
+	// X1 · 单源占比上限,在代码里强制一遍(提示词只是先礼后兵)
+	const perSource = new Map<string, number>();
 	let total = 0;
 
 	for (const t of activeTrackers(opts.trackers)) {
@@ -547,6 +621,13 @@ export async function assembleBrief(
 				overflowDrops.set(pick.id, `入选了但超出今日额度(全刊 ≤${TOTAL_ITEM_CAP} 条)`);
 				continue;
 			}
+			const fromSource = perSource.get(cand.sourceKey) ?? 0;
+			if (fromSource >= MAX_ITEMS_PER_SOURCE) {
+				usedIds.add(pick.id);
+				overflowDrops.set(pick.id, `入选了但同源已满(单源每期 ≤${MAX_ITEMS_PER_SOURCE} 条,防一家独大)`);
+				continue;
+			}
+			perSource.set(cand.sourceKey, fromSource + 1);
 			usedIds.add(pick.id);
 			total++;
 			const mergedFrom: BriefLink[] = [];
@@ -568,6 +649,7 @@ export async function assembleBrief(
 				whyClick: pick.whyClick,
 				url: cand.url,
 				source: cand.source,
+				sourceKey: cand.sourceKey,
 				discussionUrl: opts.lookupDiscussions === false ? undefined : await findHnDiscussion(cand.url),
 				...(extras.length ? { extras } : {}),
 				...(pick.caveat ? { caveat: pick.caveat } : {}),
@@ -578,6 +660,27 @@ export async function assembleBrief(
 		// Empty sections stay in: "the radar swept and found nothing" is part
 		// of the product's accountability, not something to hide.
 		sections.push({ key: t.key, title: t.name, items });
+	}
+
+	// X2 · 轴外位:各追踪器都挑完之后再放,单独一格。它不占 TOTAL_ITEM_CAP
+	// (那是「读者要的内容」的额度),但同样吃单源上限和「id 必须真实存在」。
+	let offAxis: BriefItem | undefined;
+	const offPick = editorial.offAxis;
+	if (offPick) {
+		const cand = byId.get(offPick.id);
+		if (cand && !usedIds.has(offPick.id) && (perSource.get(cand.sourceKey) ?? 0) < MAX_ITEMS_PER_SOURCE) {
+			usedIds.add(cand.id);
+			offAxis = {
+				id: cand.id,
+				title: cand.title,
+				whyClick: offPick.whyClick,
+				url: cand.url,
+				source: cand.source,
+				sourceKey: cand.sourceKey,
+				discussionUrl: undefined,
+				...(offPick.reason ? { relatesTo: offPick.reason } : {}),
+			};
+		}
 	}
 
 	const dropReasons = new Map(editorial.notableDrops.map((d) => [d.id, d.reason]));
@@ -601,6 +704,7 @@ export async function assembleBrief(
 		date: opts.date,
 		generatedAt: new Date().toISOString(),
 		sections,
+		...(offAxis ? { offAxis } : {}),
 		filteredOut: {
 			scanned: fetched.scanned,
 			dropped: Math.max(0, fetched.scanned - total),

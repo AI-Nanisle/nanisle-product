@@ -17,7 +17,7 @@ Cloudflare Worker
   → /go/:date/:id redirect logs every click — the implicit signal
 ```
 
-Sections: **今日大事** (don't miss it) · **项目弹药** (ammo for what you're building — every item must name which focus entry it relates to) · **教我新东西** (teach me something) · plus a collapsed **已替你筛掉** list so "saving you time" is a visible, auditable number.
+Sections are your trackers: a fresh account starts with an empty config page and the first definition comes out of a three-step wizard — nothing is pre-seeded, because a tracker you didn't write is one you won't trust. Every issue also ends with a collapsed **已替你筛掉** list so "saving you time" is a visible, auditable number.
 
 ## Configuring by chat
 

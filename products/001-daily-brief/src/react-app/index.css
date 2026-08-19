@@ -180,9 +180,365 @@ details.dropped[open] > summary .chevron {
 	transform: rotate(90deg);
 }
 
+
+/* 「试生成」键:配置页上唯一的行动号召,得一眼认出来,又不能是外来物。
+   造型沿用本产品已有的双线语言——报头下的 .rule-double、文末的 .end-stamp,
+   把那两道线压成一个方框,方角、等宽字疏排,像校样上盖的版记章。
+   方角在这里不违和:页面上的圆角属于内容容器,这枚是操作件,本就该分层。
+   悬停时整体转朱红(与 .headline-link 同一套悬停逻辑),按下沉一格。 */
+.btn-stamp {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.55rem;
+	padding: 0.45rem 1.05rem;
+	border: 1.5px solid var(--ink);
+	border-radius: 0;
+	background: transparent;
+	color: var(--ink);
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: 0.08em;
+	line-height: 1.5;
+	white-space: nowrap;
+	cursor: pointer;
+	transition:
+		color 0.18s ease,
+		border-color 0.18s ease,
+		transform 0.12s ease;
+}
+/* 内圈:终点戳的双线在方框上的同一句话 */
+.btn-stamp::after {
+	content: "";
+	position: absolute;
+	inset: 2.5px;
+	border: 1px solid var(--ink);
+	opacity: 0.45;
+	transition:
+		border-color 0.18s ease,
+		opacity 0.18s ease;
+}
+.btn-stamp:hover {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+.btn-stamp:hover::after {
+	border-color: var(--accent);
+	opacity: 0.5;
+}
+.btn-stamp:active {
+	transform: translateY(1px);
+}
+/* 三角标记与生成中那行的 ▸ 同源:一个等着开印,一个正在跑 */
+.btn-stamp .mark {
+	color: var(--accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.rise,
 	.caret {
+		animation: none !important;
+	}
+	/* 静音版记章按下的那一格位移;转色不是动效,留着 */
+	.btn-stamp,
+	.btn-stamp:active {
+		transform: none;
+	}
+}
+
+/* ============================================================
+   站点外壳:与主站页眉同款(主仓 web/app/globals.css 的「页眉」
+   「按钮」「用户菜单」三节)。产品挂在主站路径下,页眉必须接得上——
+   同一枚字标、同一条导航、同一个头像圆标,进产品不像换了个网站。
+   主站那边用 @theme 的 --color-* 变量,这里换成本产品的同值 token。
+   ============================================================ */
+:root {
+	/* 主站 --color-line:按钮/输入框描边,比 --line 深一档,本产品原先没用到 */
+	--line-input: #e0e0da;
+}
+
+.site-header {
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	border-bottom: 1px solid var(--line);
+	background: rgba(250, 250, 248, 0.9);
+	backdrop-filter: blur(8px);
+}
+
+.site-header-in {
+	max-width: 1240px;
+	margin-inline: auto;
+	padding-inline: clamp(20px, 4vw, 40px);
+	height: 60px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 24px;
+}
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	color: var(--ink);
+	text-decoration: none;
+}
+
+.logo-wordmark {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	font-family: var(--mono);
+	font-size: 13.5px;
+	font-weight: 500;
+	letter-spacing: 0.045em;
+	line-height: 1;
+	white-space: nowrap;
+}
+
+.logo-wordmark svg {
+	flex: none;
+	overflow: visible;
+}
+
+/* 航线上的五枚岛:悬停时依次跳一下 */
+@keyframes route-hop {
+	0%,
+	100% {
+		transform: translateY(0) rotate(0);
+	}
+	48% {
+		transform: translateY(-2px) rotate(7deg);
+	}
+}
+
+.logo-route-tile {
+	transform-box: fill-box;
+	transform-origin: center;
+}
+
+.brand:hover .logo-route-tile {
+	animation: route-hop 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.brand:hover .logo-route-tile:nth-child(2) { animation-delay: 35ms; }
+.brand:hover .logo-route-tile:nth-child(3) { animation-delay: 70ms; }
+.brand:hover .logo-route-tile:nth-child(4) { animation-delay: 105ms; }
+.brand:hover .logo-route-tile:nth-child(5) { animation-delay: 140ms; }
+
+.brand-cn {
+	font-size: 11.5px;
+	font-weight: 500;
+	letter-spacing: 0.18em;
+	margin-inline-end: -0.18em; /* 吃掉「屿」后面的幻影字距 */
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+
+.site-nav {
+	display: flex;
+	align-items: center;
+	gap: clamp(14px, 3vw, 32px);
+	font-size: 13.5px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.site-nav > a {
+	text-decoration: none;
+}
+
+.site-nav > a:not(.btn-ink):not(.btn-line) {
+	color: var(--ink-2);
+	transition: color 0.15s ease;
+}
+
+.site-nav > a:not(.btn-ink):not(.btn-line):hover {
+	color: var(--ink);
+}
+
+.nav-divider {
+	width: 1px;
+	height: 16px;
+	background: var(--line);
+}
+
+.btn-ink {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	background: var(--ink);
+	color: var(--paper);
+	border: none;
+	border-radius: 6px;
+	padding: 8px 18px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 0.15s ease;
+}
+
+.btn-ink:hover {
+	background: var(--accent);
+	color: var(--paper);
+}
+
+.btn-line {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	border: 1px solid var(--line-input);
+	background: var(--card);
+	color: var(--ink);
+	border-radius: 6px;
+	padding: 7px 16px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: border-color 0.15s ease;
+}
+
+.btn-line:hover {
+	border-color: var(--ink);
+	color: var(--ink);
+}
+
+/* —— 已登录:头像圆标 + 下拉菜单 —— */
+
+.user-menu {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.user-chip {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	border: 1px solid var(--line-input);
+	border-radius: 50%;
+	background: var(--ink);
+	color: var(--paper);
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1;
+	cursor: pointer;
+	overflow: hidden;
+	padding: 0;
+	transition: border-color 0.15s ease;
+}
+
+.user-chip:hover,
+.user-chip[aria-expanded="true"] {
+	border-color: var(--accent);
+}
+
+.user-chip img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: block;
+}
+
+/* 身份还没问出来时的占位:占住宽度,不画出来 */
+.user-chip-ghost {
+	visibility: hidden;
+}
+
+.user-pop {
+	position: absolute;
+	top: calc(100% + 10px);
+	right: 0;
+	z-index: 90;
+	min-width: 200px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	box-shadow: 0 12px 32px rgba(23, 24, 26, 0.12);
+	padding: 6px;
+	animation: rise-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.user-pop-id {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 10px 10px;
+	border-bottom: 1px solid var(--paper-deep);
+	margin-bottom: 6px;
+}
+
+.user-pop-id strong {
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.user-pop-id span {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	word-break: break-all;
+}
+
+.user-pop-item {
+	display: block;
+	width: 100%;
+	text-align: left;
+	border: none;
+	background: transparent;
+	border-radius: 6px;
+	padding: 8px 10px;
+	font-family: inherit;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	cursor: pointer;
+	transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.user-pop-item:hover {
+	background: var(--paper);
+	color: var(--accent);
+}
+
+.user-pop-item:disabled {
+	cursor: default;
+	color: var(--ink-3);
+}
+
+@media (max-width: 680px) {
+	.nav-divider,
+	.btn-login {
+		display: none;
+	}
+
+	.site-nav {
+		font-size: 13px;
+		gap: 12px;
+	}
+
+	.site-nav .btn-ink {
+		padding: 7px 12px;
+	}
+}
+
+/* 锁屏 / 空白态的居中画布:视口减去页眉,别让页眉把整页顶出一条滚动 */
+.center-pane {
+	min-height: calc(100dvh - 60px);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.user-pop,
+	.brand:hover .logo-route-tile {
 		animation: none !important;
 	}
 }

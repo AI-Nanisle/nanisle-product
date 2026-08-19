@@ -12,9 +12,9 @@
 //   USER#<email> / CLICK#<ISO>#<uuid>            点击事件,ttl 90 天
 
 import { AwsClient } from "aws4fetch";
-import type { Brief, FeedbackEvent } from "./types";
-import type { ClickEvent, Store, StoredBrief } from "./store";
-import { EVENT_TTL_S } from "./store";
+import type { Brief, FeedbackEvent, FeedbackKind } from "./types";
+import type { ClickEvent, Store, StoredBrief, StoredEvent } from "./store";
+import { EVENT_TTL_S, MAX_EVENTS_READ } from "./store";
 
 export interface DynamoOptions {
 	table: string;
@@ -121,9 +121,13 @@ export function dynamoStore(opts: DynamoOptions): Store {
 			const trackers = s(out.Item?.trackers);
 			const sources = s(out.Item?.sources);
 			if (!trackers || !sources) return null;
+			const metrics = s(out.Item?.metrics);
+			const prefs = s(out.Item?.prefs);
 			return {
 				trackers: JSON.parse(trackers),
 				sources: JSON.parse(sources),
+				...(metrics ? { metrics: JSON.parse(metrics) } : {}),
+				...(prefs ? { prefs: JSON.parse(prefs) } : {}),
 				updatedAt: s(out.Item?.updatedAt) ?? "",
 			};
 		},
@@ -135,6 +139,8 @@ export function dynamoStore(opts: DynamoOptions): Store {
 					SK: { S: "CONFIG" },
 					trackers: { S: JSON.stringify(config.trackers) },
 					sources: { S: JSON.stringify(config.sources) },
+					...(config.metrics ? { metrics: { S: JSON.stringify(config.metrics) } } : {}),
+					...(config.prefs ? { prefs: { S: JSON.stringify(config.prefs) } } : {}),
 					updatedAt: { S: config.updatedAt },
 				},
 			});
@@ -183,6 +189,43 @@ export function dynamoStore(opts: DynamoOptions): Store {
 				if (text) item.text = { S: text };
 			}
 			await call("PutItem", { Item: item });
+		},
+
+		async listEvents(email, sinceISO, limit = MAX_EVENTS_READ) {
+			const cap = Math.min(Math.max(1, limit), MAX_EVENTS_READ);
+			// SK 是 `<前缀>#<ISO>#<uuid>`,ISO 字典序即时间序,所以时间窗能直接落在
+			// 主键范围上,不用过滤扫描。上界取 `FB$` / `CLICK$`:'$'(0x24) 紧跟在
+			// '#'(0x23) 之后,任何 `FB#…` 都小于 `FB$`——比 ￿ 之类的哨兵省心。
+			const pull = (prefix: "FB" | "CLICK") =>
+				call<{ Items?: Item[] }>("Query", {
+					KeyConditionExpression: "PK = :pk AND SK BETWEEN :lo AND :hi",
+					ExpressionAttributeValues: {
+						":pk": { S: `USER#${email}` },
+						":lo": { S: `${prefix}#${sinceISO}` },
+						":hi": { S: `${prefix}$` },
+					},
+					ScanIndexForward: false,
+					Limit: cap,
+				});
+			const [fb, click] = await Promise.all([pull("FB"), pull("CLICK")]);
+			const events: StoredEvent[] = [];
+			for (const item of fb.Items ?? []) {
+				const kind = s(item.kind) as FeedbackKind | undefined;
+				if (!kind) continue;
+				const text = s(item.text);
+				events.push({
+					date: s(item.date) ?? "",
+					itemId: s(item.itemId) ?? "",
+					kind,
+					...(text ? { text } : {}),
+					at: s(item.at) ?? "",
+				});
+			}
+			for (const item of click.Items ?? []) {
+				events.push({ date: s(item.date) ?? "", itemId: s(item.itemId) ?? "", at: s(item.at) ?? "" });
+			}
+			// 两条流各自倒序回来,合并后按时间重排一次才是真的「新的在前」
+			return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, cap);
 		},
 
 		async listBriefDates(email) {

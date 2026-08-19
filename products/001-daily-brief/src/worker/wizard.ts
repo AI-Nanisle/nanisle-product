@@ -27,7 +27,7 @@ import {
 } from "../shared/pipeline-core.ts";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
 import { catalogPromptLines } from "../shared/catalog.ts";
-import { MAX_TRACKERS, loadConfig, saveTrackers } from "./config.ts";
+import { MAX_TRACKERS, bumpSourceMetrics, loadConfig, saveTrackers } from "./config.ts";
 import { probeFeed } from "./feeds.ts";
 
 /** userAiGuard 通过后的调用环境:当前用户 + 存储 + AI 配置。 */
@@ -152,21 +152,39 @@ function bad(error: string): WizardResult {
 
 // ---------- 步骤 1:理解 ----------
 
+/**
+ * R8 · 追问用的固定问法与选项。**由服务端出题,不是模型现编的**:选项本身
+ * 就是在教用户这个字段要什么,每次都必须一模一样;交给模型出题,每个用户
+ * 看到的问法都不同,这个字段也就没法长期比较了。
+ *
+ * 问法是口语的「你在忙什么」,选项却是照着「什么会改变你的动作」写的——
+ * 直接问「这些变化会影响你的什么决定」,十个人有九个答「了解行业动态」。
+ */
+export const PURPOSE_QUESTION = "你现在主要在忙这块的什么?——这决定了我该给你挑哪一类";
+export const PURPOSE_OPTIONS = [
+	"做产品,盯竞品和平台规则",
+	"选模型 / 搭技术栈",
+	"找机会、看投资",
+	"就是想跟上,不为具体的事",
+];
+
 const UNDERSTAND_SYSTEM = `你是「每日简报」的编辑。用户会用自己的话描述一个想长期追踪的问题,你要把它整理成一份「编辑的理解」——一组独立短句,用户会逐句圈改,然后这份理解会长期指导每天的选材。
 
 只输出一个 JSON 对象,不要任何其他文字:
-{"name": "简报分区标题", "segments": ["一句话", "一句话", ...]}
+{"name": "简报分区标题", "segments": ["一句话", "一句话", ...], "purpose": "用户拿这份追踪干什么(只有他明说了才填,否则省略)"}
 
 要求:
 - segments 3 到 ${MAX_INTENT_SEGMENTS} 句,每句 ≤50 字,简体中文(专有名词保留原文);
 - 每句只讲一个维度(追踪范围/优先什么/过滤什么/判断标准),可独立修改而不牵连其他句;
 - 忠于用户原话,不发挥、不编造用户没提的偏好;拿不准的宁可少写,留给用户补;
+- purpose 是「他在忙什么、什么变化会改变他的动作」(如「在做产品,怕平台改权限和定价」)。**只有用户原话里说了才填,一个字都不许猜**——没说就省略这个字段,系统会去问他;
 - 用户多说了几轮时,基于全部原话整体重写完整理解,不做增量拼接;
 - name 是简报里的分区标题:名词短语,≤16 字,不带标点。`;
 
 function understandPrompts(
 	messages: string[],
 	locked: { index: number; text: string }[],
+	purpose?: string,
 ): { system: string; prompt: string } {
 	let system = UNDERSTAND_SYSTEM;
 	if (locked.length > 0) {
@@ -177,6 +195,9 @@ function understandPrompts(
 	const prompt =
 		"用户在向导里说过的话(按时间顺序):\n" +
 		messages.map((m, i) => `${i + 1}.「${m}」`).join("\n") +
+		// 已经问到用途时,理解要顺着它写——同一个话题,做产品的人和看投资的人
+		// 该被挑的是完全不同的两批内容。
+		(purpose ? `\n\n用户已经确认了他在忙什么:「${purpose}」。理解里要有一句体现这个取舍。` : "") +
 		"\n\n据此输出完整的理解 JSON。";
 	return { system, prompt };
 }
@@ -191,8 +212,10 @@ function skeletonSegments(): IntentSegment[] {
 }
 
 export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Promise<WizardResult> {
-	const body = (bodyRaw ?? {}) as { trackerKey?: unknown; messages?: unknown };
+	const body = (bodyRaw ?? {}) as { trackerKey?: unknown; messages?: unknown; purpose?: unknown };
 	const trackerKey = typeof body.trackerKey === "string" ? body.trackerKey.trim().slice(0, 64) : "";
+	// R8 · 用户点了选项(或填了「其他」)时带回来的用途,优先于模型的抽取
+	const chosenPurpose = typeof body.purpose === "string" ? body.purpose.trim().slice(0, 200) : "";
 	if (!Array.isArray(body.messages) || body.messages.length === 0 || body.messages.length > MAX_WIZARD_TURNS) {
 		return bad(`messages must be a non-empty string array (max ${MAX_WIZARD_TURNS})`);
 	}
@@ -216,6 +239,9 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 		.map((seg, index) => ({ index, text: seg.text, edited: seg.edited === true }))
 		.filter((l) => l.edited);
 
+	// 已知的用途:用户刚选的 > 草稿里存过的(模型抽出来的作为兜底,见下)
+	let purpose = chosenPurpose || existing?.purpose || "";
+
 	let name: string;
 	let segments: IntentSegment[];
 	let note: string | undefined;
@@ -224,13 +250,19 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 		segments = skeletonSegments();
 		note = "AI 未接入(mock 模式),先按你的原话搭了理解骨架——每句都可以直接圈改。";
 	} else {
-		const { system, prompt } = understandPrompts(messages, locked);
+		const { system, prompt } = understandPrompts(messages, locked, purpose);
 		const result = await complete(withTokenFloor(ctx.ai, 2048), { prompt, system, json: true });
 		const parsed = parseJsonBlock(result.text);
 		name = typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 60) : question.slice(0, 16);
 		segments = cleanStringList(parsed.segments, MAX_INTENT_SEGMENTS, 200).map((text) => ({ text }));
 		if (segments.length === 0) throw new AiError("模型没有给出可用的理解,请重试。", 502);
+		// 用户原话里本来就说了用途 → 直接采用,不必再问一遍
+		if (!purpose && typeof parsed.purpose === "string") purpose = parsed.purpose.trim().slice(0, 200);
 	}
+
+	// R8 · 只有「还不知道用途」才追问,而且只追这一轮:知道了就再也不问。
+	// 两轮以上会从「帮我想清楚」变成「被盘问」,向导的放弃率会掉。
+	const ask = purpose ? undefined : { question: PURPOSE_QUESTION, options: PURPOSE_OPTIONS };
 	// §7.2 兜底:用户红标圈改过的句子按位置强制覆盖,不管模型听没听话
 	segments = mergeLockedSegments(existing?.intentSegments, segments);
 
@@ -238,14 +270,25 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 	let draft: Tracker;
 	if (existing) {
 		draft = prependLog(
-			{ ...existing, name, question, intentSegments: segments, intent: joinSegments(segments), stage: "understanding" },
-			"你补充了一句,编辑重写了理解(你圈改过的句子原样保留)",
+			{
+				...existing,
+				name,
+				question,
+				...(purpose ? { purpose } : {}),
+				intentSegments: segments,
+				intent: joinSegments(segments),
+				stage: "understanding",
+			},
+			chosenPurpose
+				? `你说了在忙什么:「${chosenPurpose}」,编辑按它重写了理解`
+				: "你补充了一句,编辑重写了理解(你圈改过的句子原样保留)",
 		);
 	} else {
 		draft = {
 			key: `t-${crypto.randomUUID().slice(0, 8)}`,
 			name,
 			question,
+			...(purpose ? { purpose } : {}),
 			askedAt: now,
 			intentSegments: segments,
 			intent: joinSegments(segments),
@@ -261,7 +304,7 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 		? config.trackers.map((t) => (t.key === existing.key ? draft : t))
 		: [...config.trackers, draft];
 	await saveTrackers(ctx.store, ctx.email, trackers);
-	return { status: 200, body: { tracker: draft, trackers, ...(note ? { note } : {}) } };
+	return { status: 200, body: { tracker: draft, trackers, ...(ask ? { ask } : {}), ...(note ? { note } : {}) } };
 }
 
 // ---------- 步骤 2:标签 ----------
@@ -358,6 +401,9 @@ function sourcesPrompt(draft: Tracker, adopted: string[], rejected: string[], ex
 	const lines = [
 		"追踪定义:",
 		`- 问题(用户原话):「${draft.question ?? draft.name}」`,
+		// R7 · 找源时最有分辨力的一行:知道他在做产品、怕平台改规则,才提得出
+		// 定价页/权限文档/更新日志这类源;只知道话题就只会给一堆新闻源。
+		...(draft.purpose ? [`- 用户在忙什么(据此选源类型):${draft.purpose}`] : []),
 		`- 编辑的理解:${joinSegments(trackerSegments(draft)) || "(空)"}`,
 		`- 收:${(draft.include ?? []).join("、") || "(未设)"};不收:${(draft.exclude ?? []).join("、") || "(未设)"}`,
 	];
@@ -472,6 +518,8 @@ export async function wizardSources(ctx: WizardContext, bodyRaw: unknown): Promi
 	}
 
 	const advanced = await advanceDraft();
+	// 仪表:展示数只算真实出现在 UI 的候选(试抓通过的);采纳数在 /api/sources/add 记
+	if (alive.length > 0) await bumpSourceMetrics(ctx.store, ctx.email, { shown: alive.length });
 	const note =
 		alive.length === 0
 			? "这轮没有找到抓得通的候选源。换个说法「再找几个」,或从来源库手动挑选。"

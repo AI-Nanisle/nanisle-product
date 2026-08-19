@@ -3,7 +3,7 @@
 // carries. Every source the chat agent touches goes through here first:
 // nothing enters the config unless it actually parsed.
 
-import { parseFeed, USER_AGENT } from "../shared/pipeline-core.ts";
+import { parseFeedMeta, USER_AGENT } from "../shared/pipeline-core.ts";
 import type { RawEntry } from "../shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../shared/default-sources.ts";
 
@@ -11,6 +11,8 @@ export interface FeedProbe {
 	ok: boolean;
 	/** The URL that actually served a feed (differs from the input after discovery). */
 	url: string;
+	/** Feed 自报的标题——「源名称」留空时的回填来源。 */
+	title?: string;
 	total?: number;
 	fresh?: number;
 	latest?: { title: string; publishedAt: string | null }[];
@@ -24,7 +26,7 @@ const COMMON_PATHS = ["/feed", "/rss", "/rss.xml", "/atom.xml", "/feed.xml", "/i
 // Discovery fetches beyond the direct attempt — keeps worst-case subrequests bounded.
 const MAX_DISCOVERY_FETCHES = 3;
 
-type FetchOutcome = { entries: RawEntry[] } | { error: string; html?: string };
+type FetchOutcome = { entries: RawEntry[]; title: string } | { error: string; html?: string };
 
 async function fetchOnce(url: string, timeoutMs: number): Promise<FetchOutcome> {
 	let res: Response;
@@ -43,8 +45,8 @@ async function fetchOnce(url: string, timeoutMs: number): Promise<FetchOutcome> 
 	if (!res.ok) return { error: `HTTP ${res.status}` };
 	const body = await res.text();
 	try {
-		const entries = parseFeed(body);
-		if (entries.length > 0) return { entries };
+		const { title, entries } = parseFeedMeta(body);
+		if (entries.length > 0) return { entries, title };
 	} catch {
 		// fall through — not XML at all
 	}
@@ -53,7 +55,7 @@ async function fetchOnce(url: string, timeoutMs: number): Promise<FetchOutcome> 
 	return { error: "不是可解析的 RSS/Atom", ...(isHtml ? { html: body.slice(0, 120_000) } : {}) };
 }
 
-function summarize(url: string, entries: RawEntry[]): FeedProbe {
+function summarize(url: string, entries: RawEntry[], title: string): FeedProbe {
 	const now = Date.now();
 	const fresh = entries.filter(
 		(e) => e.publishedAt && now - e.publishedAt.getTime() <= DEFAULT_FILTERS.max_age_hours * 3600_000,
@@ -61,6 +63,7 @@ function summarize(url: string, entries: RawEntry[]): FeedProbe {
 	return {
 		ok: true,
 		url,
+		...(title ? { title } : {}),
 		total: entries.length,
 		fresh,
 		latest: entries.slice(0, 5).map((e) => ({
@@ -98,7 +101,7 @@ export async function probeFeed(input: string, timeoutMs = 12_000): Promise<Feed
 	}
 
 	const direct = await fetchOnce(url, timeoutMs);
-	if ("entries" in direct) return summarize(url, direct.entries);
+	if ("entries" in direct) return summarize(url, direct.entries, direct.title);
 
 	// Discovery: feeds the page declares first, then conventional paths on the origin.
 	const candidates: string[] = [];
@@ -118,7 +121,7 @@ export async function probeFeed(input: string, timeoutMs = 12_000): Promise<Feed
 		seen.add(cand);
 		attempts++;
 		const res = await fetchOnce(cand, timeoutMs);
-		if ("entries" in res) return { ...summarize(cand, res.entries), resolvedFrom: input };
+		if ("entries" in res) return { ...summarize(cand, res.entries, res.title), resolvedFrom: input };
 	}
 	return { ok: false, url, error: direct.error };
 }

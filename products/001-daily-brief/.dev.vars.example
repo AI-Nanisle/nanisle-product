@@ -22,15 +22,23 @@ APP_URL=http://localhost:3000/products/daily-brief
 # fallback for self-hosted instances. Leave unset locally for open access.
 #ACCESS_CODE=change-me
 
-# --- AWS store + generate Lambda (production; cdk stack lives in the main repo's infra/) ---
-# Leave ALL of these unset locally: the store falls back to KV with a single
-# dev@local user, and generate falls back to the in-Worker mock path.
+# --- AWS store + generate Lambda (cdk stack lives in the main repo's infra/) ---
+# 三个都留空 = KV 替身 + 固定用户 dev@local(fork / 零配置的默认路径),
+# 改动只落在本机 .wrangler,和线上没有半点关系。
+# 三个都填上 = 本地直连线上那张 DynamoDB 表,不用部署就能验真实读写。
+# 本地用的 key 走 nanisle-daily-brief-dev 这个 IAM 用户单独发放(不是线上
+# Worker 那把),发放步骤见主仓 infra/README.md「本地连线上 DynamoDB」。
 #AWS_ACCESS_KEY_ID=AKIA...
 #AWS_SECRET_ACCESS_KEY=...
 #AWS_REGION=us-east-1
 #DDB_TABLE=nanisle-daily-brief
 # The generate Lambda's Function URL (the GenerateFunctionUrl output of `cdk deploy`):
 #GENERATE_URL=https://xxxx.lambda-url.us-east-1.on.aws/
+# 连了 DynamoDB 之后,本地这个人是谁:留空 = dev@local(表里独立的沙盒分区,
+# 定时刊只跑白名单,不会碰它);填自己的邮箱 = 直接读写线上那份真配置,
+# 本地改一下线上立刻生效——所以别拿它做破坏性实验。只在没配
+# NANISLE_SSO_SECRET 时生效,配了 SSO 的实例身份只认会话 cookie。
+#DEV_EMAIL=you@example.com
 
 # AI_PROVIDER=deepseek only (the production default):
 #DEEPSEEK_API_KEY=sk-...

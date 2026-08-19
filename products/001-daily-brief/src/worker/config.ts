@@ -17,22 +17,26 @@ import type {
 	TrackerLogEntry,
 	TrackerSourceRule,
 } from "../shared/pipeline-core";
-import { BUILTIN_TRACKERS, DEFAULT_SOURCES } from "../shared/default-sources.ts";
-import type { Store, UserConfig } from "../shared/store";
+import { DEFAULT_SOURCES } from "../shared/default-sources.ts";
+import type { SourceFunnelMetrics, Store, UserConfig } from "../shared/store";
 
-export const MAX_SOURCES = 50;
+// ≤30 源/人:docs/02 §8.3 的上限,DynamoDB 条目尺寸账和 Worker 免费档
+// 子请求预算(dev 回落路径一次请求抓全部源)都是按它算的。
+export const MAX_SOURCES = 30;
 export const MAX_TRACKERS = 12;
 
 /**
- * 读某人的配置;CONFIG 条目不存在时现场种一条(内置追踪器 + 默认源的深拷贝)
- * 并落库。种子逻辑放在读路径而不是登录回调上,fork 本地零配置也能自然触发。
- * 深拷贝是必须的:调用方会原地 push/改字段,不能把模块级默认数组交出去。
+ * 读某人的配置;CONFIG 条目不存在时现场种一条并落库。种子里只有默认源库的
+ * 深拷贝,追踪器一条不给:新用户第一眼是空的配置页(向导直接开问),追踪
+ * 什么由他自己定义。种子逻辑放在读路径而不是登录回调上,fork 本地零配置也
+ * 能自然触发。深拷贝是必须的:调用方会原地 push/改字段,不能把模块级默认
+ * 数组交出去。
  */
 export async function loadConfig(store: Store, email: string): Promise<UserConfig> {
 	const existing = await store.getConfig(email);
 	if (existing) return existing;
 	const seeded: UserConfig = {
-		trackers: structuredClone(BUILTIN_TRACKERS),
+		trackers: [],
 		sources: structuredClone(DEFAULT_SOURCES),
 		updatedAt: new Date().toISOString(),
 	};
@@ -48,6 +52,21 @@ export async function saveSources(store: Store, email: string, sources: SourceCo
 export async function saveTrackers(store: Store, email: string, trackers: Tracker[]): Promise<void> {
 	const config = await loadConfig(store, email);
 	await store.putConfig(email, { ...config, trackers, updatedAt: new Date().toISOString() });
+}
+
+/** 找源漏斗计数自增(docs/02 §7.3 仪表)。读改写,单用户编辑场景够用。 */
+export async function bumpSourceMetrics(
+	store: Store,
+	email: string,
+	delta: Partial<SourceFunnelMetrics>,
+): Promise<void> {
+	const config = await loadConfig(store, email);
+	const prev = config.metrics ?? { shown: 0, adopted: 0 };
+	const metrics: SourceFunnelMetrics = {
+		shown: prev.shown + (delta.shown ?? 0),
+		adopted: prev.adopted + (delta.adopted ?? 0),
+	};
+	await store.putConfig(email, { ...config, metrics, updatedAt: new Date().toISOString() });
 }
 
 export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { error: string } {
@@ -124,6 +143,7 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 		const quota = Math.min(Math.max(quotaRaw, 1), MAX_TRACKER_QUOTA);
 		const question = typeof t.question === "string" ? t.question.trim().slice(0, 500) : undefined;
 		const askedAt = typeof t.askedAt === "string" ? t.askedAt.trim().slice(0, 40) : undefined;
+		const purpose = typeof t.purpose === "string" ? t.purpose.trim().slice(0, 200) : undefined;
 		const intentSegments = cleanSegments(t.intentSegments);
 		// The chat agent only knows about `intent`; when it rewrites the line the
 		// stale clauses are gone and the dossier re-splits from the new text.
@@ -162,6 +182,7 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			name,
 			quota,
 			...(question ? { question } : {}),
+			...(purpose ? { purpose } : {}),
 			...(askedAt ? { askedAt } : {}),
 			...(intent ? { intent } : {}),
 			...(intentSegments ? { intentSegments } : {}),
@@ -172,7 +193,6 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			...(sourceRules.length ? { sourceRules } : {}),
 			...(rejectedSourceUrls.length ? { rejectedSourceUrls } : {}),
 			...(t.enabled === false ? { enabled: false } : {}),
-			...(t.builtin === true ? { builtin: true } : {}),
 			...(t.stage === "understanding" || t.stage === "tags" || t.stage === "sources"
 				? { stage: t.stage }
 				: {}),

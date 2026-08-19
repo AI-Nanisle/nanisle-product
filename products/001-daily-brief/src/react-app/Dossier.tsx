@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { MAX_INTENT_SEGMENTS, MAX_TRACKER_QUOTA, joinSegments, trackerSegments } from "../shared/pipeline-core";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
+import type { CatalogEntry } from "../shared/catalog";
 import type { ProposalItem, TestResult } from "./editor";
 import { CATEGORY_LABELS } from "./SourceLibrary";
 import CandidateCard from "./CandidateCard";
+import CatalogPicker from "./CatalogPicker";
 
 // 追踪定义档案:一份定义 = 一页文档,读起来像编辑写给你的稿子,
 // 但每一处虚线都能当场圈改。四节的顺序就是信任链——
@@ -83,7 +85,14 @@ export function InlineInput({
 	);
 }
 
-/** 标签行:回车添加,× 删除。收(墨)与不收(朱)只差配色。向导第二步也用它。 */
+/**
+ * 跨栏拖拽的临时载荷。dragover 阶段浏览器不让读 dataTransfer(只有 drop 时才给),
+ * 但「这枚标签能不能落这儿」必须在 dragover 就判断,所以payload 放模块变量;
+ * dataTransfer 里仍写一份纯文本,拖到编辑器等外部目标时不至于是个空拖。
+ */
+let dragPayload: { bucket: string; chip: Chip } | null = null;
+
+/** 标签行:回车添加,× 删除,给了 bucket 就能拖到另一行。收(墨)与不收(朱)只差配色。向导第二步也用它。 */
 export function ChipRow({
 	chips,
 	accent,
@@ -92,6 +101,8 @@ export function ChipRow({
 	onClose,
 	onAdd,
 	onRemove,
+	bucket,
+	onDropChip,
 }: {
 	chips: Chip[];
 	accent?: boolean;
@@ -100,15 +111,61 @@ export function ChipRow({
 	onClose: () => void;
 	onAdd: (text: string) => void;
 	onRemove: (chip: Chip) => void;
+	/** 本行的身份;与 onDropChip 一起给出才开启拖拽。 */
+	bucket?: string;
+	/** 另一行的标签被拖进来了(同一行内的拖拽会被忽略)。 */
+	onDropChip?: (chip: Chip, fromBucket: string) => void;
 }) {
+	const [over, setOver] = useState(false);
+	const draggable = Boolean(bucket && onDropChip);
+	const accepts = () => draggable && dragPayload !== null && dragPayload.bucket !== bucket;
 	return (
-		<div className="flex flex-wrap items-center gap-1.5">
+		<div
+			onDragOver={(e) => {
+				if (!accepts()) return;
+				e.preventDefault();
+				e.dataTransfer.dropEffect = "move";
+				setOver(true);
+			}}
+			onDragLeave={(e) => {
+				// 拖过内部子元素也会冒出 dragleave,只有真正离开整行才取消高亮。
+				if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+				setOver(false);
+			}}
+			onDrop={(e) => {
+				if (!accepts()) return;
+				e.preventDefault();
+				setOver(false);
+				const payload = dragPayload;
+				dragPayload = null;
+				if (payload) onDropChip?.(payload.chip, payload.bucket);
+			}}
+			className={`flex flex-wrap items-center gap-1.5 ${
+				draggable
+					? `min-h-9 rounded-md border border-dashed p-1 transition-colors ${
+							over ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-transparent"
+						}`
+					: ""
+			}`}
+		>
 			{chips.map((c) => (
 				<span
 					key={`${c.sourceKey ?? ""}:${c.text}`}
+					draggable={draggable}
+					onDragStart={(e) => {
+						if (!bucket) return;
+						dragPayload = { bucket, chip: c };
+						e.dataTransfer.effectAllowed = "move";
+						e.dataTransfer.setData("text/plain", c.text);
+					}}
+					onDragEnd={() => {
+						dragPayload = null;
+						setOver(false);
+					}}
+					title={draggable ? "拖到另一栏可以改判收 / 不收" : undefined}
 					className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[12px] ${
-						accent ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "bg-[var(--paper-deep)] text-[var(--ink)]"
-					}`}
+						draggable ? "cursor-grab select-none active:cursor-grabbing" : ""
+					} ${accent ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "bg-[var(--paper-deep)] text-[var(--ink)]"}`}
 				>
 					{c.text}
 					{c.scope && <span className="font-mono-sc text-[10px] opacity-80">{c.scope}</span>}
@@ -166,7 +223,11 @@ export interface DossierProps {
 	onTest: (url: string) => void;
 	onFindMore: () => void;
 	onAdoptCandidate: (item: ProposalItem) => void;
+	/** 「全部加入」:把这一轮试抓通过的候选一次采纳。 */
+	onAdoptAllCandidates: () => void;
 	onRejectCandidate: (item: ProposalItem) => void;
+	/** 从精选目录加一个源:进全局源池并绑定这份定义(服务端仍会试抓)。 */
+	onAddCatalog: (entry: CatalogEntry) => Promise<void>;
 	/** 把一句话交给编辑(真 AI 时才走网络;mock 由本页就地起草提案)。 */
 	onSay: (text: string) => void;
 }
@@ -185,7 +246,9 @@ export default function Dossier({
 	onTest,
 	onFindMore,
 	onAdoptCandidate,
+	onAdoptAllCandidates,
 	onRejectCandidate,
+	onAddCatalog,
 	onSay,
 }: DossierProps) {
 	const [editKey, setEditKey] = useState<string | null>(null);
@@ -196,6 +259,7 @@ export default function Dossier({
 	const [proposal, setProposal] = useState<{ quote: string; kind: "inc" | "exc" } | null>(null);
 	const [ruleOpen, setRuleOpen] = useState<string | null>(null);
 	const [pickOpen, setPickOpen] = useState(false);
+	const [catalogOpen, setCatalogOpen] = useState(false);
 
 	const segments = trackerSegments(t);
 	const paused = t.enabled === false;
@@ -268,6 +332,39 @@ export default function Dossier({
 		onPatch({ sourceRules: rules }, `你取消了「${sourceName(chip.sourceKey)}」上的${label}规则「${chip.text}」`);
 	};
 
+	/** 拖到另一栏 = 改判收 / 不收。局部规则的标签跟着它的来源一起换栏。 */
+	const moveChip = (to: "include" | "exclude", chip: Chip) => {
+		const from: "include" | "exclude" = to === "include" ? "exclude" : "include";
+		const label = (kind: "include" | "exclude") => (kind === "include" ? "收什么" : "不收什么");
+		if (!chip.sourceKey) {
+			const target = t[to] ?? [];
+			onPatch(
+				{
+					[from]: (t[from] ?? []).filter((x) => x !== chip.text),
+					[to]: target.includes(chip.text) ? target : [...target, chip.text],
+				},
+				`你把「${chip.text}」从「${label(from)}」挪到了「${label(to)}」`,
+			);
+			return;
+		}
+		const rules = (t.sourceRules ?? []).map((rule): TrackerSourceRule =>
+			rule.sourceKey === chip.sourceKey
+				? {
+						...rule,
+						[from]: (rule[from] ?? []).filter((x) => x !== chip.text),
+						[to]: [...new Set([...(rule[to] ?? []), chip.text])],
+					}
+				: rule,
+		);
+		onPatch(
+			{ sourceRules: rules },
+			`你把「${sourceName(chip.sourceKey)}」上的「${chip.text}」从${label(from)}挪到了${label(to)}`,
+		);
+	};
+
+	/** 试抓通过的候选数——只有 2 个以上才值得给「全部加入」。 */
+	const adoptableCount = candidates.filter((c) => c.ok).length;
+
 	// ---------- 04 指定信源 ----------
 
 	const updateRule = (sourceKey: string, patch: Partial<TrackerSourceRule>, log: string) => {
@@ -331,9 +428,6 @@ export default function Dossier({
 			{/* 报头行 */}
 			<div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
 				<span className={`${monoLabel} text-[var(--ink-3)]`}>追踪定义 · {docId}</span>
-				{t.builtin && (
-					<span className="font-mono-sc rounded border border-[var(--line)] px-1 text-[10px] text-[var(--ink-3)]">内置</span>
-				)}
 				{paused && <span className="font-mono-sc text-[10px] text-[var(--accent)]">已停用</span>}
 				<span className="ml-auto flex items-baseline gap-2">
 					<select
@@ -470,6 +564,36 @@ export default function Dossier({
 				<p className="font-mono-sc m-0 mt-1 pl-3.5 text-[10px] text-[var(--ink-3)]">
 					{t.askedAt ? `${mmdd(t.askedAt)} · ` : ""}原话不会被 AI 改动
 				</p>
+				{/* R7 · 你在忙什么。它和原话一样是定义的一部分,而且是选材分岔口:
+				    同一个话题,做产品的人和看投资的人该收到的是两批内容。 */}
+				<div className="mt-2.5 pl-3.5">
+					<span className="font-mono-sc mr-2 text-[10px] uppercase tracking-[0.08em] text-[var(--ink-3)]">
+						你在忙什么
+					</span>
+					{editKey === "purpose" ? (
+						<InlineInput
+							value={t.purpose ?? ""}
+							placeholder="例如:在做产品,怕平台改权限和定价"
+							className="min-w-72 text-[13px]"
+							onCommit={(v) => {
+								setEditKey(null);
+								const purpose = v.trim();
+								if (purpose !== (t.purpose ?? "")) {
+									onPatch({ purpose }, purpose ? `你改了在忙什么:「${purpose}」` : "你清空了「在忙什么」");
+								}
+							}}
+							onCancel={() => setEditKey(null)}
+						/>
+					) : (
+						<span
+							onClick={() => setEditKey("purpose")}
+							title="点击改写"
+							className="cursor-text border-b border-dashed border-[var(--line-strong)] text-[13px] text-[var(--ink-2)] transition-colors hover:bg-[var(--accent-soft)]"
+						>
+							{t.purpose || <span className="text-[var(--ink-3)]">没说——选材只按话题走,点击补上</span>}
+						</span>
+					)}
+				</div>
 			</section>
 
 			{/* 02 编辑的理解 */}
@@ -530,7 +654,7 @@ export default function Dossier({
 
 			{/* 03 收什么 / 不收什么 */}
 			<section className="mt-6">
-				<p className={`${sectionLabel} mb-2`}>03 · 收什么 / 不收什么</p>
+				<p className={`${sectionLabel} mb-2`}>03 · 收什么 / 不收什么 · 标签可在两栏间拖动</p>
 				<div className="grid gap-3 sm:grid-cols-2">
 					<div>
 						<p className="m-0 mb-1.5 text-[12px] text-[var(--ink-3)]">收</p>
@@ -541,6 +665,8 @@ export default function Dossier({
 							onClose={() => setChipOpen(null)}
 							onAdd={(text) => addChip("include", text)}
 							onRemove={(chip) => removeChip("include", chip)}
+							bucket="include"
+							onDropChip={(chip) => moveChip("include", chip)}
 						/>
 					</div>
 					<div>
@@ -553,6 +679,8 @@ export default function Dossier({
 							onClose={() => setChipOpen(null)}
 							onAdd={(text) => addChip("exclude", text)}
 							onRemove={(chip) => removeChip("exclude", chip)}
+							bucket="exclude"
+							onDropChip={(chip) => moveChip("exclude", chip)}
 						/>
 					</div>
 				</div>
@@ -711,6 +839,16 @@ export default function Dossier({
 						))}
 
 						<div className="mt-2.5 flex flex-wrap items-center gap-2">
+							{adoptableCount > 1 && (
+								<button
+									type="button"
+									onClick={onAdoptAllCandidates}
+									disabled={editorBusy}
+									className="font-mono-sc cursor-pointer rounded border border-[var(--ink)] bg-[var(--ink)] px-2.5 py-1 text-[11px] text-[var(--paper)] transition-colors hover:bg-[var(--accent)] hover:border-[var(--accent)] disabled:opacity-40"
+								>
+									全部加入 {adoptableCount} 个
+								</button>
+							)}
 							<button
 								type="button"
 								onClick={onFindMore}
@@ -725,6 +863,13 @@ export default function Dossier({
 								className={`${ghostBtn} hover:text-[var(--ink)]`}
 							>
 								{pickOpen ? "收起来源库" : "从来源库添加"}
+							</button>
+							<button
+								type="button"
+								onClick={() => setCatalogOpen((v) => !v)}
+								className={`${ghostBtn} hover:text-[var(--ink)]`}
+							>
+								{catalogOpen ? "收起精选目录" : "从精选目录添加"}
 							</button>
 						</div>
 						{pickOpen && (
@@ -747,6 +892,13 @@ export default function Dossier({
 									<span className="font-mono-sc text-[11px] text-[var(--ink-3)]">来源库里的源都在这份定义里了</span>
 								)}
 							</div>
+						)}
+						{catalogOpen && (
+							<CatalogPicker
+								existingUrls={selectedSources.map((s) => s.url)}
+								onPick={onAddCatalog}
+								note="加入会同时进来源库并绑定这份定义;每条都经人工验证,服务端仍会真实试抓。"
+							/>
 						)}
 					</div>
 				)}

@@ -28,6 +28,13 @@ export interface AppEnv {
 	APP_URL?: string;
 	/** Timezone that defines "today" (default America/New_York). */
 	BRIEF_TZ?: string;
+	/**
+	 * 本地 dev 专用:未配 NANISLE_SSO_SECRET 时(没有登录闸口)冒充哪个用户。
+	 * 留空 = dev@local(零配置默认)。配上自己的邮箱,本地就直接读写线上那份
+	 * 用户数据——前提是这个邮箱在白名单里,否则照样 403。生产实例永远别设:
+	 * 配了 SSO secret 时这个值完全不被读到,身份只认会话 cookie。
+	 */
+	DEV_EMAIL?: string;
 
 	// --- AWS 侧(主仓 infra/ 的 cdk stack;三个都配齐才走 DynamoDB,否则 KV 替身) ---
 	/** Secret. 最小权限 IAM 用户 nanisle-daily-brief-worker 的 access key。 */

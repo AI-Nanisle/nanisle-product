@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Brief, BriefItem, DroppedItem, FeedbackKind } from "../shared/types";
+import { ISSUE_ITEM_ID } from "../shared/types";
 import Config from "./Config";
+import { SiteHeader } from "./SiteChrome";
 import { apiPath, pathForView, productPath, type ProductView, viewFromPathname } from "./paths";
 
 // 请求不带 x-access-code:userGuard 只认会话 cookie(F6)。访问码已降级为
@@ -24,14 +26,14 @@ function isStale(brief: Brief): boolean {
 
 // ---------- per-item feedback ----------
 
-// 四个一键信号,对系统的意义各不相同:
-// 有用/没用 = 口味;已知道 = 选题对但不新(别降这类选题的权);
-// 多找这种 = 最高质量的正向定向信号(直接指向追踪器该收什么)。
-const VOTE_KINDS: { kind: "up" | "down" | "known" | "more"; label: string; done: string }[] = [
-	{ kind: "up", label: "有用", done: "✓ 有用" },
+// R4 · 从四个按钮收敛到两个 + 一个文本入口。四个并排时读者分不清该点哪个,
+// 结果是一个都不点;两个廉价信号(口味)+ 一个能说人话的口子,总信号量更高。
+// 代价要认:「已知道」承载的「话题对、我看过了」和「没用」是**相反**的调整
+// 方向,收敛之后这个区分只能从自由文本里读——所以文本必须真被消费(R2)。
+// known/more 的类型没删:老事件仍要被反馈摘要读回去。
+const VOTE_KINDS: { kind: "up" | "down"; label: string; done: string }[] = [
+	{ kind: "up", label: "👍 有用", done: "✓ 有用" },
 	{ kind: "down", label: "没用", done: "✓ 没用" },
-	{ kind: "known", label: "已知道", done: "✓ 已知道" },
-	{ kind: "more", label: "多找这种", done: "✓ 会多找" },
 ];
 
 function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
@@ -41,7 +43,7 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 	const [text, setText] = useState("");
 	const [sent, setSent] = useState(false);
 
-	const cast = (kind: "up" | "down" | "known" | "more") => {
+	const cast = (kind: "up" | "down") => {
 		if (vote) return;
 		setVote(kind);
 		localStorage.setItem(voteKey, kind);
@@ -77,16 +79,18 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 					onClick={() => setOpen((v) => !v)}
 					className="hover:text-[var(--ink)] cursor-pointer"
 				>
-					写句反馈
+					留下我的看法
 				</button>
 			</div>
 			{open && (
 				<div className="mt-2 flex gap-2">
+					{/* 引导语把收敛掉的三个按钮的语义捡回来:不同意 / 想更深 /
+					    已经因为它做了事——这些是固定按钮永远表达不了的。 */}
 					<input
 						value={text}
 						onChange={(e) => setText(e.target.value)}
 						onKeyDown={(e) => e.key === "Enter" && send()}
-						placeholder="例如:这条没什么细节 / 这类内容多来点"
+						placeholder="这条你怎么看?(不同意、想更深、或者你已经因为它做了什么)"
 						className="flex-1 rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-sm outline-none focus:border-[var(--line-strong)]"
 					/>
 					<button
@@ -185,6 +189,102 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 	);
 }
 
+// ---------- X2 · 轴外位 ----------
+
+/**
+ * 不属于任何追踪器的一条。三条护栏里的第一条是**明确标注**:它必须一眼看出
+ * 不是你定义的东西,绝不混进正常分区里假装是你要的。第二条是可关(下面那个
+ * 按钮),第三条(连续 10 期没人点自动停)在生成侧。
+ */
+function OffAxis({ item, date }: { item: BriefItem; date: string }) {
+	const [off, setOff] = useState(false);
+	const close = () => {
+		setOff(true);
+		void fetch(apiPath("prefs"), {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ offAxis: false }),
+		});
+	};
+	if (off) return <p className="mt-6 text-[13px] text-[var(--ink-3)]">已关掉轴外推荐——配置页可以再打开。</p>;
+
+	return (
+		<section className="mt-6 rounded-[10px] border border-dashed border-[var(--line-strong)] px-5 py-4">
+			<div className="flex items-baseline gap-3">
+				<span className="font-mono-sc text-[11px] text-[var(--ink-3)]">✳</span>
+				<h2 className="font-bold text-sm tracking-widest text-[var(--ink-2)]">不在你的追踪范围内</h2>
+				<button
+					type="button"
+					onClick={close}
+					className="font-mono-sc ml-auto cursor-pointer text-[11px] text-[var(--ink-3)] hover:text-[var(--accent)]"
+				>
+					不要这类
+				</button>
+			</div>
+			<div className="mt-2 pl-7">
+				<div className="font-mono-sc text-[12px] text-[var(--ink-3)]">{item.source}</div>
+				<h3 className="mt-1 font-bold text-lg leading-snug">
+					<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="headline-link">
+						{item.title}
+					</a>
+				</h3>
+				{item.relatesTo && (
+					<p className="mt-1.5 text-[13px] text-[var(--accent)]">为什么给你看:{item.relatesTo}</p>
+				)}
+				<p className="mt-1.5 text-[15px] leading-relaxed text-[var(--ink-2)]">{item.whyClick}</p>
+				<ItemFeedback date={date} itemId={item.id} />
+			</div>
+		</section>
+	);
+}
+
+// ---------- R5 · 期末一问 ----------
+
+/**
+ * 所有按钮都只能评价**已经给出的内容**;这一问问的是地图上的空洞——
+ * 「本该知道却没出现」。它是唯一能暴露「还缺哪类信源」的入口,所以放在
+ * 「已替你筛掉」下面、终点戳上面:读完了才知道少了什么。
+ */
+function IssueGap({ date }: { date: string }) {
+	const doneKey = `daily-brief-gap:${date}`;
+	const [text, setText] = useState("");
+	const [sent, setSent] = useState(() => Boolean(localStorage.getItem(doneKey)));
+
+	const send = () => {
+		if (!text.trim()) return;
+		void postFeedback(date, ISSUE_ITEM_ID, "text", text.trim());
+		localStorage.setItem(doneKey, "1");
+		setSent(true);
+		setText("");
+	};
+
+	return (
+		<section className="mt-4 rounded-[10px] border border-dashed border-[var(--line-strong)] px-4 py-3">
+			<p className="font-mono-sc text-[12px] text-[var(--ink-3)]">今天有什么本该知道,但没出现在这里?</p>
+			{sent ? (
+				<p className="mt-2 text-[13px] text-[var(--accent)]">已记下——下一期的找源会先补这一块。</p>
+			) : (
+				<div className="mt-2 flex gap-2">
+					<input
+						value={text}
+						onChange={(e) => setText(e.target.value)}
+						onKeyDown={(e) => e.key === "Enter" && send()}
+						placeholder="说个话题、一件事、或者某个你以为会看到的来源"
+						className="flex-1 rounded-md border border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-sm outline-none focus:border-[var(--line-strong)]"
+					/>
+					<button
+						type="button"
+						onClick={send}
+						className="font-mono-sc text-[12px] px-3 rounded-md border border-[var(--line-strong)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
+					>
+						发送
+					</button>
+				</div>
+			)}
+		</section>
+	);
+}
+
 // ---------- app ----------
 
 // locked = 401 没登录(引导去南屿登录);denied = 403 登录有效但不在内测
@@ -192,7 +292,21 @@ function DroppedRow({ item, date }: { item: DroppedItem; date: string }) {
 type LoadState = "loading" | "ready" | "locked" | "denied" | "error";
 type View = ProductView;
 
+/**
+ * 产品页 = 主站页眉 + 产品自己的报纸。页眉是外壳,产品的每个状态
+ * (读、配置、锁屏、报错)都在它下面——账号、导航、退出登录不会因为
+ * 走进产品就消失。
+ */
 export default function App() {
+	return (
+		<>
+			<SiteHeader />
+			<ProductPage />
+		</>
+	);
+}
+
+function ProductPage() {
 	const [brief, setBrief] = useState<Brief | null>(null);
 	const [dates, setDates] = useState<string[]>([]);
 	const [state, setState] = useState<LoadState>("loading");
@@ -290,7 +404,7 @@ export default function App() {
 	if (state === "locked") {
 		// F5:只留「用南屿账号登录」主按钮。访问码已降级为站长凭证,不再是阅读凭证。
 		return (
-			<div className="min-h-screen flex items-center justify-center px-6">
+			<div className="center-pane px-6">
 				<div className="w-full max-w-sm">
 					<h1 className="font-black text-3xl mb-1">每日简报</h1>
 					<p className="text-sm text-[var(--ink-2)] mb-6">这份简报是私人的。登录南屿账号后阅读。</p>
@@ -315,7 +429,7 @@ export default function App() {
 	if (state === "denied") {
 		// F8:登录有效但不在内测名单(403)。文案与 401 的「去登录」严格分开。
 		return (
-			<div className="min-h-screen flex items-center justify-center px-6">
+			<div className="center-pane px-6">
 				<div className="w-full max-w-sm">
 					<h1 className="font-black text-3xl mb-1">产品内测中</h1>
 					<p className="text-sm text-[var(--ink-2)] mb-6">{denyMsg}</p>
@@ -332,7 +446,7 @@ export default function App() {
 
 	if (state === "error") {
 		return (
-			<div className="min-h-screen flex items-center justify-center">
+			<div className="center-pane">
 				<p className="font-mono-sc text-sm text-[var(--ink-3)]">加载失败,稍后再试。</p>
 			</div>
 		);
@@ -340,7 +454,7 @@ export default function App() {
 
 	if (state === "loading") {
 		return (
-			<div className="min-h-screen flex items-center justify-center">
+			<div className="center-pane">
 				<p className="font-mono-sc text-sm text-[var(--ink-3)] animate-pulse">正在送报…</p>
 			</div>
 		);
@@ -353,13 +467,13 @@ export default function App() {
 	// 两个视图共用它,切换 tab 时报头、双线、终点戳都不动。
 	return (
 		<div className="mx-auto max-w-[906px] px-5 pb-24">
-			{/* 报头。两个视图共用:切换是一枚分段开关,生成动作留在简报页的状态行,
-			    不跟导航抢位置——配置页要的是安静。 */}
+			{/* 报头。两个视图共用:切换是一枚分段开关,生成动作压在双线下的状态行里,
+			    不跟导航抢位置——两个视图都够得着,配置页也还是安静的。 */}
 			<header className="pt-10 pb-4">
 				<div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
 					<span className="font-mono-sc inline-flex items-center gap-2 text-[11px] tracking-wider text-[var(--ink-3)]">
 						<span className="dot dot-accent" />
-						NANISLE · No.001
+						No.001 · 每周一个产品
 					</span>
 					<div className="inline-flex items-center gap-0.5 rounded-lg border border-[var(--line)] bg-[var(--card)] p-[3px]">
 						{(["brief", "config"] as const).map((v) => (
@@ -398,45 +512,57 @@ export default function App() {
 					)}
 				</div>
 				<div className="rule-double" />
-				{/* 生成状态行:平时是一句已完成的读数,跑起来就是进度 */}
-				{view === "brief" && (
-					<div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-0.5 pt-2">
-						{generating ? (
-							<>
-								<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
-									<span className="text-[var(--accent)]">▸</span> 抓取信息源,按追踪定义编选…
-									<span className="caret ml-1" />
-								</span>
-								<span className="font-mono-sc ml-auto shrink-0 text-[11px] text-[var(--ink-3)]">约半分钟</span>
-							</>
-						) : (
-							<>
-								<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
-									{genMsg ||
-										(brief && genTime ? (
-											<>
-												<span className="text-[var(--ok)]">✓</span> {genTime.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })} 已生成 ·
-												扫过 {brief.sourceCount} 源,入选 {totalItems} 条,筛掉 {brief.filteredOut.dropped} 条
-											</>
-										) : (
-											<>先在配置页定义追踪器,或直接生成第一期</>
+				{/* 生成状态行:平时是一句已完成的读数,跑起来就是进度。配置页同样留着——
+				    改完追踪定义要能当场试生成一期看效果,否则风格无从调起(docs/02 §8.2 调参回路) */}
+				<div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-0.5 pt-2">
+					{generating ? (
+						<>
+							<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
+								<span className="text-[var(--accent)]">▸</span> 抓取信息源,按追踪定义编选…
+								<span className="caret ml-1" />
+							</span>
+							<span className="font-mono-sc ml-auto shrink-0 text-[11px] text-[var(--ink-3)]">约半分钟</span>
+						</>
+					) : (
+						<>
+							<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
+								{genMsg ||
+									(view === "config" ? (
+										<>改完定义按右边试一期 · 抓取加编选约半分钟,跑完自动跳到简报页</>
+									) : brief && genTime ? (
+										<>
+											<span className="text-[var(--ok)]">✓</span> {genTime.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })} 已生成 ·
+											扫过 {brief.sourceCount} 源,入选 {totalItems} 条,筛掉 {brief.filteredOut.dropped} 条
+										</>
+									) : (
+										<>先到配置页写下你想持续知道什么,再回来生成第一期</>
+									))}
+							</span>
+							<span className="ml-auto flex shrink-0 items-center gap-3">
+								{view === "brief" && brief && dates.length > 0 && (
+									<select
+										value={brief.date}
+										onChange={(e) => void load(e.target.value)}
+										className="font-mono-sc cursor-pointer border-0 bg-transparent text-[11px] text-[var(--ink-3)] outline-none"
+									>
+										{!dates.includes(brief.date) && <option value={brief.date}>{brief.date}</option>}
+										{dates.map((d) => (
+											<option key={d} value={d}>
+												{d}
+											</option>
 										))}
-								</span>
-								<span className="ml-auto flex shrink-0 items-center gap-3">
-									{brief && dates.length > 0 && (
-										<select
-											value={brief.date}
-											onChange={(e) => void load(e.target.value)}
-											className="font-mono-sc cursor-pointer border-0 bg-transparent text-[11px] text-[var(--ink-3)] outline-none"
-										>
-											{!dates.includes(brief.date) && <option value={brief.date}>{brief.date}</option>}
-											{dates.map((d) => (
-												<option key={d} value={d}>
-													{d}
-												</option>
-											))}
-										</select>
-									)}
+									</select>
+								)}
+								{/* 配置页上这是唯一的行动号召,用版记章(index.css .btn-stamp);
+								    简报页的正文才是主角,「重新生成」退回一行灰字,不跟标题抢眼睛。 */}
+								{view === "config" ? (
+									<button type="button" onClick={() => void generate()} className="btn-stamp">
+										<span className="mark" aria-hidden="true">
+											▸
+										</span>
+										试生成一期
+									</button>
+								) : (
 									<button
 										type="button"
 										onClick={() => void generate()}
@@ -444,29 +570,29 @@ export default function App() {
 									>
 										{brief ? "重新生成 ↻" : "生成第一期 ↻"}
 									</button>
-								</span>
-							</>
-						)}
-					</div>
-				)}
+								)}
+							</span>
+						</>
+					)}
+				</div>
 			</header>
 
 			{view === "config" ? (
 				<Config />
 			) : !brief ? (
-				/* 空态:还没生成过任何一期。引导两步——先改追踪器,再生成 */
+				/* 空态:还没生成过任何一期。引导两步——先定义追踪器,再生成 */
 				<div className="mx-auto max-w-[672px]">
 					<div className="mt-8 rounded-[10px] border border-dashed border-[var(--line-strong)] bg-[var(--card)] px-6 py-12 text-center">
 						<p className="text-sm text-[var(--ink-2)]">还没有第一期简报。</p>
 						<p className="mt-2 text-[13px] text-[var(--ink-3)]">
-							先到配置页把追踪器改成你自己的长期问题,再回来点「生成第一期」。
+							简报的分区就是你的追踪定义。先到配置页说清你想持续知道什么,再回来点「生成第一期」。
 						</p>
 						<button
 							type="button"
 							onClick={() => setView("config")}
 							className="mt-5 cursor-pointer font-mono-sc text-[12px] text-[var(--accent)] hover:underline"
 						>
-							去配置追踪器 →
+							去写第一份追踪定义 →
 						</button>
 					</div>
 				</div>
@@ -513,6 +639,13 @@ export default function App() {
 				</section>
 			))}
 
+			{brief.offAxis && <OffAxis item={brief.offAxis} date={brief.date} />}
+			{brief.offAxisNote && (
+				<p className="mt-6 border-l-2 border-[var(--line-strong)] pl-3 text-[13px] text-[var(--ink-3)]">
+					{brief.offAxisNote}
+				</p>
+			)}
+
 			{/* 已替你筛掉 */}
 			<section className="mt-8">
 				<details className="dropped rounded-[10px] border border-[var(--line)] bg-[var(--paper-deep)] px-4 py-3">
@@ -533,6 +666,8 @@ export default function App() {
 					)}
 				</details>
 			</section>
+
+			<IssueGap date={brief.date} />
 
 			{/* 终点戳:有限性的仪式感 */}
 			<footer className="mt-16 flex flex-col items-center gap-8">

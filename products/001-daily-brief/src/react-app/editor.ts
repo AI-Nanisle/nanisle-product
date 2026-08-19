@@ -37,6 +37,8 @@ export interface WizardResponse {
 	tracker?: Tracker;
 	trackers?: Tracker[];
 	candidates?: ProposalItem[];
+	/** R8 · 编辑还不知道用户拿它干什么时的追问(问法和选项都由服务端固定)。 */
+	ask?: { question: string; options: string[] };
 	note?: string;
 }
 
@@ -56,13 +58,21 @@ async function post<T>(path: string, body: unknown, headers: Record<string, stri
 	return data;
 }
 
-/** 步骤 1 · 理解:messages 是本次向导里用户说过的话(第一句 = 原话)。 */
+/**
+ * 步骤 1 · 理解:messages 是本次向导里用户说过的话(第一句 = 原话)。
+ * purpose 是用户对 `ask` 追问的回答(选项文本或自填);带上它这一轮就不再追问。
+ */
 export function wizardUnderstand(
 	messages: string[],
 	trackerKey: string | undefined,
 	headers: Record<string, string>,
+	purpose?: string,
 ): Promise<WizardResponse> {
-	return post("wizard/understand", { messages, ...(trackerKey ? { trackerKey } : {}) }, headers);
+	return post(
+		"wizard/understand",
+		{ messages, ...(trackerKey ? { trackerKey } : {}), ...(purpose ? { purpose } : {}) },
+		headers,
+	);
 }
 
 /** 步骤 2 · 标签:基于已确认的理解起草收/不收建议。 */

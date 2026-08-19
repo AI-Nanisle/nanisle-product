@@ -4,7 +4,7 @@
 
 import { Hono } from "hono";
 import type { Context } from "hono";
-import { getCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { AiError, complete, resolveProvider } from "../shared/ai";
 import {
 	SESSION_COOKIE,
@@ -12,6 +12,7 @@ import {
 	appUrl,
 	loginUrl,
 	sessionEmail,
+	siteUrl,
 	userAiGuard,
 	userGuard,
 } from "./guard";
@@ -20,20 +21,33 @@ import { signToken, verifyToken } from "./sso";
 import { aiConfig } from "./env";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
+import { ISSUE_ITEM_ID } from "../shared/types";
 import {
+	activeTrackers,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
 	fetchAllSources,
 	fnv1a,
+	isQueryFeedUrl,
 	mockEditorial,
 	parseEditorialJson,
 } from "../shared/pipeline-core";
 import type { SourceConfig, TrackerSourceRule } from "../shared/pipeline-core";
+import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../shared/feedback";
 import { DEFAULT_FILTERS } from "../shared/default-sources";
 import { lambdaClient } from "../shared/store-dynamo";
-import { MAX_SOURCES, cleanSources, cleanTrackers, loadConfig, saveSources, saveTrackers } from "./config";
+import {
+	MAX_SOURCES,
+	bumpSourceMetrics,
+	cleanSources,
+	cleanTrackers,
+	loadConfig,
+	saveSources,
+	saveTrackers,
+} from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
+import { offAxisEnabled } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
 import type { WizardContext, WizardResult } from "./wizard";
@@ -47,17 +61,26 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const GEN_LIMIT = 10;
 const GEN_LIMIT_MSG = `今日立即生成次数已用完(${GEN_LIMIT} 次/日)。明早定时生成照常;调参明天继续。`;
 
-app.get("/api/health", (c) => {
+app.get("/api/health", async (c) => {
 	let provider = "invalid";
 	try {
 		provider = resolveProvider(aiConfig(c.env));
 	} catch {
 		// leave "invalid" — misconfigured AI_PROVIDER shouldn't take health down
 	}
+	// email 只回显调用方自己 cookie 里的身份(未登录 = null),不泄露别人的。
+	// 配置页拿它和 store 一起显示「我这会儿在读写谁的、哪儿的数据」——
+	// 本地 KV 和线上 DynamoDB 长得一模一样,不标出来就会把本地改动当成已上线。
+	const email = await sessionEmail(c.env, getCookie(c, SESSION_COOKIE));
 	return c.json({
 		ok: true,
 		provider,
 		store: awsConfigured(c.env) ? "dynamo" : "kv",
+		email,
+		// 页眉(react-app/SiteChrome.tsx)用这两个拼主站导航和「登录」按钮:
+		// 主站地址只有服务端知道(本地 dev 是 :3000,线上是 nanisle.com)。
+		site: siteUrl(c.env),
+		loginUrl: loginUrl(c.env),
 		ssoConfigured: Boolean(c.env.NANISLE_SSO_SECRET),
 		generateConfigured: Boolean(c.env.GENERATE_URL && awsConfigured(c.env)),
 	});
@@ -68,6 +91,18 @@ app.get("/api/health", (c) => {
 // 「已登录就手递」),通过才换成本域的长会话 cookie。会话本身就是签名 token,
 // 无服务端状态,30 天后自然过期、重走一遍手递即可。
 const SESSION_TTL_S = 30 * 24 * 3600;
+
+/**
+ * 会话 cookie 的作用域。种下和删除必须完全一致,所以只写一次。
+ * 本地 wrangler dev 走 http,Secure cookie 种不上,按协议区分。
+ */
+function sessionCookieScope(env: AppEnv): { path: string; secure: boolean } {
+	const url = new URL(appUrl(env));
+	return {
+		path: url.pathname.replace(/\/+$/, "") || "/",
+		secure: url.protocol === "https:",
+	};
+}
 
 app.get("/auth/sso", async (c) => {
 	const secret = c.env.NANISLE_SSO_SECRET;
@@ -100,16 +135,30 @@ app.get("/auth/sso", async (c) => {
 		email: payload.email,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
 	});
-	const cookiePath = new URL(appUrl(c.env)).pathname.replace(/\/+$/, "") || "/";
+	const scope = sessionCookieScope(c.env);
 	setCookie(c, SESSION_COOKIE, session, {
-		path: cookiePath,
+		path: scope.path,
 		httpOnly: true,
 		sameSite: "Lax",
-		// 本地 wrangler dev 走 http,Secure cookie 种不上,按协议区分
-		secure: new URL(appUrl(c.env)).protocol === "https:",
+		secure: scope.secure,
 		maxAge: SESSION_TTL_S,
 	});
 	return c.redirect(appUrl(c.env, "config"), 302);
+});
+
+// 退出登录。主站那边的 better-auth 会话由页眉先同源 POST /api/auth/sign-out
+// 清掉,这里只管本产品这一份——两边一起退,才不会出现「回主站还是登录态」
+// 或者「产品里还能继续读」。清完把人送回南屿首页。
+app.get("/auth/logout", (c) => {
+	const scope = sessionCookieScope(c.env);
+	// 删除必须和种下时同作用域(path/secure),否则浏览器留着旧 cookie 不放
+	deleteCookie(c, SESSION_COOKIE, {
+		path: scope.path,
+		httpOnly: true,
+		sameSite: "Lax",
+		secure: scope.secure,
+	});
+	return c.redirect(siteUrl(c.env), 302);
 });
 
 // ---------- 阅读 ----------
@@ -152,6 +201,11 @@ app.post("/api/feedback", userGuard, async (c) => {
 	if (text !== undefined && (typeof text !== "string" || text.length > 2000)) {
 		return c.json({ error: "text must be a string ≤2000 chars" }, 400);
 	}
+	// R5 · 刊级反馈(「今天有什么本该知道却没出现」)用哨兵 itemId,它没有条目
+	// 可指,所以必须自带内容——空的哨兵事件对选材毫无用处,不如不收。
+	if (itemId === ISSUE_ITEM_ID && (kind !== "text" || typeof text !== "string" || !text.trim())) {
+		return c.json({ error: "issue-level feedback must be kind=text with non-empty text" }, 400);
+	}
 	const event: FeedbackEvent = {
 		date,
 		itemId,
@@ -161,6 +215,45 @@ app.post("/api/feedback", userGuard, async (c) => {
 	};
 	await c.get("store").appendEvent(c.get("email"), event);
 	return c.json({ ok: true });
+});
+
+// X2 · 轴外位开关。护栏之二:读者随时能关(关掉就真的没有)。手动打开时
+// 一并清零未点击计数——重新表态了,不该背着上一轮的账。
+app.put("/api/prefs", userGuard, async (c) => {
+	let body: { offAxis?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	if (typeof body.offAxis !== "boolean") return c.json({ error: "offAxis must be a boolean" }, 400);
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	const prefs = { ...(config.prefs ?? {}), offAxis: body.offAxis, ...(body.offAxis ? { offAxisMisses: 0 } : {}) };
+	await store.putConfig(email, { ...config, prefs, updatedAt: new Date().toISOString() });
+	return c.json({ ok: true, prefs });
+});
+
+app.get("/api/prefs", userGuard, async (c) => {
+	const config = await loadConfig(c.get("store"), c.get("email"));
+	return c.json({ prefs: config.prefs ?? {} });
+});
+
+// R6 · 反馈导出:自己的数据自己拿得走(想喂给别的模型做整理就喂)。只导本人的,
+// 走 userGuard;事件 TTL 90 天,所以这里能拿到的就是全部还活着的历史。
+app.get("/api/export", userGuard, async (c) => {
+	const days = Math.min(Math.max(Number.parseInt(c.req.query("days") ?? "90", 10) || 90, 1), 90);
+	const email = c.get("email");
+	const store = c.get("store");
+	const digest = await loadFeedbackDigest(store, email, { days });
+	return c.json({
+		email,
+		exportedAt: new Date().toISOString(),
+		since: digest.since,
+		notes: digest.notes,
+		clicks: [...digest.clicks].map(([itemId, count]) => ({ itemId, count })),
+	});
 });
 
 // Every outbound link in the UI goes through here: click-through is the
@@ -217,7 +310,7 @@ app.put("/api/sources", userGuard, async (c) => {
 // Verified add: probe (with feed discovery) first, persist only what parsed.
 // Used by the config panel's manual add and the proposal cards' 添加 button.
 app.post("/api/sources/add", userGuard, async (c) => {
-	let body: { sources?: unknown; trackerKey?: unknown; rules?: unknown };
+	let body: { sources?: unknown; trackerKey?: unknown; rules?: unknown; origin?: unknown };
 	try {
 		body = await c.req.json();
 	} catch {
@@ -239,17 +332,26 @@ app.post("/api/sources/add", userGuard, async (c) => {
 	const adopted: SourceConfig[] = [];
 	const failed: { name: string; url: string; error: string }[] = [];
 	for (const s of body.sources as Record<string, unknown>[]) {
-		const name = typeof s.name === "string" ? s.name.trim().slice(0, 100) : "";
+		const givenName = typeof s.name === "string" ? s.name.trim().slice(0, 100) : "";
 		const url = typeof s.url === "string" ? s.url.trim() : "";
 		const category = s.category as SourceConfig["category"];
-		if (!name || !url || url.length > 500 || !["news", "macro", "blog", "podcast", "paper"].includes(category)) {
-			failed.push({ name: name || "?", url, error: "字段不完整" });
+		if (!url || url.length > 500 || !["news", "macro", "blog", "podcast", "paper"].includes(category)) {
+			failed.push({ name: givenName || "?", url, error: "字段不完整" });
 			continue;
 		}
 		const probe = await probeFeed(url);
 		if (!probe.ok) {
-			failed.push({ name, url, error: probe.error ?? "试抓失败" });
+			failed.push({ name: givenName || "?", url, error: probe.error ?? "试抓失败" });
 			continue;
+		}
+		// 名称留空时回填 feed 自报标题,兜底用域名——用户不必先替源想好名字
+		let name = givenName || (probe.title ?? "").trim().slice(0, 100);
+		if (!name) {
+			try {
+				name = new URL(probe.url).hostname;
+			} catch {
+				name = probe.url.slice(0, 100);
+			}
 		}
 		const key = fnv1a(probe.url);
 		let source = current.find((x) => x.key === key || x.url === probe.url);
@@ -293,6 +395,10 @@ app.post("/api/sources/add", userGuard, async (c) => {
 	}
 	if (added.length > 0) await saveSources(store, email, current);
 	if (tracker && adopted.length > 0) await saveTrackers(store, email, trackers);
+	// 仪表:只有 AI 候选卡的「加入」带 origin=candidate;手动/目录添加不算采纳
+	if (body.origin === "candidate" && adopted.length > 0) {
+		await bumpSourceMetrics(store, email, { adopted: adopted.length });
+	}
 	return c.json({ ok: true, added, adopted, failed, sources: current, trackers });
 });
 
@@ -328,6 +434,60 @@ app.put("/api/trackers", userGuard, async (c) => {
 	if ("error" in cleaned) return c.json({ error: cleaned.error }, 400);
 	await saveTrackers(c.get("store"), c.get("email"), cleaned.trackers);
 	return c.json({ ok: true, count: cleaned.trackers.length });
+});
+
+// ---------- 找源仪表(docs/02 §7.3):三个数判断找源机制是否够用 ----------
+// 候选采纳率来自 CONFIG 里的累计计数;无命中天数和查询源占比从近 14 期简报
+// 现算——不加写路径,Lambda 生成端零改动,老简报缺 sourceKey 时按源名回退匹配。
+
+/** 仪表窗口:近多少期简报。14 期 = 每次请求最多 14 次点查,偶发的仪表页读得起。 */
+const METRICS_WINDOW = 14;
+
+app.get("/api/metrics", userGuard, async (c) => {
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	const dates = (await store.listBriefDates(email)).slice(0, METRICS_WINDOW);
+
+	const urlByKey = new Map(config.sources.map((s) => [s.key, s.url]));
+	const urlByName = new Map(config.sources.map((s) => [s.name, s.url]));
+	const trackerStats = new Map(
+		activeTrackers(config.trackers).map((t) => [
+			t.key,
+			{ key: t.key, name: t.name, briefs: 0, noHitStreak: 0, streakEnded: false, lastHitDate: null as string | null },
+		]),
+	);
+	let totalItems = 0;
+	let queryItems = 0;
+
+	// dates 已是倒序(最新在前),无命中连续天数从最新一期往回数
+	for (const date of dates) {
+		const stored = await store.getBrief(email, date);
+		if (!stored) continue;
+		for (const section of stored.brief.sections) {
+			for (const item of section.items) {
+				totalItems++;
+				const url = (item.sourceKey && urlByKey.get(item.sourceKey)) || urlByName.get(item.source);
+				if (url && isQueryFeedUrl(url)) queryItems++;
+			}
+			const stat = trackerStats.get(section.key);
+			if (!stat) continue;
+			stat.briefs++;
+			if (section.items.length > 0) {
+				stat.streakEnded = true;
+				if (!stat.lastHitDate) stat.lastHitDate = stored.brief.date;
+			} else if (!stat.streakEnded) {
+				stat.noHitStreak++;
+			}
+		}
+	}
+
+	return c.json({
+		window: { briefs: dates.length, from: dates.at(-1) ?? null, to: dates[0] ?? null },
+		candidates: config.metrics ?? { shown: 0, adopted: 0 },
+		selection: { total: totalItems, query: queryItems },
+		trackers: [...trackerStats.values()].map(({ streakEnded: _ignored, ...rest }) => rest),
+	});
 });
 
 // ---------- 三步向导与「对编辑说一句」(B11-B14,docs/02 §6.3、§7) ----------
@@ -427,11 +587,19 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		throw err;
 	}
 
+	// R2 · dev/fork 回落路径也走同一条反馈回路,否则本地永远验不到它
+	const digest = await loadFeedbackDigest(store, email, { log: (m) => console.log(m) });
+
 	let editorial;
 	if (provider === "mock") {
 		editorial = mockEditorial(fetched.candidates, config.trackers);
 	} else {
-		const { system, user } = buildEditorialPrompt(fetched.candidates, config.trackers);
+		const { system, user } = buildEditorialPrompt(
+			fetched.candidates,
+			config.trackers,
+			feedbackPromptBlock(digest),
+			offAxisEnabled(config),
+		);
 		// The editorial JSON needs room; never let the default 1024 cap truncate it.
 		const cap = Number.parseInt(env.AI_MAX_OUTPUT_TOKENS ?? "", 10);
 		const genCfg = { ...cfg, maxOutputTokens: String(Number.isFinite(cap) && cap >= 2048 ? cap : 4096) };
@@ -453,6 +621,8 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		// 免费档子请求预算留给抓取;讨论区链接是 Lambda 路径的事
 		lookupDiscussions: false,
 	});
+	const echo = buildFeedbackEcho(digest, brief);
+	if (echo) brief.feedbackEcho = echo;
 	const genCount = await store.putBrief(email, brief, true);
 
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);

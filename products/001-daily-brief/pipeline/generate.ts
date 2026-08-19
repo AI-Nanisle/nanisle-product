@@ -23,7 +23,7 @@ import {
 	parseEditorialJson,
 } from "../src/shared/pipeline-core.ts";
 import type { Filters, FocusEntry, SourceConfig, Tracker } from "../src/shared/pipeline-core.ts";
-import { BUILTIN_TRACKERS, DEFAULT_FILTERS, DEFAULT_SOURCES, DEFAULT_TRACKERS } from "../src/shared/default-sources.ts";
+import { DEFAULT_FILTERS, DEFAULT_SOURCES, DEFAULT_TRACKERS, DEMO_TRACKERS } from "../src/shared/default-sources.ts";
 import { complete, resolveProvider } from "../src/shared/ai.ts";
 import type { AiConfig } from "../src/shared/ai.ts";
 
@@ -55,7 +55,8 @@ function loadConfig(): { sources: SourceConfig[]; filters: Filters; trackers: Tr
 	}
 
 	// A legacy focus.yaml still works: entries become plain trackers next to
-	// the built-in 今日大事/教我新东西. Without one, the shared defaults apply.
+	// the demo ones. Without one, the shared demo defaults apply. (CLI only —
+	// the web app seeds no trackers at all.)
 	let trackers = DEFAULT_TRACKERS;
 	const focusPath = process.env.FOCUS_FILE
 		? join(ROOT, process.env.FOCUS_FILE)
@@ -66,7 +67,7 @@ function loadConfig(): { sources: SourceConfig[]; filters: Filters; trackers: Tr
 				: null;
 	if (focusPath) {
 		const focus = (parseYaml(readFileSync(focusPath, "utf8")) as { focus: FocusEntry[] }).focus ?? [];
-		trackers = [...BUILTIN_TRACKERS, ...focus.map(focusEntryToTracker)];
+		trackers = [...DEMO_TRACKERS, ...focus.map(focusEntryToTracker)];
 		console.log(`[config] focus (legacy → trackers): ${focusPath}`);
 	}
 	return { sources, filters, trackers };

@@ -12,6 +12,7 @@
 
 import { Buffer } from "node:buffer";
 import {
+	OFF_AXIS_MISS_LIMIT,
 	activeTrackers,
 	assembleBrief,
 	briefDate,
@@ -25,6 +26,8 @@ import type { FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-
 import { DEFAULT_FILTERS } from "../src/shared/default-sources";
 import { AiError, complete, resolveProvider } from "../src/shared/ai";
 import type { AiConfig } from "../src/shared/ai";
+import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
+import type { FeedbackDigest } from "../src/shared/feedback";
 import { dynamoStore } from "../src/shared/store-dynamo";
 import type { Store, UserConfig } from "../src/shared/store";
 import type { EditorialResult } from "../src/shared/pipeline-core";
@@ -87,12 +90,53 @@ function envStore(): Store {
 	});
 }
 
-/** 一次编辑调用:候选 + 该用户的追踪器定义 → 编辑结果(反捏造护栏在 parse 里)。 */
-async function runEditorial(cfg: AiConfig, fetched: FetchResult, trackers: Tracker[]): Promise<EditorialResult> {
+/** 一次编辑调用:候选 + 追踪器定义 + 近期反馈 → 编辑结果(反捏造护栏在 parse 里)。 */
+async function runEditorial(
+	cfg: AiConfig,
+	fetched: FetchResult,
+	trackers: Tracker[],
+	digest: FeedbackDigest,
+	offAxis: boolean,
+): Promise<EditorialResult> {
 	if (resolveProvider(cfg) === "mock") return mockEditorial(fetched.candidates, trackers);
-	const { system, user } = buildEditorialPrompt(fetched.candidates, trackers);
+	const { system, user } = buildEditorialPrompt(
+		fetched.candidates,
+		trackers,
+		feedbackPromptBlock(digest),
+		offAxis,
+	);
 	const result = await complete(cfg, { prompt: user, system, json: true });
 	return parseEditorialJson(result.text, trackers);
+}
+
+/**
+ * X2 · 轴外位的自动降频。看上一期的轴外位有没有被点开:点了就清零,没点就
+ * 累加;连续 OFF_AXIS_MISS_LIMIT 期没人点就自己关掉,并在今天这期交代一句。
+ *
+ * 用计数器而不是「回看 10 期简报」:计数器是 O(1) 的,而且反馈窗口只有 7 天,
+ * 回看 10 期会漏掉更早的点击。重复生成同一天不计数——那不是新的一期。
+ */
+function updateOffAxis(
+	config: UserConfig,
+	prevBrief: { date: string; offAxis?: { id: string } } | null,
+	clicks: Map<string, number>,
+	today: string,
+): { enabled: boolean; note?: string; prefs: UserConfig["prefs"] } {
+	const prefs = { ...(config.prefs ?? {}) };
+	if (prefs.offAxis === false) return { enabled: false, prefs };
+	if (prevBrief && prevBrief.date !== today && prevBrief.offAxis) {
+		const clicked = (clicks.get(prevBrief.offAxis.id) ?? 0) > 0;
+		prefs.offAxisMisses = clicked ? 0 : (prefs.offAxisMisses ?? 0) + 1;
+	}
+	if ((prefs.offAxisMisses ?? 0) >= OFF_AXIS_MISS_LIMIT) {
+		prefs.offAxis = false;
+		return {
+			enabled: false,
+			prefs,
+			note: `给你的「轴外推荐」连续 ${OFF_AXIS_MISS_LIMIT} 期一条没点开,先停了——想再要,去配置页打开。`,
+		};
+	}
+	return { enabled: true, prefs };
 }
 
 interface UserRun {
@@ -109,7 +153,14 @@ async function produceBrief(
 	date: string,
 	bumpGenCount: boolean,
 ): Promise<{ picked: number; genCount: number }> {
-	const editorial = await runEditorial(cfg, fetched, run.config.trackers);
+	// R2 · 近 7 天反馈先读出来:它既进选材提示词,也是回响的原料。读失败会
+	// 降级成空摘要(见 loadFeedbackDigest),不会让当天的简报生不出来。
+	const digest = await loadFeedbackDigest(store, run.email, { log: (m) => console.log(`[${run.email}] ${m}`) });
+	// X2 · 上一期的轴外位有没有被点开,决定今天还给不给
+	const prevBrief = (await store.getBrief(run.email))?.brief ?? null;
+	const off = updateOffAxis(run.config, prevBrief, digest.clicks, date);
+
+	const editorial = await runEditorial(cfg, fetched, run.config.trackers, digest, off.enabled);
 	const brief = await assembleBrief(editorial, fetched, {
 		date,
 		sourceCount: fetched.sourcesOk,
@@ -117,6 +168,13 @@ async function produceBrief(
 		// Lambda 没有子请求限额,HN 讨论区查询保留(§8.1)
 		lookupDiscussions: true,
 	});
+	// R3 · 回响在简报成形之后算:它要比对「上一期 vs 这一期」的真实条数
+	const echo = buildFeedbackEcho(digest, brief);
+	if (echo) brief.feedbackEcho = echo;
+	if (off.note) brief.offAxisNote = off.note;
+	if (JSON.stringify(off.prefs) !== JSON.stringify(run.config.prefs ?? {})) {
+		await store.putConfig(run.email, { ...run.config, prefs: off.prefs, updatedAt: new Date().toISOString() });
+	}
 	const genCount = await store.putBrief(run.email, brief, bumpGenCount);
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
 	return { picked, genCount };

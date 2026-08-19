@@ -37,19 +37,24 @@ export interface WizardProps {
 	onPatch: (key: string, patch: Partial<Tracker>, log?: string) => void;
 	/** 采纳候选:POST /api/sources/add(试抓过的 URL,服务端更新 tracker)。 */
 	onAdopt: (trackerKey: string, item: ProposalItem) => Promise<void>;
+	/** 一键采纳整轮候选;返回没加成的那几个(本页负责放回列表)和一句交代。 */
+	onAdoptAll: (trackerKey: string, items: ProposalItem[]) => Promise<{ failed: ProposalItem[]; note: string }>;
 	/** 「完成」:调用方负责删 stage(草稿转生效)并切回档案页。 */
 	onFinish: (key: string) => void;
 	/** 放弃:key 为 null 表示还没起草。 */
 	onDiscard: (key: string | null) => void;
 }
 
-export default function Wizard({ draft, sources, headers, onTrackers, onPatch, onAdopt, onFinish, onDiscard }: WizardProps) {
+export default function Wizard({ draft, sources, headers, onTrackers, onPatch, onAdopt, onAdoptAll, onFinish, onDiscard }: WizardProps) {
 	const step = stepOf(draft);
 	const [busy, setBusy] = useState(false);
 	const [note, setNote] = useState("");
 	const [question, setQuestion] = useState("");
 	const [followUp, setFollowUp] = useState("");
 	const [followUps, setFollowUps] = useState<string[]>([]);
+	// R8 · 服务端出的追问(问法与选项固定);答完就再也不出现
+	const [ask, setAsk] = useState<{ question: string; options: string[] } | null>(null);
+	const [otherPurpose, setOtherPurpose] = useState("");
 	const [candidates, setCandidates] = useState<ProposalItem[]>([]);
 	const [editKey, setEditKey] = useState<string | null>(null);
 	const [chipOpen, setChipOpen] = useState<string | null>(null);
@@ -58,6 +63,8 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 	const autoFetched = useRef(false);
 
 	const segments = draft ? trackerSegments(draft) : [];
+	/** 试抓通过的候选数——只有 2 个以上才值得给「全部加入」。 */
+	const adoptableCount = candidates.filter((c) => c.ok).length;
 	const adoptedSources = (draft?.sourceKeys ?? [])
 		.map((k) => sources.find((s) => s.key === k))
 		.filter((s): s is SourceConfig => Boolean(s));
@@ -83,6 +90,7 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 			if (!q) return;
 			const res = await wizardUnderstand([q], undefined, headers());
 			if (res.trackers && res.tracker) onTrackers(res.trackers, res.tracker.key);
+			setAsk(res.ask ?? null);
 			if (res.note) setNote(res.note);
 		});
 
@@ -94,8 +102,21 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 			const msgs = [draft.question ?? draft.name, ...followUps, msg];
 			const res = await wizardUnderstand(msgs, draft.key, headers());
 			if (res.trackers) onTrackers(res.trackers);
+			setAsk(res.ask ?? null);
 			setFollowUps((f) => [...f, msg]);
 			setFollowUp("");
+			if (res.note) setNote(res.note);
+		});
+
+	/** 回答追问:带着用途重跑一次理解,编辑按它重写。答完追问就消失。 */
+	const answerPurpose = (purpose: string) =>
+		run(async () => {
+			if (!draft || !purpose.trim()) return;
+			const msgs = [draft.question ?? draft.name, ...followUps];
+			const res = await wizardUnderstand(msgs, draft.key, headers(), purpose.trim());
+			if (res.trackers) onTrackers(res.trackers);
+			setAsk(res.ask ?? null);
+			setOtherPurpose("");
 			if (res.note) setNote(res.note);
 		});
 
@@ -133,6 +154,18 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 		});
 	};
 
+	/** 一键加入:先乐观清空试抓通过的候选,失败的由服务端交代后放回。 */
+	const adoptAll = () =>
+		run(async () => {
+			if (!draft) return;
+			const usable = candidates.filter((c) => c.ok);
+			if (usable.length === 0) return;
+			setCandidates((c) => c.filter((x) => !x.ok));
+			const { failed, note: msg } = await onAdoptAll(draft.key, usable);
+			if (failed.length > 0) setCandidates((c) => [...c, ...failed]);
+			if (msg) setNote(msg);
+		});
+
 	const reject = (item: ProposalItem) => {
 		if (!draft) return;
 		setCandidates((c) => c.filter((x) => x.url !== item.url));
@@ -165,6 +198,24 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 		putSegments(
 			segments.map((s, j) => (j === idx ? { text: v, edited: true } : s)),
 			`你圈改了编辑的理解:「${before}」→「${v}」`,
+		);
+	};
+
+	// ---------- 步骤 2 的标签换栏 ----------
+
+	/** 拖到另一栏 = 改判收 / 不收:一次 patch 两个数组,别让中间态存进库。 */
+	const moveTag = (to: "include" | "exclude", text: string) => {
+		if (!draft) return;
+		const from: "include" | "exclude" = to === "include" ? "exclude" : "include";
+		const label = (kind: "include" | "exclude") => (kind === "include" ? "收什么" : "不收什么");
+		const target = draft[to] ?? [];
+		onPatch(
+			draft.key,
+			{
+				[from]: (draft[from] ?? []).filter((x) => x !== text),
+				[to]: target.includes(text) ? target : [...target, text],
+			},
+			`你把「${text}」从「${label(from)}」挪到了「${label(to)}」`,
 		);
 	};
 
@@ -251,6 +302,54 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 							「{draft.question}」
 						</p>
 					</section>
+					{/* R8 · 追问「你在忙什么」。只在编辑还不知道用途时出现一次:
+					    答了就写进定义、再也不问。「就是想跟上」是合法答案——
+					    不为难只想跟进展的人,选它就退回原来的行为。 */}
+					{draft.purpose ? (
+						<section className="mt-5">
+							<p className={`${monoLabel} mb-1.5 text-[var(--ink-3)]`}>你在忙什么(选材按它取舍)</p>
+							<p className="m-0 text-[14px] text-[var(--ink-2)]">{draft.purpose}</p>
+						</section>
+					) : (
+						ask && (
+							<section className="mt-5 rounded-lg border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3">
+								<p className="m-0 text-[14px] font-medium">{ask.question}</p>
+								<div className="mt-2.5 flex flex-wrap gap-2">
+									{ask.options.map((opt) => (
+										<button
+											key={opt}
+											type="button"
+											disabled={busy}
+											onClick={() => answerPurpose(opt)}
+											className="cursor-pointer rounded-full border border-[var(--line-strong)] bg-[var(--card)] px-3 py-1 text-[13px] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:cursor-default disabled:opacity-40"
+										>
+											{opt}
+										</button>
+									))}
+								</div>
+								<div className="mt-2 flex items-center gap-2">
+									<input
+										value={otherPurpose}
+										onChange={(e) => setOtherPurpose(e.target.value)}
+										onKeyDown={(e) => {
+											if (e.key === "Enter" && !e.nativeEvent.isComposing) answerPurpose(otherPurpose);
+										}}
+										disabled={busy}
+										placeholder="其他:用你自己的话说一句"
+										className="min-w-0 flex-1 rounded border border-[var(--line)] bg-[var(--card)] px-2.5 py-1 text-[13px] outline-none focus:border-[var(--accent)] disabled:opacity-50"
+									/>
+									<button
+										type="button"
+										onClick={() => answerPurpose(otherPurpose)}
+										disabled={busy || !otherPurpose.trim()}
+										className="font-mono-sc cursor-pointer rounded border border-[var(--line-strong)] px-2.5 py-1 text-[11px] transition-colors hover:bg-[var(--ink)] hover:text-[var(--paper)] disabled:cursor-default disabled:opacity-40"
+									>
+										就这样
+									</button>
+								</div>
+							</section>
+						)
+					)}
 					<section className="mt-5">
 						<p className={`${monoLabel} mb-1.5 text-[var(--accent)]`}>编辑的理解 · 逐句圈改</p>
 						<div className="text-[15px] leading-[2]">
@@ -361,6 +460,8 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 									onRemove={(chip) =>
 										onPatch(draft.key, { include: (draft.include ?? []).filter((x) => x !== chip.text) }, `你从「收什么」删掉了「${chip.text}」`)
 									}
+									bucket="include"
+									onDropChip={(chip) => moveTag("include", chip.text)}
 								/>
 							</div>
 							<div>
@@ -378,11 +479,13 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 									onRemove={(chip) =>
 										onPatch(draft.key, { exclude: (draft.exclude ?? []).filter((x) => x !== chip.text) }, `你从「不收什么」删掉了「${chip.text}」`)
 									}
+									bucket="exclude"
+									onDropChip={(chip) => moveTag("exclude", chip.text)}
 								/>
 							</div>
 						</div>
 						<p className="font-mono-sc m-0 mt-2 text-[10px] text-[var(--ink-3)]">
-							标签是选材的硬性信号,不是必填——留空也能进下一步
+							标签是选材的硬性信号,不是必填——留空也能进下一步 · 判错了直接把标签拖到另一栏
 						</p>
 					</section>
 					{busyLine}
@@ -440,7 +543,17 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 								暂无候选。点「再找几个」让编辑换角度找,或先完成、回头从来源库补。
 							</p>
 						)}
-						<div className="mt-2.5">
+						<div className="mt-2.5 flex flex-wrap items-center gap-2">
+							{adoptableCount > 1 && (
+								<button
+									type="button"
+									onClick={adoptAll}
+									disabled={busy}
+									className="font-mono-sc cursor-pointer rounded border border-[var(--ink)] bg-[var(--ink)] px-2.5 py-1 text-[11px] text-[var(--paper)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent)] disabled:opacity-40"
+								>
+									全部加入 {adoptableCount} 个
+								</button>
+							)}
 							<button
 								type="button"
 								onClick={() => fetchCandidates(candidates.map((c) => c.url))}

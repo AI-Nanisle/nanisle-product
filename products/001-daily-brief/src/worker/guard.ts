@@ -34,10 +34,28 @@ export type Guarded = {
 	};
 };
 
+/**
+ * 主站根地址(无尾斜杠)。显式配置优先;没配就取产品挂载点的 origin——
+ * 本地 dev 的 APP_URL 是 http://localhost:3000/products/daily-brief,
+ * 于是登录闸口和页眉导航都留在本机,不会莫名跳去线上。
+ */
+export function siteUrl(env: AppEnv, path = ""): string {
+	const explicit = env.NANISLE_URL?.trim().replace(/\/+$/, "");
+	let base = explicit;
+	if (!base) {
+		try {
+			base = new URL(appUrl(env)).origin;
+		} catch {
+			base = "https://nanisle.com";
+		}
+	}
+	const suffix = path.replace(/^\/+/, "");
+	return suffix ? `${base}/${suffix}` : base;
+}
+
 /** 未登录 401 时引导去的地址:主站的登录闸口,登录后会自动带 token 跳回来。 */
 export function loginUrl(env: AppEnv): string {
-	const base = (env.NANISLE_URL ?? "https://nanisle.com").replace(/\/+$/, "");
-	return `${base}/api/launch/daily-brief`;
+	return siteUrl(env, "api/launch/daily-brief");
 }
 
 /** Canonical browser URL for the product mounted below nanisle.com. */
@@ -52,7 +70,10 @@ export function appUrl(env: AppEnv, path = ""): string {
  * 有会话就认人,没有就匿名。
  */
 export async function sessionEmail(env: AppEnv, cookie: string | undefined): Promise<string | null> {
-	if (!env.NANISLE_SSO_SECRET) return DEV_USER;
+	// 没有登录闸口的实例(本地 dev / fork):默认 dev@local,DEV_EMAIL 可覆盖成
+	// 自己的邮箱——本地连线上 DynamoDB 调真数据时用。白名单照查(下面的
+	// userGuard 只对 dev@local 放行),所以冒充别人没用。
+	if (!env.NANISLE_SSO_SECRET) return env.DEV_EMAIL?.trim() || DEV_USER;
 	if (!cookie) return null;
 	const payload = await verifyToken(env.NANISLE_SSO_SECRET, cookie);
 	return payload?.email ?? null;

@@ -10,8 +10,8 @@
 //   user:<email>:click:<ts>:<uuid> 点击事件(同上)
 
 import type { Brief } from "../shared/types";
-import type { Store, StoredBrief } from "../shared/store";
-import { EVENT_TTL_S } from "../shared/store";
+import type { Store, StoredBrief, StoredEvent } from "../shared/store";
+import { EVENT_TTL_S, MAX_EVENTS_READ } from "../shared/store";
 import { dynamoStore } from "../shared/store-dynamo";
 import type { AppEnv } from "./env";
 
@@ -74,6 +74,28 @@ export function kvStore(kv: KVNamespace): Store {
 			await kv.put(`user:${email}:${kind}:${ev.at}:${crypto.randomUUID()}`, JSON.stringify(ev), {
 				expirationTtl: EVENT_TTL_S,
 			});
+		},
+
+		async listEvents(email, sinceISO, limit = MAX_EVENTS_READ) {
+			const cap = Math.min(Math.max(1, limit), MAX_EVENTS_READ);
+			// 键形如 `user:<email>:fb:<ISO>:<uuid>`。ISO 里也有冒号,所以不去拆键,
+			// 直接拿整串和 `<前缀><sinceISO>` 比字典序——前缀固定,比较即时间序。
+			const pull = async (kind: "fb" | "click"): Promise<string[]> => {
+				const prefix = `user:${email}:${kind}:`;
+				const list = await kv.list({ prefix, limit: 1000 });
+				return list.keys
+					.map((k) => k.name)
+					.filter((name) => name >= `${prefix}${sinceISO}`)
+					.reverse()
+					.slice(0, cap);
+			};
+			const keys = [...(await pull("fb")), ...(await pull("click"))];
+			// 本地单用户库,逐个 get 可接受(生产走 DynamoDB 的两次 Query)
+			const raws = await Promise.all(keys.map((k) => kv.get(k)));
+			const events = raws
+				.filter((raw): raw is string => Boolean(raw))
+				.map((raw) => JSON.parse(raw) as StoredEvent);
+			return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, cap);
 		},
 
 		async listBriefDates(email) {

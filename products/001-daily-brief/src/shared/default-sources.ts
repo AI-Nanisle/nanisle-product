@@ -67,30 +67,27 @@ const DEFAULT_FOCUS: FocusEntry[] = [
 ];
 
 /**
- * The two trackers every instance starts with. They are ordinary trackers —
- * editable, pausable — the `builtin` flag only labels them in the UI.
- * Definitions here are deliberately light: opinionated defaults belong to
- * the user, not the seed data.
+ * 演示用追踪器,只服务 CLI(`pipeline/generate.ts`)和 fork 后的零配置本地
+ * 跑通。Web 端不再种任何追踪器:新用户进来是一张白纸,第一份定义由向导问
+ * 出来(什么值得长期追踪是用户的事,不该由种子数据替他决定)。
  */
-export const BUILTIN_TRACKERS: Tracker[] = [
+export const DEMO_TRACKERS: Tracker[] = [
 	{
 		key: "headlines",
 		name: "今日大事",
 		question: "当天真正重要的行业事件和宏观数据发布,不错过大事,但只要真正的大事",
 		exclude: ["招聘", "webinar"],
 		quota: 3,
-		builtin: true,
 	},
 	{
 		key: "learn",
 		name: "教我新东西",
 		question: "论文、深度播客、博主观点——允许和当下项目无关,但必须说得清『新在哪』",
 		quota: 2,
-		builtin: true,
 	},
 ];
 
 export const DEFAULT_TRACKERS: Tracker[] = [
-	...BUILTIN_TRACKERS,
+	...DEMO_TRACKERS,
 	...DEFAULT_FOCUS.map(focusEntryToTracker),
 ];
