@@ -162,6 +162,15 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 		const question = typeof t.question === "string" ? t.question.trim().slice(0, 500) : undefined;
 		const askedAt = typeof t.askedAt === "string" ? t.askedAt.trim().slice(0, 40) : undefined;
 		const purpose = typeof t.purpose === "string" ? t.purpose.trim().slice(0, 200) : undefined;
+		// 向导期间才有的追问选项;答完 purpose 就没用了,顺手丢掉
+		const purposeOptions =
+			!purpose && Array.isArray(t.purposeOptions)
+				? (t.purposeOptions as unknown[])
+						.filter((o): o is string => typeof o === "string")
+						.map((o) => o.trim().slice(0, 20))
+						.filter(Boolean)
+						.slice(0, 3)
+				: undefined;
 		const intentSegments = cleanSegments(t.intentSegments);
 		// The chat agent only knows about `intent`; when it rewrites the line the
 		// stale clauses are gone and the dossier re-splits from the new text.
@@ -202,6 +211,7 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			quota,
 			...(question ? { question } : {}),
 			...(purpose ? { purpose } : {}),
+			...(purposeOptions?.length ? { purposeOptions } : {}),
 			...(askedAt ? { askedAt } : {}),
 			...(intent ? { intent } : {}),
 			...(intentSegments ? { intentSegments } : {}),

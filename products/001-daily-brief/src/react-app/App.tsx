@@ -110,36 +110,54 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 
 function Item({ item, date, index }: { item: BriefItem; date: string; index: number }) {
 	return (
-		<article className="rise py-6 first:pt-4" style={{ animationDelay: `${index * 80}ms` }}>
-			<div className="font-mono-sc text-[12px] text-[var(--ink-3)] mb-1.5">
-				{item.source}
-				{item.relatesTo && (
-					<span className="ml-3 text-[var(--accent)]">◆ {item.relatesTo}</span>
-				)}
+		<article className="brief-item rise" style={{ animationDelay: `${index * 70}ms` }}>
+			{/* 抬头一行只放「这条从哪来、在哪条线索上」——都是读数,归等宽字体那一层。
+			    relatesTo 原来是朱红的,和「读原文」「编辑判断」抢注意力:一条内容里
+			    出现四处红,红就不再是强调了。这里降成灰,红只留给标题 hover 和读原文。 */}
+			<div className="font-mono-sc mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--ink-3)]">
+				<span>{item.source}</span>
+				{item.threadNote && <span className="thread-note">{item.threadNote}</span>}
+				{item.relatesTo && <span className="min-w-0 truncate">◆ {item.relatesTo}</span>}
 			</div>
-			<h3 className="font-bold text-xl leading-snug">
+
+			<h3 className="text-[21px] font-bold leading-[1.45] tracking-[0.01em]">
 				<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="headline-link">
 					{item.title}
 				</a>
 			</h3>
-			<p className="mt-2 text-[15px] leading-relaxed text-[var(--ink-2)]">{item.whyClick}</p>
+
+			{/* 导语 → 实质 → 判断 → 存疑,四段各有各的角色,别再靠字号微调区分 */}
+			<p className="brief-deck mt-2">{item.whyClick}</p>
+			{item.substance && <p className="brief-body mt-3">{item.substance}</p>}
+			{item.take && (
+				<p className="brief-aside mt-3">
+					<span className="label">编辑判断</span>
+					{item.take}
+				</p>
+			)}
 			{item.caveat && (
-				<p className="mt-2 border-l-2 border-[var(--line-strong)] pl-3 text-[13px] leading-relaxed text-[var(--ink-3)]">
-					<span className="font-mono-sc text-[11px] mr-1.5 text-[var(--ink-3)]">原文存疑</span>
+				<p className="brief-caveat mt-3">
+					<span className="font-mono-sc mr-2 text-[10px] uppercase tracking-[0.08em]">原文存疑</span>
 					{item.caveat}
 				</p>
 			)}
-			<div className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1 font-mono-sc text-[12px]">
-				<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">
+
+			<div className="font-mono-sc mt-3.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px]">
+				<a
+					href={productPath(`go/${date}/${item.id}`)}
+					target="_blank"
+					rel="noreferrer"
+					className="text-[var(--accent)] hover:underline"
+				>
 					读原文 →
 				</a>
 				{item.discussionUrl && (
-					<a href={item.discussionUrl} target="_blank" rel="noreferrer" className="text-[var(--ink-2)] hover:text-[var(--accent)]">
+					<a href={item.discussionUrl} target="_blank" rel="noreferrer" className="text-[var(--ink-3)] hover:text-[var(--ink)]">
 						讨论区
 					</a>
 				)}
 				{item.extras?.map((x) => (
-					<a key={x.url} href={x.url} target="_blank" rel="noreferrer" className="text-[var(--ink-2)] hover:text-[var(--accent)]">
+					<a key={x.url} href={x.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-[var(--ink-3)] hover:text-[var(--ink)]">
 						{x.label}
 					</a>
 				))}
@@ -148,7 +166,7 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 				<div className="mt-2 text-[12px] text-[var(--ink-3)]">
 					同一事件:
 					{item.mergedFrom.map((m) => (
-						<a key={m.url} href={m.url} target="_blank" rel="noreferrer" className="ml-2 underline decoration-[var(--line-strong)] hover:text-[var(--accent)]">
+						<a key={m.url} href={m.url} target="_blank" rel="noreferrer" className="ml-2 underline decoration-[var(--line)] hover:text-[var(--accent)]">
 							{m.label}
 						</a>
 					))}
@@ -221,17 +239,26 @@ function OffAxis({ item, date }: { item: BriefItem; date: string }) {
 					不要这类
 				</button>
 			</div>
-			<div className="mt-2 pl-7">
-				<div className="font-mono-sc text-[12px] text-[var(--ink-3)]">{item.source}</div>
-				<h3 className="mt-1 font-bold text-lg leading-snug">
+			<div className="mt-3 pl-7">
+				<div className="font-mono-sc text-[11px] text-[var(--ink-3)]">{item.source}</div>
+				<h3 className="mt-1.5 text-[19px] font-bold leading-[1.45]">
 					<a href={productPath(`go/${date}/${item.id}`)} target="_blank" rel="noreferrer" className="headline-link">
 						{item.title}
 					</a>
 				</h3>
+				{/* 「为什么给你看」是轴外位存在的全部理由,它该是这一块里最先被读到的
+				    一句,所以留着朱红——这是全页唯一一处用红讲理由的地方。 */}
 				{item.relatesTo && (
-					<p className="mt-1.5 text-[13px] text-[var(--accent)]">为什么给你看:{item.relatesTo}</p>
+					<p className="mt-2 text-[13.5px] leading-[1.85] text-[var(--accent)]">{item.relatesTo}</p>
 				)}
-				<p className="mt-1.5 text-[15px] leading-relaxed text-[var(--ink-2)]">{item.whyClick}</p>
+				<p className="brief-deck mt-2">{item.whyClick}</p>
+				{item.substance && <p className="brief-body mt-3">{item.substance}</p>}
+				{item.take && (
+					<p className="brief-aside mt-3">
+						<span className="label">编辑判断</span>
+						{item.take}
+					</p>
+				)}
 				<ItemFeedback date={date} itemId={item.id} />
 			</div>
 		</section>
@@ -615,18 +642,19 @@ function ProductPage() {
 			{/* 追踪器分区:每个追踪器一个分区。空分区不藏——
 			    「雷达照常扫过、今天没有新东西」本身就是要交付的信息 */}
 			{brief.sections.map((section, si) => (
-				<section key={section.key} className="mt-6 rounded-[10px] bg-[var(--card)] border border-[var(--line)] px-5">
-					<div className={`flex items-baseline gap-3 pt-3 pb-2.5 ${section.items.length > 0 ? "border-b border-[var(--line)]" : ""}`}>
+				<section key={section.key} className="mt-10 rounded-[10px] border border-[var(--line)] bg-[var(--card)] px-7">
+					<div className={`flex items-baseline gap-3 pt-4 pb-3 ${section.items.length > 0 ? "border-b border-[var(--line)]" : ""}`}>
 						<span className="font-mono-sc text-[11px] text-[var(--accent)]">
 							{String(si + 1).padStart(2, "0")}
 						</span>
-						<h2 className="font-bold text-lg tracking-widest">{section.title}</h2>
+						{/* 中文标题拉宽字距会散,收到 0.06em:够看出这是标题,又不散架 */}
+						<h2 className="text-[17px] font-bold tracking-[0.06em]">{section.title}</h2>
 						<span className="font-mono-sc ml-auto text-[11px] text-[var(--ink-3)]">
 							{section.items.length > 0 ? `${section.items.length} 条` : "0 条"}
 						</span>
 					</div>
 					{section.items.length > 0 ? (
-						<div className="divide-y divide-[var(--line)]">
+						<div className="py-6">
 							{section.items.map((item, i) => (
 								<Item key={item.id} item={item} date={brief.date} index={si * 3 + i} />
 							))}

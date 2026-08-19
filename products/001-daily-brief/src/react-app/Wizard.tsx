@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MAX_INTENT_SEGMENTS, joinSegments, trackerSegments } from "../shared/pipeline-core";
+import { MAX_INTENT_SEGMENTS, PURPOSE_QUESTION, joinSegments, purposeOptions, trackerSegments } from "../shared/pipeline-core";
 import type { IntentSegment, SourceConfig, Tracker } from "../shared/pipeline-core";
 import { wizardSources, wizardTags, wizardUnderstand } from "./editor";
 import type { ProposalItem } from "./editor";
@@ -52,7 +52,9 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 	const [question, setQuestion] = useState("");
 	const [followUp, setFollowUp] = useState("");
 	const [followUps, setFollowUps] = useState<string[]>([]);
-	// R8 · 服务端出的追问(问法与选项固定);答完就再也不出现
+	// R8 · 服务端出的追问。**显示与否只看草稿有没有 purpose**,不看这个状态——
+	// 它只是本次响应带回来的问法。挂在瞬时状态上的话,刷新一次追问就永远消失了,
+	// 而 purpose 还是空的(线上实测踩到过)。
 	const [ask, setAsk] = useState<{ question: string; options: string[] } | null>(null);
 	const [otherPurpose, setOtherPurpose] = useState("");
 	const [candidates, setCandidates] = useState<ProposalItem[]>([]);
@@ -311,11 +313,16 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 							<p className="m-0 text-[14px] text-[var(--ink-2)]">{draft.purpose}</p>
 						</section>
 					) : (
-						ask && (
+						(() => {
+							// 服务端给了问法就用它;没给(刷新、续跑、从第 2 步回来)就拿草稿上
+							// 存的那份选项重建——只要 purpose 还空着,这一问就该一直在,
+							// 而且看到的是**为这个话题生成的**那几个选项,不是通用词。
+							const q = ask ?? { question: PURPOSE_QUESTION, options: purposeOptions(draft.purposeOptions) };
+							return (
 							<section className="mt-5 rounded-lg border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3">
-								<p className="m-0 text-[14px] font-medium">{ask.question}</p>
+								<p className="m-0 text-[14px] font-medium">{q.question}</p>
 								<div className="mt-2.5 flex flex-wrap gap-2">
-									{ask.options.map((opt) => (
+									{q.options.map((opt) => (
 										<button
 											key={opt}
 											type="button"
@@ -348,7 +355,8 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 									</button>
 								</div>
 							</section>
-						)
+							);
+						})()
 					)}
 					<section className="mt-5">
 						<p className={`${monoLabel} mb-1.5 text-[var(--accent)]`}>编辑的理解 · 逐句圈改</p>

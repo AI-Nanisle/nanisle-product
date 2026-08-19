@@ -113,6 +113,11 @@ export interface Tracker {
 	 * 它就只是个装饰字段。空 = 读者选了「就是想跟上」,合法,不追问也不减分。
 	 */
 	purpose?: string;
+	/**
+	 * R8 · 模型按这份追踪的话题生成的追问选项(不含退出口,那个服务端追加)。
+	 * 只在向导期间有用;答完追问就删掉,不留在生效的定义里。
+	 */
+	purposeOptions?: string[];
 	/** When that question was last written down (ISO) — dated in the dossier. */
 	askedAt?: string;
 	/** One-line restatement of the intent (AI-drafted later; hand-edited now). */
@@ -146,6 +151,32 @@ export interface Tracker {
 	 * 不参与生成;「完成」时删掉该字段,追踪器才生效(docs/02 §7.1)。
 	 */
 	stage?: "understanding" | "tags" | "sources";
+}
+
+/**
+ * R8 · 追问「你在忙什么」。问法固定(它与话题无关),**选项由模型按这份追踪
+ * 的话题现生成**——写死的选项必然是照着某一类话题写的,换个题目就成了废话,
+ * 还反过来告诉用户「这个产品只服务那类人」。
+ *
+ * 放在 shared 而不是 worker:前端在草稿还没答过时也要能渲染它——追问的显示
+ * 条件必须是「草稿有没有 purpose」这个事实,不能是一次响应里的瞬时状态,
+ * 否则刷新一次追问就永远消失了(线上踩过)。
+ */
+export const PURPOSE_QUESTION = "你现在主要在忙这块的什么?——这决定了我该给你挑哪一类";
+
+/**
+ * 退出口:**服务端追加,不交给模型**。模型哪次忘了生成它,用户就只能从三个
+ * 不贴自己的选项里硬挑一个、或者干脆跳过——护栏不能依赖模型的自觉。
+ */
+export const PURPOSE_OPT_OUT = "就是想跟上,不为具体的事";
+
+/** 模型给不出合格选项时的兜底(通用到任何话题都不算离谱)。 */
+export const PURPOSE_OPTIONS_FALLBACK = ["要据此做决定", "要动手做点什么", "只是想搞明白"];
+
+/** 每份追踪的追问选项:模型生成的 3 个 + 永远在的退出口。 */
+export function purposeOptions(generated?: string[]): string[] {
+	const base = generated?.length ? generated.slice(0, 3) : PURPOSE_OPTIONS_FALLBACK;
+	return [...base.filter((o) => o !== PURPOSE_OPT_OUT), PURPOSE_OPT_OUT];
 }
 
 export const MAX_TRACKER_QUOTA = 3;
@@ -433,7 +464,9 @@ export async function fetchAllSources(
 				title: entry.title,
 				url: entry.url,
 				publishedAt: entry.publishedAt!.toISOString(),
-				excerpt: entry.excerpt.slice(0, 1200),
+				// 存足量正文:选材阶段仍只送 800 字(见 buildEditorialPrompt),但成稿
+				// 阶段要拿全文写实质与判断——在这里砍到 1200,后面再想深也无米下锅。
+				excerpt: entry.excerpt.slice(0, ENRICH_TEXT_CAP),
 			});
 		}
 		log(`[fetch] ${source.name}: ${entries.length} entries, ${fresh.length} fresh, ${kept} kept`);
@@ -466,6 +499,8 @@ export interface EditorialResult {
 	offAxis?: { id: string; whyClick: string; reason: string } | null;
 	notableDrops: { id: string; reason: string }[];
 	droppedSummary: string;
+	/** E1 · 今日三句话(邮件推送正文)。模型可能漏给,parse 只做清洗不兜底。 */
+	tldr?: string[];
 }
 
 /** X2 · 连续多少期没人点轴外位就自动停掉——用点击率判死刑,不靠主观判断。 */
@@ -552,7 +587,9 @@ export function buildEditorialPrompt(
 	}${
 		/* 台账从第一期就要开始记,所以这条规则永远在:没有已有线索时,模型
 		   给的就全是新线索 key —— 那正是台账的起点。 */ `
-13. 线索归并:读者的追踪器下面列了「进行中的线索」。每条选中项都要给 threadKey——**接得上已有线索就用它的 key**(哪怕角度不同,只要是同一件事的后续),接不上才给一个新 key(小写英文 + 短横线,≤40 字符)并配 threadTitle(≤20 字,说的是这件事本身,不是这一篇文章的标题)。宁可多归到已有线索,也别把同一件事拆成三条新线索——读者要看的是一件事怎么发展的。`
+13. 线索归并:读者的追踪器下面列了「进行中的线索」。每条选中项都要给 threadKey——**接得上已有线索就用它的 key**(哪怕角度不同,只要是同一件事的后续),接不上才给一个新 key(小写英文 + 短横线,≤40 字符)并配 threadTitle(≤20 字,说的是这件事本身,不是这一篇文章的标题)。宁可多归到已有线索,也别把同一件事拆成三条新线索——读者要看的是一件事怎么发展的。
+   判据要严:只有**同一件事的不同阶段或侧面**才算一条线索(同一家公司的同一个产品线、同一个技术路线的后续工作、同一场争论的新发言)。仅仅「都属于 agent」「都用了多智能体」**不算**——那是话题相同,不是同一件事。说不清「这两条讲的是同一件事的什么关系」就新建线索。宁可线索多而干净,也不要一条线索里塞着互不相干的三件事——那样时间线读起来就是一堆噪音。
+   ⚠️ 线索清单**只用于归类,不是「已报道过」的排除清单**:一条内容属于某条已有线索,恰恰说明它是读者正在追的事情的新进展,该选就选。绝不要因为「这条线索已经存在」就跳过它的新证据——那会让越被关注的话题越收不到东西。`
 	}${
 		offAxis
 			? `
@@ -611,7 +648,8 @@ ${candidateText}
     "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "threadKey": "接上的线索key或新key", "threadTitle": "仅新线索需要", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
   },
   ${offAxis ? `"offAxis": {"id": "...", "whyClick": "...", "reason": "为什么我觉得你该看见(和任何追踪器都无关)"} 或 null,\n  ` : ""}"notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
-  "droppedSummary": "一句话:今天筛掉的主要是什么"
+  "droppedSummary": "一句话:今天筛掉的主要是什么",
+  "tldr": ["恰好 3 句,每句 ≤40 字:写「今天这期为什么值得点开」,只概括已入选内容,不复述标题,不出现链接"]
 }`;
 	return { system, user };
 }
@@ -628,12 +666,25 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 		sections[t.key] = (parsed.sections?.[t.key] ?? []).slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA));
 	}
 	parsed.sections = sections;
+	// 「今天为什么是空的」是这个产品最常被问的问题,把答案留在日志里:
+	// 是模型一条没选(选材太严),还是候选池里本来就没有(源的问题)。
+	const picked = Object.entries(sections).map(([k, v]) => `${k}=${v.length}`).join(" ");
+	console.log(`[editorial] ${picked} offAxis=${parsed.offAxis ? "1" : "0"} drops=${parsed.notableDrops.length}`);
 	// X2 · 轴外位同样吃反捏造护栏:id 不在候选里就整条丢掉,绝不臆造
 	const off = parsed.offAxis;
 	parsed.offAxis =
 		off && typeof off.id === "string" && typeof off.whyClick === "string"
 			? { id: off.id, whyClick: off.whyClick, reason: typeof off.reason === "string" ? off.reason : "" }
 			: null;
+	// E1 · 三句话只做清洗(去空、截长、最多 3 句);格式不对就整个丢掉,
+	// 兜底拼接在 assembleBrief 里——那里才拿得到最终入选的条目。
+	parsed.tldr = Array.isArray(parsed.tldr)
+		? parsed.tldr
+				.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+				.map((s) => s.trim().slice(0, 60))
+				.slice(0, 3)
+		: undefined;
+	if (!parsed.tldr?.length) parsed.tldr = undefined;
 	return parsed;
 }
 
@@ -772,9 +823,20 @@ export async function assembleBrief(
 	});
 	const filteredItems = [...overflow, ...unselected, ...fetched.ruleDropped].slice(0, 100);
 
+	// E1 · 三句话:编辑给了就用;漏给时从各版块首条机械拼(《标题》——whyClick
+	// 前 30 字)。兜底文案生硬没关系,邮件的任务只是把人叫回网页。
+	let tldr = editorial.tldr;
+	if (!tldr?.length) {
+		tldr = sections
+			.filter((s) => s.items.length > 0)
+			.slice(0, 3)
+			.map((s) => `《${s.items[0].title.slice(0, 24)}》——${s.items[0].whyClick.slice(0, 30)}`);
+	}
+
 	return {
 		date: opts.date,
 		generatedAt: new Date().toISOString(),
+		...(tldr.length ? { tldr } : {}),
 		sections,
 		...(offAxis ? { offAxis } : {}),
 		filteredOut: {
@@ -785,4 +847,233 @@ export async function assembleBrief(
 		},
 		sourceCount: opts.sourceCount,
 	};
+}
+
+// ---------- 第二段:成稿(enrich) ----------
+//
+// 为什么要分两段(docs/03 §3.8):选材阶段每条只喂 800 字摘要,是为了让几十条
+// 候选塞得进一次调用;但 800 字写不出深度——线上实测 Latent Space 那篇 RSS 里
+// 有 9202 字正文,模型只读到 8.7% 就要写「为什么值得点」,写出来的必然是换个
+// 说法重复标题。所以:**廉价 triage 全都做,昂贵抽取只对选中的做**。
+//
+// 这一段打破了 docs/02 §6.3「每人一次结构化调用」。代价是每人每天多一次调用
+// (约 2.4 万 token 输入),换来的是简报从「标题改写」变成「有实质、有判断」。
+
+/** 成稿阶段最多为几条抓原文/写稿——它只处理已入选的条目,天然是个位数。 */
+export const MAX_ENRICH_ITEMS = 10;
+/** feed 自带正文短于这个长度,才值得去抓原文网页(中文源大多是 teaser feed)。 */
+export const TEASER_THRESHOLD = 1500;
+/** 送进成稿提示词的单篇正文上限。 */
+export const ENRICH_TEXT_CAP = 9000;
+/**
+ * 正文短于这个长度就**不送进成稿**。提示词里写了「正文为空就给空字符串」,
+ * 但线上实测模型不遵守:一条只有标题和分数的 HN 条目,它照样写出了
+ * 「具体细节未提供,但可推断研究使用了微观数据」——凭空推断,正是反捏造
+ * 原则要挡的东西。能用代码挡住的不变量,不靠叮嘱模型。
+ */
+export const MIN_ENRICH_TEXT = 400;
+
+/**
+ * 抓原文正文。只在 feed 只给了导语时才调用(见 TEASER_THRESHOLD),失败一律
+ * 静默退回 feed 摘要——**深度是加分项,不能因为某个站反爬就让整期出不来**。
+ */
+export async function fetchArticleText(url: string, timeoutMs = 8000): Promise<string> {
+	try {
+		const res = await fetch(url, {
+			headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml" },
+			signal: AbortSignal.timeout(timeoutMs),
+			redirect: "follow",
+		});
+		if (!res.ok) return "";
+		const type = res.headers.get("content-type") ?? "";
+		if (!type.includes("html")) return "";
+		const html = await res.text();
+		// 优先正文容器,退到 body:整页 stripHtml 会把导航和页脚也算进去,
+		// 那些噪音会挤掉真正的论证段落。
+		const pick =
+			/<article[^>]*>([\s\S]*?)<\/article>/i.exec(html)?.[1] ??
+			/<main[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1] ??
+			/<body[^>]*>([\s\S]*?)<\/body>/i.exec(html)?.[1] ??
+			html;
+		return stripHtml(pick).slice(0, ENRICH_TEXT_CAP);
+	} catch {
+		return "";
+	}
+}
+
+export interface EnrichSource {
+	id: string;
+	title: string;
+	url: string;
+	source: string;
+	/** 该条所属追踪器的问题与用途,take 要落在读者的处境上。 */
+	trackerQuestion?: string;
+	trackerPurpose?: string;
+	/** 正文(feed 自带的或抓回来的)。 */
+	text: string;
+}
+
+export interface EnrichPick {
+	whyClick?: string;
+	substance?: string;
+	take?: string;
+}
+
+const ENRICH_SYSTEM = `你是一份个人每日简报的编辑。下面给你今天**已经选中**的条目正文。为每一条写三段话,目标是让读者能判断「这值不值得我花 10 分钟」——而不是「我已经不用看原文了」。
+
+三个字段边界不同,别混着写:
+1. whyClick(1 句,≤40 字):为什么这位读者该点进去。**只说对他意味着什么**,不要交代文章讲了什么——那是 substance 的活,两处重复是最常见的毛病。
+2. substance(3-5 句,150-320 字,**宁长勿短**):这篇**究竟给出了什么**。要具体到能让读者不点开也知道结论是什么:
+   - 有数字就把数字写全(多少、对比谁、在什么条件下测的);
+   - 有做法就把机制讲清楚(分几步、每步干什么、关键设计是什么),别用「提出了一种方法」这种空壳;
+   - 有反直觉的结论就把它单独说出来,并交代它成立的前提;
+   - 涉及多方(公司/模型/数据集)时点名,别写「某厂商」。
+   边界:交代**结论和机制**,不交代**论证过程**——读者仍然要靠原文判断这些结论可不可信、实验设计有没有问题。
+3. take(1-2 句,≤120 字):**你的独立判断**。可以是它的适用边界、方法上的弱点、与读者追踪问题的冲突之处、什么条件下结论会反转、或者它在同类工作里的位置。
+
+take 的硬边界(违反就是在编):
+- 只许基于**正文里出现过的事实**做推论,例如「它只在 X 上测过,没覆盖你关心的 Y」;
+- **绝对不许引入正文之外的事实、数字、他人观点**——你不知道的事就别提;
+- 没有值得说的判断,就指出正文里最该被质疑的那一处;实在没有,take 给空字符串;
+- 不许写「值得关注」「有待观察」「未来可期」这类正确的废话。
+
+正文为空或过短的条目:substance 和 take 都给空字符串,不许靠标题猜内容。
+只输出 JSON,不要任何其他文字。`;
+
+export function buildEnrichPrompt(items: EnrichSource[]): { system: string; user: string } {
+	const blocks = items.map((it) => {
+		const lines = [`### id=${it.id}`, `标题:${it.title}`, `来源:${it.source}`];
+		if (it.trackerQuestion) lines.push(`读者的长期问题:${it.trackerQuestion}`);
+		if (it.trackerPurpose) lines.push(`读者在忙什么:${it.trackerPurpose}`);
+		lines.push(`正文(${it.text.length} 字):\n${it.text || "(拿不到正文)"}`);
+		return lines.join("\n");
+	});
+	const user = `${blocks.join("\n\n---\n\n")}
+
+返回这个结构的 JSON,每个 id 都要出现:
+{"items": {"<id>": {"whyClick": "...", "substance": "...", "take": "..."}}}`;
+	return { system: ENRICH_SYSTEM, user };
+}
+
+export function parseEnrichJson(raw: string): Record<string, EnrichPick> {
+	const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+	const parsed = JSON.parse(cleaned) as { items?: Record<string, EnrichPick> };
+	const out: Record<string, EnrichPick> = {};
+	for (const [id, pick] of Object.entries(parsed.items ?? {})) {
+		if (!pick || typeof pick !== "object") continue;
+		const take = (str: unknown, cap: number) =>
+			typeof str === "string" && str.trim() ? str.trim().slice(0, cap) : undefined;
+		out[id] = {
+			...(take(pick.whyClick, 200) ? { whyClick: take(pick.whyClick, 200) } : {}),
+			// substance 要 150-320 字,截断上限给够余量:提示词负责控长度,这里
+			// 只防失控;卡在 400 会把最后一句话砍掉一半,比长一点难看得多。
+			...(take(pick.substance, 900) ? { substance: take(pick.substance, 900) } : {}),
+			...(take(pick.take, 400) ? { take: take(pick.take, 400) } : {}),
+		};
+	}
+	return out;
+}
+
+/** 把成稿结果写回简报。缺字段的条目保持第一段的产出,不留空。 */
+export function applyEnrichment(brief: Brief, picks: Record<string, EnrichPick>): number {
+	let n = 0;
+	const all = [...brief.sections.flatMap((s) => s.items), ...(brief.offAxis ? [brief.offAxis] : [])];
+	for (const item of all) {
+		const pick = picks[item.id];
+		if (!pick) continue;
+		if (pick.whyClick) item.whyClick = pick.whyClick;
+		if (pick.substance) item.substance = pick.substance;
+		if (pick.take) item.take = pick.take;
+		if (pick.substance || pick.take) n++;
+	}
+	return n;
+}
+
+/**
+ * 收集成稿所需的正文:feed 里够长就直接用,只有 teaser feed 才去抓原文网页。
+ * 抓取并发做,单条失败不影响其他条。
+ */
+export async function collectEnrichTexts(
+	items: { id: string; url: string }[],
+	excerptById: Map<string, string>,
+	log: (msg: string) => void = () => {},
+): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	const needFetch: { id: string; url: string }[] = [];
+	for (const item of items.slice(0, MAX_ENRICH_ITEMS)) {
+		const excerpt = excerptById.get(item.id) ?? "";
+		if (excerpt.length >= TEASER_THRESHOLD) out.set(item.id, excerpt.slice(0, ENRICH_TEXT_CAP));
+		else needFetch.push(item);
+	}
+	const fetched = await Promise.all(needFetch.map(async (it) => [it.id, await fetchArticleText(it.url)] as const));
+	for (const [id, text] of fetched) {
+		const excerpt = excerptById.get(id) ?? "";
+		// 抓回来的比 feed 摘要长才算数,否则 feed 那点导语还更干净
+		out.set(id, text.length > excerpt.length ? text : excerpt);
+	}
+	log(`[enrich] ${out.size} 条正文,其中 ${needFetch.length} 条抓了原文网页`);
+	return out;
+}
+
+/**
+ * 成稿的完整编排:收正文 → 一次调用 → 写回简报。
+ *
+ * `call` 由调用方注入(Lambda 与 Worker 各自的 ai 配置),这样 pipeline-core
+ * 不用认识 ai.ts。**整段包在 try 里**:成稿失败只是没有实质与判断,不该让
+ * 已经选好的一期发不出去。
+ */
+export async function enrichBrief(
+	brief: Brief,
+	fetched: FetchResult,
+	trackers: Tracker[],
+	call: (system: string, user: string) => Promise<string>,
+	log: (msg: string) => void = () => {},
+): Promise<number> {
+	const byTracker = new Map(trackers.map((t) => [t.key, t]));
+	const targets: EnrichSource[] = [];
+	for (const section of brief.sections) {
+		const tracker = byTracker.get(section.key);
+		for (const item of section.items) {
+			targets.push({
+				id: item.id,
+				title: item.title,
+				url: item.url,
+				source: item.source,
+				...(tracker?.question ? { trackerQuestion: tracker.question } : {}),
+				...(tracker?.purpose ? { trackerPurpose: tracker.purpose } : {}),
+				text: "",
+			});
+		}
+	}
+	if (brief.offAxis) {
+		targets.push({
+			id: brief.offAxis.id,
+			title: brief.offAxis.title,
+			url: brief.offAxis.url,
+			source: brief.offAxis.source,
+			text: "",
+		});
+	}
+	if (targets.length === 0) return 0;
+
+	try {
+		const excerptById = new Map(fetched.candidates.map((c) => [c.id, c.excerpt]));
+		const texts = await collectEnrichTexts(targets, excerptById, log);
+		for (const t of targets) t.text = texts.get(t.id) ?? "";
+		// 拿不到足量正文的条目直接不送:让它保持第一段的路由式文案,
+		// 也好过一段看起来像事实、实则靠标题猜出来的「实质」。
+		const usable = targets.filter((t) => t.text.length >= MIN_ENRICH_TEXT);
+		const skipped = targets.length - usable.length;
+		if (usable.length === 0) {
+			log(`[enrich] 全部 ${targets.length} 条都拿不到正文,跳过成稿`);
+			return 0;
+		}
+		const { system, user } = buildEnrichPrompt(usable);
+		const n = applyEnrichment(brief, parseEnrichJson(await call(system, user)));
+		log(`[enrich] ${n}/${usable.length} 条写出了实质与判断${skipped ? `,${skipped} 条因正文不足跳过` : ""}`);
+		return n;
+	} catch (err) {
+		log(`[enrich] FAILED, keeping the routing-only copy: ${err}`);
+		return 0;
+	}
 }

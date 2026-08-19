@@ -4,7 +4,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_INTENT_SEGMENTS } from "../shared/pipeline-core.ts";
+import {
+	MAX_INTENT_SEGMENTS,
+	PURPOSE_OPTIONS_FALLBACK,
+	PURPOSE_OPT_OUT,
+	purposeOptions,
+} from "../shared/pipeline-core.ts";
 import {
 	cleanCandidates,
 	cleanRefinePatch,
@@ -111,4 +116,25 @@ test("cleanRefinePatch:只认四个字段,越界 sourceKey 整条丢弃", () => 
 
 test("cleanRefinePatch:模型没给可改字段时返回空 patch", () => {
 	assert.deepEqual(cleanRefinePatch({ note: "这句话改不了" }, new Set()), {});
+});
+
+// R8 · 追问选项:模型按话题生成,但退出口是服务端的护栏,不能依赖模型自觉
+test("purposeOptions:退出口永远在最后一个", () => {
+	const opts = purposeOptions(["在做产品盯竞品", "在选技术栈", "手里有仓位"]);
+	assert.equal(opts.length, 4);
+	assert.equal(opts.at(-1), PURPOSE_OPT_OUT);
+});
+
+test("purposeOptions:模型没给选项时退回通用兜底,退出口照样在", () => {
+	const opts = purposeOptions([]);
+	assert.deepEqual(opts, [...PURPOSE_OPTIONS_FALLBACK, PURPOSE_OPT_OUT]);
+});
+
+test("purposeOptions:模型自己也写了退出口时不重复", () => {
+	const opts = purposeOptions(["在做产品", PURPOSE_OPT_OUT, "在看投资"]);
+	assert.equal(opts.filter((o) => o === PURPOSE_OPT_OUT).length, 1);
+});
+
+test("purposeOptions:超过 3 个只取前 3 个(加退出口共 4 个)", () => {
+	assert.equal(purposeOptions(["a", "b", "c", "d", "e"]).length, 4);
 });

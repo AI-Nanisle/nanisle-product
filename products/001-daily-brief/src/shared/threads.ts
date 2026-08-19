@@ -76,10 +76,20 @@ export interface ThreadUpdate {
 export function applyThreads(brief: Brief, existing: Thread[], today: string, now = new Date().toISOString()): ThreadUpdate {
 	const byKey = new Map(existing.map((t) => [t.key, t]));
 	const changed = new Map<string, Thread>();
+	// 一期之内同一条线索只收一条证据。模型倾向于把「都跟 agent 有关」的东西
+	// 往同一条线索里塞(线上实测:临床试验 DAG、游戏生成、自我改进 agent 被归成
+	// 一条),而同一天同一件事的多篇报道本来就该走 merged 合并,不是三条证据。
+	const usedThisIssue = new Set<string>();
 
 	for (const section of brief.sections) {
 		for (const item of section.items) {
 			if (!item.threadKey) continue;
+			if (usedThisIssue.has(item.threadKey)) {
+				// 同期重复归并 = 几乎必然是误归:让它独立成线索,别污染时间线
+				item.threadKey = normalizeThreadKey(item.title.slice(0, 24), item.id);
+				item.threadTitle = item.threadTitle ?? item.title;
+			}
+			usedThisIssue.add(item.threadKey);
 			const prior = byKey.get(item.threadKey);
 			const evidence: ThreadEvidence = {
 				date: brief.date,

@@ -19,6 +19,7 @@ import {
 	briefDate,
 	buildEditorialPrompt,
 	fetchAllSources,
+	enrichBrief,
 	fnv1a,
 	mockEditorial,
 	parseEditorialJson,
@@ -33,7 +34,9 @@ import { applyThreads, stripTransient, threadsPromptBlock } from "../src/shared/
 import { WEEKLY_WINDOW_DAYS, applyProposal, computeWeeklyMetrics, isCooled, isoWeek, makeProposals } from "../src/shared/weekly";
 import { MAX_CHANGELOG } from "../src/shared/pipeline-core";
 import { dynamoStore } from "../src/shared/store-dynamo";
+import { renderBriefEmail, sendBriefEmail, unsubToken } from "../src/shared/email";
 import type { Store, UserConfig } from "../src/shared/store";
+import type { Brief } from "../src/shared/types";
 import type { EditorialResult } from "../src/shared/pipeline-core";
 
 export interface GenerateEvent {
@@ -160,7 +163,7 @@ async function produceBrief(
 	bumpGenCount: boolean,
 	/** H1 · 本轮抓取结果,**已换算成该用户自己的源 key**(全量模式抓的是并集)。 */
 	healthByKey: Map<string, { ok: boolean; error?: string }>,
-): Promise<{ picked: number; genCount: number }> {
+): Promise<{ picked: number; genCount: number; brief: Brief }> {
 	// R2 · 近 7 天反馈先读出来:它既进选材提示词,也是回响的原料。读失败会
 	// 降级成空摘要(见 loadFeedbackDigest),不会让当天的简报生不出来。
 	const digest = await loadFeedbackDigest(store, run.email, { log: (m) => console.log(`[${run.email}] ${m}`) });
@@ -188,6 +191,15 @@ async function produceBrief(
 		lookupDiscussions: true,
 	});
 	// R3 · 回响在简报成形之后算:它要比对「上一期 vs 这一期」的真实条数
+	// 第二段 · 成稿:只对已入选的条目取全文,写实质与判断。选材阶段每条只看
+	// 800 字,写不出深度;这一次调用才是简报从「标题改写」变成有内容的地方。
+	if (resolveProvider(cfg) !== "mock") {
+		await enrichBrief(brief, fetched, run.config.trackers, (system, user) =>
+			complete(cfg, { prompt: user, system, json: true }).then((r) => r.text),
+			(m) => console.log(`[${run.email}] ${m}`),
+		);
+	}
+
 	// T4/T5 · 并进台账(注记由代码算),再把临时字段抹掉才落库
 	const { changed } = applyThreads(brief, threads, date);
 	stripTransient(brief);
@@ -212,7 +224,45 @@ async function produceBrief(
 	}
 	const genCount = await store.putBrief(run.email, brief, bumpGenCount);
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
-	return { picked, genCount };
+	return { picked, genCount, brief };
+}
+
+// ---------- E1 · 邮件推送(docs/04) ----------
+
+/** 发信所需的环境齐不齐。没配齐(比如纯 infra 联调部署)就整体静默跳过。 */
+function emailEnv(): { from: string; secret: string; appUrl: string } | null {
+	const from = process.env.EMAIL_FROM;
+	const secret = process.env.EMAIL_UNSUB_SECRET;
+	if (!from || !secret) return null;
+	return {
+		from,
+		secret,
+		appUrl: (process.env.APP_URL ?? "https://nanisle.com/products/daily-brief").replace(/\/+$/, ""),
+	};
+}
+
+/**
+ * 给一个用户发当日提醒。只在定时全量模式调用——「立即生成」的人就在页面上,
+ * 发邮件是打扰。失败只抛给调用方记日志,绝不影响简报落库(刊已经安全)。
+ */
+async function pushBriefEmail(email: string, brief: Brief): Promise<boolean> {
+	const env = emailEnv();
+	if (!env) return false;
+	const unsubUrl = `${env.appUrl}/api/email/unsub?token=${encodeURIComponent(await unsubToken(env.secret, email))}`;
+	const mail = renderBriefEmail({ date: brief.date, tldr: brief.tldr ?? [], appUrl: env.appUrl, unsubUrl });
+	await sendBriefEmail(
+		{
+			region: process.env.AWS_REGION ?? "us-east-1",
+			accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? "",
+			secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
+			sessionToken: process.env.AWS_SESSION_TOKEN,
+			from: env.from,
+		},
+		email,
+		mail,
+		unsubUrl,
+	);
+	return true;
 }
 
 // ---------- 单用户模式(立即生成) ----------
@@ -335,9 +385,19 @@ async function generateAll(store: Store, cfg: AiConfig, date: string) {
 				results.push({ email: run.email, ok: false, error: "no candidates" });
 				continue;
 			}
-			const { picked } = await produceBrief(store, cfg, run, userFetched, date, false, health);
+			const { picked, brief } = await produceBrief(store, cfg, run, userFetched, date, false, health);
 			console.log(`[all] ${run.email}: ok picked=${picked} scanned=${userFetched.scanned}`);
-			results.push({ email: run.email, ok: true, picked });
+			// E1 · 刊已落库,再发提醒邮件。缺省为开(prefs.emailPush !== false);
+			// 发信失败只记日志——邮件是门铃,门铃坏了不能把刊也砸了。
+			let emailed = false;
+			if (run.config.prefs?.emailPush !== false) {
+				try {
+					emailed = await pushBriefEmail(run.email, brief);
+				} catch (err) {
+					console.error(`[all] ${run.email}: email FAILED`, err);
+				}
+			}
+			results.push({ email: run.email, ok: true, picked, emailed });
 		} catch (err) {
 			// 失败隔离(§8.1):一个用户的编辑调用失败不拖累其他用户
 			console.error(`[all] ${run.email}: FAILED`, err);

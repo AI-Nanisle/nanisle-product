@@ -29,6 +29,11 @@ export interface UserPrefs {
 	offAxisMisses?: number;
 	/** H5 · 读者说过「不用管这个站」的域名,别再反复提议(最多留 100 条)。 */
 	dismissedHosts?: string[];
+	/**
+	 * E1 · 每日邮件提醒(docs/04),缺省 = 开(内测熟人默认要提醒,默认关等于
+	 * 功能没做)。三个关闭入口:配置页开关、邮件页脚退订链、Gmail 原生退订按钮。
+	 */
+	emailPush?: boolean;
 	/** S1 · 最近一次算过周指标的 ISO 周(YYYY-Www),防同周重复生成提案。 */
 	lastWeeklyAt?: string;
 }

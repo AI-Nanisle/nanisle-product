@@ -24,7 +24,9 @@ import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
 import { ISSUE_ITEM_ID } from "../shared/types";
 import {
 	activeTrackers,
+	applyHealth,
 	assembleBrief,
+	enrichBrief,
 	briefDate,
 	buildEditorialPrompt,
 	fetchAllSources,
@@ -37,7 +39,7 @@ import {
 } from "../shared/pipeline-core";
 import type { SourceConfig, TrackerSourceRule } from "../shared/pipeline-core";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../shared/feedback";
-import { computeStage, sortThreadsForDisplay } from "../shared/threads";
+import { applyThreads, computeStage, sortThreadsForDisplay, stripTransient, threadsPromptBlock } from "../shared/threads";
 import { PROPOSAL_COOLING_DAYS, applyProposal } from "../shared/weekly";
 import { DEFAULT_FILTERS } from "../shared/default-sources";
 import { clickEvent, lambdaClient } from "../shared/store-dynamo";
@@ -51,6 +53,7 @@ import {
 	saveTrackers,
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
+import { verifyUnsubToken } from "../shared/email";
 import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, offAxisEnabled } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
@@ -221,20 +224,28 @@ app.post("/api/feedback", userGuard, async (c) => {
 	return c.json({ ok: true });
 });
 
-// X2 · 轴外位开关。护栏之二:读者随时能关(关掉就真的没有)。手动打开时
-// 一并清零未点击计数——重新表态了,不该背着上一轮的账。
+// X2 · 轴外位开关 + E1 · 邮件提醒开关。护栏之二:读者随时能关(关掉就真的没有)。
+// 轴外位手动打开时一并清零未点击计数——重新表态了,不该背着上一轮的账。
 app.put("/api/prefs", userGuard, async (c) => {
-	let body: { offAxis?: unknown };
+	let body: { offAxis?: unknown; emailPush?: unknown };
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: "Body must be JSON." }, 400);
 	}
-	if (typeof body.offAxis !== "boolean") return c.json({ error: "offAxis must be a boolean" }, 400);
+	const hasOffAxis = body.offAxis !== undefined;
+	const hasEmailPush = body.emailPush !== undefined;
+	if (!hasOffAxis && !hasEmailPush) return c.json({ error: "nothing to update" }, 400);
+	if (hasOffAxis && typeof body.offAxis !== "boolean") return c.json({ error: "offAxis must be a boolean" }, 400);
+	if (hasEmailPush && typeof body.emailPush !== "boolean") return c.json({ error: "emailPush must be a boolean" }, 400);
 	const store = c.get("store");
 	const email = c.get("email");
 	const config = await loadConfig(store, email);
-	const prefs = { ...(config.prefs ?? {}), offAxis: body.offAxis, ...(body.offAxis ? { offAxisMisses: 0 } : {}) };
+	const prefs = {
+		...(config.prefs ?? {}),
+		...(hasOffAxis ? { offAxis: body.offAxis as boolean, ...(body.offAxis ? { offAxisMisses: 0 } : {}) } : {}),
+		...(hasEmailPush ? { emailPush: body.emailPush as boolean } : {}),
+	};
 	await store.putConfig(email, { ...config, prefs, updatedAt: new Date().toISOString() });
 	return c.json({ ok: true, prefs });
 });
@@ -242,6 +253,50 @@ app.put("/api/prefs", userGuard, async (c) => {
 app.get("/api/prefs", userGuard, async (c) => {
 	const config = await loadConfig(c.get("store"), c.get("email"));
 	return c.json({ prefs: config.prefs ?? {} });
+});
+
+// E1 · 一键退订(docs/04)。免登录:邮件可能在手机上被点开,那里没有会话。
+// 身份靠 HMAC token(Lambda 发信时签的),不靠 cookie;GET 给人看确认页,
+// POST 给 Gmail 的原生一键退订(List-Unsubscribe-Post)。都是幂等的置 false。
+async function unsubscribe(c: Context<Guarded>): Promise<{ ok: boolean; status: 200 | 400 | 503 }> {
+	const secret = c.env.EMAIL_UNSUB_SECRET;
+	if (!secret) return { ok: false, status: 503 };
+	const email = await verifyUnsubToken(secret, c.req.query("token") ?? "");
+	if (!email) return { ok: false, status: 400 };
+	const { store } = makeStore(c.env);
+	// 只动已有配置:没配置的人本来就收不到邮件(generateAll 会跳过),
+	// 也别为一次退订点击凭空建出一份带默认源的配置。
+	const config = await store.getConfig(email);
+	if (config) {
+		await store.putConfig(email, {
+			...config,
+			prefs: { ...(config.prefs ?? {}), emailPush: false },
+			updatedAt: new Date().toISOString(),
+		});
+	}
+	return { ok: true, status: 200 };
+}
+
+app.get("/api/email/unsub", async (c) => {
+	const result = await unsubscribe(c);
+	const body = result.ok
+		? "<p>已退订每日邮件提醒。</p><p>简报照常每天生成,随时回网页看;想恢复提醒,去配置页重新打开即可。</p>"
+		: result.status === 503
+			? "<p>退订功能未启用。</p>"
+			: "<p>退订链接无效或已损坏。</p><p>你也可以登录后在配置页关闭邮件提醒。</p>";
+	return c.html(
+		`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>南屿简报</title>
+<div style="max-width:480px;margin:80px auto;padding:0 20px;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;color:#1a1a1a;line-height:1.8;">
+<p style="font-size:12px;letter-spacing:0.08em;color:#999;">南屿简报</p>${body}
+<p><a href="${appUrl(c.env, "config")}" style="color:#1a1a1a;">前往配置页 →</a></p></div>`,
+		result.status,
+	);
+});
+
+// Gmail 的一键退订是服务端发的 POST,不渲染页面,只看状态码。
+app.post("/api/email/unsub", async (c) => {
+	const result = await unsubscribe(c);
+	return c.json({ ok: result.ok }, result.status);
 });
 
 // R6 · 反馈导出:自己的数据自己拿得走(想喂给别的模型做整理就喂)。只导本人的,
@@ -766,6 +821,11 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	// dev / fork 回落:无 AWS 时在 Worker 里直跑(通常 mock 模式)。生成逻辑
 	// 的生产版本只在 pipeline/lambda.ts 维护,这里只为零配置演示保底。
 	const config = await loadConfig(store, email);
+	// 和 Lambda 的 generateOne 一样先挡一道:草稿追踪器(带 stage)不参与生成,
+	// 只有草稿时直接说清楚,别产出一份空简报让人以为是选材失败
+	if (activeTrackers(config.trackers).length === 0) {
+		return c.json({ error: "没有生效的追踪器——向导走完三步、点「完成」之后才会参与生成。" }, 422);
+	}
 	const fetched = await fetchAllSources(config.sources, DEFAULT_FILTERS, (m) => console.log(m));
 	if (fetched.candidates.length === 0) {
 		return c.json(
@@ -783,8 +843,19 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		throw err;
 	}
 
-	// R2 · dev/fork 回落路径也走同一条反馈回路,否则本地永远验不到它
+	// R2/T3 · dev/fork 回落路径要和 Lambda 走同一套:反馈回路、线索台账、源健康
+	// 一个都不能少。这条路是「fork 零配置跑通全流程」的保证,也是本地验证新
+	// 生成逻辑的唯一入口——它和生产分叉,本地就永远测不到真正会上线的行为。
 	const digest = await loadFeedbackDigest(store, email, { log: (m) => console.log(m) });
+	const threads = await store.listThreads(email);
+	const threadsByTracker = new Map<string, string>();
+	for (const t of activeTrackers(config.trackers)) {
+		const block = threadsPromptBlock(
+			threads.filter((th) => th.trackerKey === t.key),
+			today,
+		);
+		if (block) threadsByTracker.set(t.key, block);
+	}
 
 	let editorial;
 	if (provider === "mock") {
@@ -795,6 +866,7 @@ app.post("/api/generate", userAiGuard, async (c) => {
 			config.trackers,
 			feedbackPromptBlock(digest),
 			offAxisEnabled(config),
+			threadsByTracker,
 		);
 		// The editorial JSON needs room; never let the default 1024 cap truncate it.
 		const cap = Number.parseInt(env.AI_MAX_OUTPUT_TOKENS ?? "", 10);
@@ -817,8 +889,29 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		// 免费档子请求预算留给抓取;讨论区链接是 Lambda 路径的事
 		lookupDiscussions: false,
 	});
+	// 第二段 · 成稿(和 Lambda 同一套)。免费档子请求预算:抓原文最多 10 次,
+	// 加上抓源本身仍在 50 以内;真超了 fetchArticleText 会静默失败退回摘要。
+	if (provider !== "mock") {
+		await enrichBrief(brief, fetched, config.trackers, (system, user) =>
+			complete({ ...cfg, maxOutputTokens: "4096" }, { prompt: user, system, json: true }).then((r) => r.text),
+			(m) => console.log(m),
+		);
+	}
+
+	// T4/T5 · 并进台账(注记由代码算),临时字段抹掉才落库
+	const { changed } = applyThreads(brief, threads, today);
+	stripTransient(brief);
+	for (const thread of changed) await store.putThread(email, thread);
+
 	const echo = buildFeedbackEcho(digest, brief);
 	if (echo) brief.feedbackEcho = echo;
+
+	// H1 · 源健康回写:本地跑一次也该看得见哪个 feed 挂了
+	const healed = applyHealth(config.sources, new Map(fetched.sourceStatus.map((st) => [st.key, st])));
+	if (JSON.stringify(healed) !== JSON.stringify(config.sources)) {
+		await store.putConfig(email, { ...config, sources: healed, updatedAt: new Date().toISOString() });
+	}
+
 	const genCount = await store.putBrief(email, brief, true);
 
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);

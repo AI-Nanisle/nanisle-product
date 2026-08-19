@@ -21,8 +21,10 @@ import type { Store } from "../shared/store";
 import {
 	MAX_CHANGELOG,
 	MAX_INTENT_SEGMENTS,
+	PURPOSE_QUESTION,
 	SOURCE_CATEGORIES,
 	joinSegments,
+	purposeOptions,
 	trackerSegments,
 } from "../shared/pipeline-core.ts";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
@@ -152,32 +154,17 @@ function bad(error: string): WizardResult {
 
 // ---------- 步骤 1:理解 ----------
 
-/**
- * R8 · 追问用的固定问法与选项。**由服务端出题,不是模型现编的**:选项本身
- * 就是在教用户这个字段要什么,每次都必须一模一样;交给模型出题,每个用户
- * 看到的问法都不同,这个字段也就没法长期比较了。
- *
- * 问法是口语的「你在忙什么」,选项却是照着「什么会改变你的动作」写的——
- * 直接问「这些变化会影响你的什么决定」,十个人有九个答「了解行业动态」。
- */
-export const PURPOSE_QUESTION = "你现在主要在忙这块的什么?——这决定了我该给你挑哪一类";
-export const PURPOSE_OPTIONS = [
-	"做产品,盯竞品和平台规则",
-	"选模型 / 搭技术栈",
-	"找机会、看投资",
-	"就是想跟上,不为具体的事",
-];
-
 const UNDERSTAND_SYSTEM = `你是「每日简报」的编辑。用户会用自己的话描述一个想长期追踪的问题,你要把它整理成一份「编辑的理解」——一组独立短句,用户会逐句圈改,然后这份理解会长期指导每天的选材。
 
 只输出一个 JSON 对象,不要任何其他文字:
-{"name": "简报分区标题", "segments": ["一句话", "一句话", ...], "purpose": "用户拿这份追踪干什么(只有他明说了才填,否则省略)"}
+{"name": "简报分区标题", "segments": ["一句话", "一句话", ...], "purpose": "用户拿这份追踪干什么(只有他明说了才填,否则省略)", "purposeOptions": ["选项1", "选项2", "选项3"]}
 
 要求:
 - segments 3 到 ${MAX_INTENT_SEGMENTS} 句,每句 ≤50 字,简体中文(专有名词保留原文);
 - 每句只讲一个维度(追踪范围/优先什么/过滤什么/判断标准),可独立修改而不牵连其他句;
 - 忠于用户原话,不发挥、不编造用户没提的偏好;拿不准的宁可少写,留给用户补;
 - purpose 是「他在忙什么、什么变化会改变他的动作」(如「在做产品,怕平台改权限和定价」)。**只有用户原话里说了才填,一个字都不许猜**——没说就省略这个字段,系统会去问他;
+- purposeOptions 是**没填 purpose 时**系统要拿去问他的选项,3 个,每个 ≤14 字。它们必须**贴着他这个话题**:同一个话题下,不同的人在忙的事不一样,而这决定了该给他挑哪一类内容(追 AI Agent 的可能是「在做产品盯竞品」或「在选技术栈」;追美联储的可能是「手里有仓位」或「在看购房时机」)。写成具体处境,别写成「了解行业动态」这种放之四海皆准的废话;不要写「就是想跟上」这类不表态的选项,系统会自己补;
 - 用户多说了几轮时,基于全部原话整体重写完整理解,不做增量拼接;
 - name 是简报里的分区标题:名词短语,≤16 字,不带标点。`;
 
@@ -245,6 +232,8 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 	let name: string;
 	let segments: IntentSegment[];
 	let note: string | undefined;
+	// 模型按话题生成的选项;拿不到就用通用兜底(purposeOptions 里处理)
+	let generatedOptions: string[] = existing?.purposeOptions ?? [];
 	if (resolveProvider(ctx.ai) === "mock") {
 		name = question.slice(0, 12);
 		segments = skeletonSegments();
@@ -258,11 +247,12 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 		if (segments.length === 0) throw new AiError("模型没有给出可用的理解,请重试。", 502);
 		// 用户原话里本来就说了用途 → 直接采用,不必再问一遍
 		if (!purpose && typeof parsed.purpose === "string") purpose = parsed.purpose.trim().slice(0, 200);
+		generatedOptions = cleanStringList(parsed.purposeOptions, 3, 14);
 	}
 
 	// R8 · 只有「还不知道用途」才追问,而且只追这一轮:知道了就再也不问。
 	// 两轮以上会从「帮我想清楚」变成「被盘问」,向导的放弃率会掉。
-	const ask = purpose ? undefined : { question: PURPOSE_QUESTION, options: PURPOSE_OPTIONS };
+	const ask = purpose ? undefined : { question: PURPOSE_QUESTION, options: purposeOptions(generatedOptions) };
 	// §7.2 兜底:用户红标圈改过的句子按位置强制覆盖,不管模型听没听话
 	segments = mergeLockedSegments(existing?.intentSegments, segments);
 
@@ -275,6 +265,8 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 				name,
 				question,
 				...(purpose ? { purpose } : {}),
+				// 答完就把选项删掉:它只在向导期间有用,不该留在生效的定义里
+				purposeOptions: purpose ? undefined : generatedOptions,
 				intentSegments: segments,
 				intent: joinSegments(segments),
 				stage: "understanding",
@@ -289,6 +281,7 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 			name,
 			question,
 			...(purpose ? { purpose } : {}),
+			...(purpose || generatedOptions.length === 0 ? {} : { purposeOptions: generatedOptions }),
 			askedAt: now,
 			intentSegments: segments,
 			intent: joinSegments(segments),

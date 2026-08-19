@@ -31,6 +31,17 @@ export interface BriefItem {
 	discussionUrl?: string;
 	/** 1–2 related links for going deeper (same-day related coverage, data source, opposing view). */
 	extras?: BriefLink[];
+	/**
+	 * 第二段「成稿」的产物:这篇**究竟给出了什么**——具体的数字、机制、结论。
+	 * 不是全文摘要,是最硬的那一两点;读完仍然需要原文的论证过程。
+	 */
+	substance?: string;
+	/**
+	 * 编辑的**独立判断**:适用边界、方法弱点、与读者追踪问题的冲突、什么条件下
+	 * 结论会反转。硬边界是「只许基于正文里出现过的事实做推论」——放开它去引入
+	 * 外部事实,就是拿反捏造原则换深度,那笔买卖不划算。界面上与事实分开渲染。
+	 */
+	take?: string;
 	/** Doubts, caveats or disagreement present in the original — preserved, never flattened. */
 	caveat?: string;
 	/** How this item relates to its tracker's question (one clause). */
@@ -78,6 +89,12 @@ export interface Brief {
 	generatedAt: string;
 	/** v2: "based on yesterday's feedback, this issue has less X" — feedback must be felt. */
 	feedbackEcho?: string;
+	/**
+	 * E1 · 今日三句话(docs/04):邮件推送的正文,编辑调用顺带产出。写的是
+	 * 「今天为什么值得点开」,不是条目摘要。模型漏给时由代码从各版块首条机械
+	 * 拼出兜底(见 assembleBrief)。老简报没有这个字段。
+	 */
+	tldr?: string[];
 	sections: BriefSection[];
 	/**
 	 * X2 · 轴外位:一条**不属于任何追踪器**的内容。一个「读者自己定义追踪范围」

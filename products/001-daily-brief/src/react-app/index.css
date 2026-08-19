@@ -23,6 +23,10 @@
 	   中文会一路掉到系统默认等宽(Windows 上是宋体),又细又糊。
 	   垫了之后:数字/英文走 Plex Mono,汉字走黑体,同一行里各得其所。 */
 	--mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
+	/* 正文衬线:报纸的家具(导航、标签、读数)是无衬线,正文是衬线——这不是
+	   装饰,是分工。加了它之后,「世界送进来的内容」和「产品自己的界面」
+	   一眼可分;不加的话,300 字的中文段落和按钮标签是同一种灰。 */
+	--serif: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
 }
 
 html {
@@ -541,4 +545,90 @@ details.dropped[open] > summary .chevron {
 	.brand:hover .logo-route-tile {
 		animation: none !important;
 	}
+}
+
+
+/* ============================================================
+   阅读页的排版层级(成稿两段式之后加的)。
+   一条内容现在有四段文字:导语、实质、编辑判断、原文存疑。
+   四段同重就是一堵墙——读者不知道先读哪句、哪句可以跳过,
+   于是每一条都要从头读到尾,八条读下来就累。
+   所以按**角色**分层,而不是靠字号大小微调:
+     deck  导语   无衬线、次级墨色 —— 一句话的推销,读完就能决定点不点
+     body  实质   衬线、主墨色、窄行宽 —— 唯一需要逐字读的部分
+     aside 判断   小字、底纹块 —— 编辑的话,和事实分开,可跳过
+   ============================================================ */
+
+/* 导语:回答「为什么值得点」。它是钩子,不是内容,所以不给主墨色。 */
+.brief-deck {
+	font-size: 15px;
+	line-height: 1.8;
+	color: var(--ink-2);
+}
+
+/* 实质:唯一用衬线的地方,也是唯一值得逐字读的地方。
+   行宽卡在 34em:中文一行 30-38 字最舒服,672px 的整幅在 15px 下
+   一行能塞 45 字,读长段落时眼睛回扫的距离太远,这是「累」的大头。 */
+.brief-body {
+	font-family: var(--serif);
+	font-size: 16px;
+	line-height: 1.95;
+	letter-spacing: 0.01em;
+	color: var(--ink);
+	max-width: 34em;
+	/* 让浏览器把末行孤字往回收(支持的浏览器才生效,不支持也不影响) */
+	text-wrap: pretty;
+}
+
+/* 编辑判断:用底纹块而不是左边框。
+   页面上已经有「原文存疑」的左边框了,两个左边框并排,眼睛会把它们
+   读成同一层;换成一块浅底,它就明确是「另一种东西」。 */
+.brief-aside {
+	font-size: 13.5px;
+	line-height: 1.85;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 6px;
+	padding: 10px 12px;
+	max-width: 34em;
+}
+.brief-aside .label {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-3);
+	margin-right: 8px;
+}
+
+/* 原文存疑:比编辑判断更轻——它是原作者的保留意见,不是我们的观点 */
+.brief-caveat {
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink-3);
+	border-left: 2px solid var(--line-strong);
+	padding-left: 12px;
+	max-width: 34em;
+}
+
+/* 条目之间给足空气,条目内部收紧——靠近的东西才会被读成一组。
+   原来用 divide-y 分隔,每条之间只有一根线和同样的间距,
+   于是四段的长条目和一段的短条目看起来一样重。 */
+.brief-item + .brief-item {
+	margin-top: 34px;
+	padding-top: 30px;
+	border-top: 1px solid var(--line);
+}
+
+/* 线索注记:「本线索第 3 条证据 · 上次 12 天前」。
+   它是台账算出来的读数,归到仪表那一类字体里,和标题拉开。 */
+.thread-note {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	color: var(--ink-3);
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	padding: 1px 8px;
+	white-space: nowrap;
 }

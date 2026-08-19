@@ -83,6 +83,7 @@ export default function SourceLibrary({
 	const [metrics, setMetrics] = useState<MetricsReport | null>(null);
 	// X2 · 轴外位开关(null = 还没读到)。默认开,所以缺字段按 true 算。
 	const [offAxis, setOffAxis] = useState<boolean | null>(null);
+	const [emailPush, setEmailPush] = useState<boolean | null>(null);
 	// H3/H5 · 自愈结果(按源 key)与反向发现的候选站
 	const [heal, setHeal] = useState<Record<string, HealResult | "healing">>({});
 	const [discovered, setDiscovered] = useState<DiscoveredHost[]>([]);
@@ -100,8 +101,9 @@ export default function SourceLibrary({
 			try {
 				const res = await fetch(apiPath("prefs"));
 				if (res.ok) {
-					const data = (await res.json()) as { prefs?: { offAxis?: boolean } };
+					const data = (await res.json()) as { prefs?: { offAxis?: boolean; emailPush?: boolean } };
 					setOffAxis(data.prefs?.offAxis !== false);
+					setEmailPush(data.prefs?.emailPush !== false);
 				}
 			} catch {
 				// 同上
@@ -125,6 +127,16 @@ export default function SourceLibrary({
 			method: "PUT",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ offAxis: next }),
+		});
+	};
+
+	const toggleEmailPush = async () => {
+		const next = !(emailPush ?? true);
+		setEmailPush(next);
+		await fetch(apiPath("prefs"), {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ emailPush: next }),
 		});
 	};
 
@@ -523,6 +535,29 @@ export default function SourceLibrary({
 					<p className="m-0 mt-1.5 text-[12px] leading-relaxed text-[var(--ink-3)]">
 						每期给一条不属于任何追踪定义的内容,并说明为什么你该看见。你只订这些源,就只看得见这些源——
 						这一条是留给「你还不知道自己该知道」的东西的。连续 10 期一条没点开会自动停。
+					</p>
+				</div>
+			)}
+
+			{/* E1 · 邮件提醒开关(docs/04)。邮件只当门铃:三句话 + 回站按钮,
+			    不放条目链接。邮件页脚的退订链和这里是同一个偏好。 */}
+			{emailPush !== null && (
+				<div className="mt-6 border-t border-[var(--line)] pt-4">
+					<div className="flex items-baseline gap-3">
+						<p className="font-mono-sc m-0 text-[10px] uppercase tracking-[0.08em] text-[var(--ink-3)]">
+							每日邮件提醒
+						</p>
+						<button
+							type="button"
+							onClick={() => void toggleEmailPush()}
+							className={`font-mono-sc ml-auto cursor-pointer text-[11px] transition-colors ${emailPush ? "text-[var(--accent)]" : "text-[var(--ink-3)] hover:text-[var(--ink)]"}`}
+						>
+							{emailPush ? "● 开着" : "○ 关着"}
+						</button>
+					</div>
+					<p className="m-0 mt-1.5 text-[12px] leading-relaxed text-[var(--ink-3)]">
+						每天早刊生成后发一封极简邮件:今日三句话 + 一个回到简报的按钮,没有任何条目链接——阅读和反馈都在网页上。
+						邮件页脚也有一键退订,和这个开关是同一回事。
 					</p>
 				</div>
 			)}
