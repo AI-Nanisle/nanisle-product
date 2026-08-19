@@ -22,6 +22,12 @@ export interface AppEnv {
 	ACCESS_CODE?: string;
 	/** Secret. Shared with the nanisle main site — verifies SSO handoff tokens and signs the session cookie. */
 	NANISLE_SSO_SECRET?: string;
+	/**
+	 * Secret. E1 · 退订 token 的 HMAC 密钥,与 generate Lambda 共享(cdk deploy
+	 * 时注入 Lambda 环境)。专用密钥不复用 SSO secret:泄漏最坏后果只是被人退订。
+	 * 未配置时退订端点返回 503(邮件本身也发不出去——Lambda 同样没配)。
+	 */
+	EMAIL_UNSUB_SECRET?: string;
 	/** Main-site origin used in login redirects (default https://nanisle.com). */
 	NANISLE_URL?: string;
 	/** Canonical public mount for this product (no trailing slash). */

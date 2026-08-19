@@ -21,6 +21,10 @@ APP_URL=http://localhost:3000/products/daily-brief
 # Admin credential (x-access-code): manual full-run trigger; also a reader
 # fallback for self-hosted instances. Leave unset locally for open access.
 #ACCESS_CODE=change-me
+# E1 · 退订 token 的 HMAC 密钥(docs/04)。生产:wrangler secret put,且必须和
+# cdk deploy 时的 $env:EMAIL_UNSUB_SECRET 同值(Lambda 签、Worker 验)。
+# 本地留空 = 退订端点 503,邮件功能整体不参与本地 dev。
+#EMAIL_UNSUB_SECRET=change-me
 
 # --- AWS store + generate Lambda (cdk stack lives in the main repo's infra/) ---
 # 三个都留空 = KV 替身 + 固定用户 dev@local(fork / 零配置的默认路径),
