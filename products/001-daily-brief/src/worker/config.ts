@@ -10,6 +10,7 @@ import {
 	fnv1a,
 	joinSegments,
 } from "../shared/pipeline-core.ts";
+import { MAX_EXCLUDE, MAX_RULES_PER_SOURCE } from "../shared/weekly.ts";
 import type {
 	IntentSegment,
 	SourceConfig,
@@ -83,6 +84,17 @@ export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { erro
 		if (!SOURCE_CATEGORIES.includes(category)) return { error: `source #${i + 1}: bad category` };
 		const maxItems =
 			typeof s.max_items === "number" && s.max_items >= 1 && s.max_items <= 50 ? Math.floor(s.max_items) : undefined;
+		// H1 · health 是生成侧写的运行状态,不是用户可编辑的字段——但也不能在
+		// 用户改一次源库时被抹掉,所以原样带过来(只做形状校验)。
+		const rawHealth = s.health as Record<string, unknown> | undefined;
+		const health =
+			rawHealth && typeof rawHealth.consecutiveFailures === "number"
+				? {
+						consecutiveFailures: Math.max(0, Math.floor(rawHealth.consecutiveFailures)),
+						...(typeof rawHealth.lastOkAt === "string" ? { lastOkAt: rawHealth.lastOkAt.slice(0, 40) } : {}),
+						...(typeof rawHealth.lastError === "string" ? { lastError: rawHealth.lastError.slice(0, 300) } : {}),
+					}
+				: undefined;
 		cleaned.push({
 			key: typeof s.key === "string" && s.key ? s.key.slice(0, 64) : fnv1a(url),
 			name,
@@ -90,18 +102,24 @@ export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { erro
 			category,
 			enabled: s.enabled === false ? false : undefined,
 			...(maxItems ? { max_items: maxItems } : {}),
+			...(health ? { health } : {}),
 		});
 	}
 	return { sources: cleaned };
 }
 
-function cleanKeywordList(raw: unknown, max = 12): string[] | undefined {
+/**
+ * S6 · 「收/不收」的硬上限。只加不减的定义几个月后会变成谁也读不懂的补丁堆
+ * ——自我修订机制最常见的败法。到顶时挤掉的是**最旧的**(尾部是新加的),
+ * 所以每周自评的提案永远是替换而不是无限追加。
+ */
+function cleanKeywordList(raw: unknown, max = MAX_EXCLUDE): string[] | undefined {
 	if (!Array.isArray(raw)) return undefined;
 	const list = raw
 		.filter((k): k is string => typeof k === "string")
 		.map((k) => k.trim().slice(0, 40))
 		.filter(Boolean)
-		.slice(0, max);
+		.slice(-max);
 	return list.length > 0 ? list : undefined;
 }
 
@@ -161,8 +179,9 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			for (const rawRule of (t.sourceRules as Record<string, unknown>[]).slice(0, MAX_SOURCES)) {
 				const sourceKey = typeof rawRule.sourceKey === "string" ? rawRule.sourceKey.trim().slice(0, 64) : "";
 				if (!sourceKey || sourceRules.some((rule) => rule.sourceKey === sourceKey)) continue;
-				const localInclude = cleanKeywordList(rawRule.include);
-				const localExclude = cleanKeywordList(rawRule.exclude);
+				// 局部规则更该收着:一个源上挂六条以上的收/不收,基本等于没规则
+				const localInclude = cleanKeywordList(rawRule.include, MAX_RULES_PER_SOURCE);
+				const localExclude = cleanKeywordList(rawRule.exclude, MAX_RULES_PER_SOURCE);
 				if (localInclude || localExclude) {
 					sourceRules.push({
 						sourceKey,

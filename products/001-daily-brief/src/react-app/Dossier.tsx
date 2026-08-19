@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MAX_INTENT_SEGMENTS, MAX_TRACKER_QUOTA, joinSegments, trackerSegments } from "../shared/pipeline-core";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
 import type { CatalogEntry } from "../shared/catalog";
@@ -6,6 +6,7 @@ import type { ProposalItem, TestResult } from "./editor";
 import { CATEGORY_LABELS } from "./SourceLibrary";
 import CandidateCard from "./CandidateCard";
 import CatalogPicker from "./CatalogPicker";
+import { apiPath } from "./paths";
 
 // 追踪定义档案:一份定义 = 一页文档,读起来像编辑写给你的稿子,
 // 但每一处虚线都能当场圈改。四节的顺序就是信任链——
@@ -232,6 +233,57 @@ export interface DossierProps {
 	onSay: (text: string) => void;
 }
 
+/** T6 · 一条线索(GET /api/threads 的返回形状)。 */
+interface ThreadView {
+	key: string;
+	trackerKey: string;
+	title: string;
+	firstSeen: string;
+	lastEvidence: string;
+	stage: "fresh" | "active" | "quiet" | "dormant";
+	evidence: { date: string; itemId: string; title: string; url: string; source: string }[];
+}
+
+const STAGE_LABEL: Record<ThreadView["stage"], string> = {
+	fresh: "新出现",
+	active: "进行中",
+	quiet: "转冷",
+	dormant: "已沉寂",
+};
+
+/** 一条线索:一行摘要,点开是它的证据时间线。 */
+function ThreadRow({ thread, open, onToggle }: { thread: ThreadView; open: boolean; onToggle: () => void }) {
+	return (
+		<div className="rounded-md border border-[var(--line)] px-3 py-1.5">
+			<button type="button" onClick={onToggle} className="flex w-full cursor-pointer items-baseline gap-2 text-left">
+				<span className="font-mono-sc text-[10px] text-[var(--ink-3)]">{open ? "▾" : "▸"}</span>
+				<span className="min-w-0 flex-1 truncate text-[14px] font-medium">{thread.title}</span>
+				<span
+					className={`font-mono-sc shrink-0 text-[10px] ${thread.stage === "dormant" ? "text-[var(--ink-3)]" : "text-[var(--accent)]"}`}
+				>
+					{STAGE_LABEL[thread.stage]}
+				</span>
+				<span className="font-mono-sc shrink-0 text-[10px] text-[var(--ink-3)]">
+					{thread.evidence.length} 条 · {thread.firstSeen.slice(5)}起
+				</span>
+			</button>
+			{open && (
+				<ul className="mt-1.5 space-y-1 border-l-2 border-[var(--line)] pl-3">
+					{thread.evidence.map((e) => (
+						<li key={e.itemId} className="text-[13px]">
+							<span className="font-mono-sc mr-2 text-[10px] text-[var(--ink-3)]">{e.date.slice(5)}</span>
+							<a href={e.url} target="_blank" rel="noreferrer" className="text-[var(--ink-2)] hover:text-[var(--accent)]">
+								{e.title}
+							</a>
+							<span className="font-mono-sc ml-2 text-[10px] text-[var(--ink-3)]">{e.source}</span>
+						</li>
+					))}
+				</ul>
+			)}
+		</div>
+	);
+}
+
 export default function Dossier({
 	tracker: t,
 	docId,
@@ -252,6 +304,37 @@ export default function Dossier({
 	onSay,
 }: DossierProps) {
 	const [editKey, setEditKey] = useState<string | null>(null);
+	// T6 · 这份定义底下的线索台账;哪条展开着
+	const [threads, setThreads] = useState<ThreadView[]>([]);
+	const [openThread, setOpenThread] = useState<string | null>(null);
+	// T5 · 这份定义连续多少期没出过货(从 /api/metrics 现算的)
+	const [noHitStreak, setNoHitStreak] = useState(0);
+	useEffect(() => {
+		let alive = true;
+		void (async () => {
+			try {
+				const res = await fetch(apiPath(`threads?tracker=${encodeURIComponent(t.key)}`));
+				if (!res.ok) return;
+				const data = (await res.json()) as { threads?: ThreadView[] };
+				if (alive) setThreads(data.threads ?? []);
+			} catch {
+				// 台账读不到不挡定义编辑,静默留空
+			}
+			try {
+				const res = await fetch(apiPath("metrics"));
+				if (!res.ok) return;
+				const data = (await res.json()) as { trackers?: { key: string; noHitStreak: number }[] };
+				const mine = data.trackers?.find((x) => x.key === t.key);
+				if (alive && mine) setNoHitStreak(mine.noHitStreak);
+			} catch {
+				// 同上
+			}
+		})();
+		return () => {
+			alive = false;
+		};
+	}, [t.key]);
+
 	// 哪一个标签输入框开着:"inc"/"exc" 是这份定义的全局标签,
 	// "inc:<sourceKey>" 是某个来源的局部规则——同名会串,所以带上来源。
 	const [chipOpen, setChipOpen] = useState<string | null>(null);
@@ -595,6 +678,52 @@ export default function Dossier({
 					)}
 				</div>
 			</section>
+
+			{/* T5 · 长期不出货就主动说。配了 5 个定义有 2 个永远是空的、却没人
+			    解释,是最典型的留存杀手——静默比说实话贵得多。 */}
+			{noHitStreak >= 7 && (
+				<section className="mt-6 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3">
+					<p className="m-0 text-[14px] font-medium text-[var(--accent)]">
+						这份定义连续 {noHitStreak} 期没出过内容
+					</p>
+					<p className="m-0 mt-1.5 text-[13px] leading-relaxed text-[var(--ink-2)]">
+						不是雷达没扫,是没有够格的。通常是两个原因,都能当场改:
+					</p>
+					<ul className="m-0 mt-1 list-none space-y-0.5 p-0 text-[13px] text-[var(--ink-2)]">
+						<li>· 「收」的条件太窄 —— 去 03 节删掉一两个标签,或把它们挪进「不收」的反面</li>
+						<li>· 指定的信源本来就不产这类内容 —— 去 04 节换成「全部来源」,或让编辑再找几个</li>
+					</ul>
+				</section>
+			)}
+
+			{/* T6 · 事态:这一节才让「追踪定义档案」名副其实——看得见一个问题
+			    从第一次出现到今天是怎么走的,而不是每天一堆互不相干的条目。 */}
+			{threads.length > 0 && (
+				<section className="mt-6">
+					<p className={`${sectionLabel} mb-1.5`}>事态 · 这个问题在怎么发展</p>
+					<div className="space-y-1">
+						{threads
+							.filter((th) => th.stage !== "dormant")
+							.map((th) => (
+								<ThreadRow key={th.key} thread={th} open={openThread === th.key} onToggle={() => setOpenThread(openThread === th.key ? null : th.key)} />
+							))}
+					</div>
+					{threads.some((th) => th.stage === "dormant") && (
+						<details className="mt-2">
+							<summary className="font-mono-sc cursor-pointer text-[11px] text-[var(--ink-3)]">
+								已沉寂 {threads.filter((th) => th.stage === "dormant").length} 条(21 天以上没有新证据)
+							</summary>
+							<div className="mt-1 space-y-1">
+								{threads
+									.filter((th) => th.stage === "dormant")
+									.map((th) => (
+										<ThreadRow key={th.key} thread={th} open={openThread === th.key} onToggle={() => setOpenThread(openThread === th.key ? null : th.key)} />
+									))}
+							</div>
+						</details>
+					)}
+				</section>
+			)}
 
 			{/* 02 编辑的理解 */}
 			<section className="mt-6">

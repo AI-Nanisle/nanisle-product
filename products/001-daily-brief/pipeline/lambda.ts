@@ -14,6 +14,7 @@ import { Buffer } from "node:buffer";
 import {
 	OFF_AXIS_MISS_LIMIT,
 	activeTrackers,
+	applyHealth,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
@@ -28,6 +29,9 @@ import { AiError, complete, resolveProvider } from "../src/shared/ai";
 import type { AiConfig } from "../src/shared/ai";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
 import type { FeedbackDigest } from "../src/shared/feedback";
+import { applyThreads, stripTransient, threadsPromptBlock } from "../src/shared/threads";
+import { WEEKLY_WINDOW_DAYS, applyProposal, computeWeeklyMetrics, isCooled, isoWeek, makeProposals } from "../src/shared/weekly";
+import { MAX_CHANGELOG } from "../src/shared/pipeline-core";
 import { dynamoStore } from "../src/shared/store-dynamo";
 import type { Store, UserConfig } from "../src/shared/store";
 import type { EditorialResult } from "../src/shared/pipeline-core";
@@ -97,6 +101,7 @@ async function runEditorial(
 	trackers: Tracker[],
 	digest: FeedbackDigest,
 	offAxis: boolean,
+	threadsByTracker: Map<string, string>,
 ): Promise<EditorialResult> {
 	if (resolveProvider(cfg) === "mock") return mockEditorial(fetched.candidates, trackers);
 	const { system, user } = buildEditorialPrompt(
@@ -104,6 +109,7 @@ async function runEditorial(
 		trackers,
 		feedbackPromptBlock(digest),
 		offAxis,
+		threadsByTracker,
 	);
 	const result = await complete(cfg, { prompt: user, system, json: true });
 	return parseEditorialJson(result.text, trackers);
@@ -152,6 +158,8 @@ async function produceBrief(
 	fetched: FetchResult,
 	date: string,
 	bumpGenCount: boolean,
+	/** H1 · 本轮抓取结果,**已换算成该用户自己的源 key**(全量模式抓的是并集)。 */
+	healthByKey: Map<string, { ok: boolean; error?: string }>,
 ): Promise<{ picked: number; genCount: number }> {
 	// R2 · 近 7 天反馈先读出来:它既进选材提示词,也是回响的原料。读失败会
 	// 降级成空摘要(见 loadFeedbackDigest),不会让当天的简报生不出来。
@@ -160,7 +168,18 @@ async function produceBrief(
 	const prevBrief = (await store.getBrief(run.email))?.brief ?? null;
 	const off = updateOffAxis(run.config, prevBrief, digest.clicks, date);
 
-	const editorial = await runEditorial(cfg, fetched, run.config.trackers, digest, off.enabled);
+	// T3 · 线索台账读出来塞进**本来就要发的那一次**编辑调用,不额外加调用
+	const threads = await store.listThreads(run.email);
+	const threadsByTracker = new Map<string, string>();
+	for (const t of activeTrackers(run.config.trackers)) {
+		const block = threadsPromptBlock(
+			threads.filter((th) => th.trackerKey === t.key),
+			date,
+		);
+		if (block) threadsByTracker.set(t.key, block);
+	}
+
+	const editorial = await runEditorial(cfg, fetched, run.config.trackers, digest, off.enabled, threadsByTracker);
 	const brief = await assembleBrief(editorial, fetched, {
 		date,
 		sourceCount: fetched.sourcesOk,
@@ -169,11 +188,27 @@ async function produceBrief(
 		lookupDiscussions: true,
 	});
 	// R3 · 回响在简报成形之后算:它要比对「上一期 vs 这一期」的真实条数
+	// T4/T5 · 并进台账(注记由代码算),再把临时字段抹掉才落库
+	const { changed } = applyThreads(brief, threads, date);
+	stripTransient(brief);
+	for (const thread of changed) await store.putThread(run.email, thread);
+	if (changed.length) console.log(`[${run.email}] threads: ${changed.length} updated`);
+
 	const echo = buildFeedbackEcho(digest, brief);
 	if (echo) brief.feedbackEcho = echo;
 	if (off.note) brief.offAxisNote = off.note;
-	if (JSON.stringify(off.prefs) !== JSON.stringify(run.config.prefs ?? {})) {
-		await store.putConfig(run.email, { ...run.config, prefs: off.prefs, updatedAt: new Date().toISOString() });
+
+	// H1 + X2 的配置写回合成一次 putConfig:整存整取的配置写两遍会互相覆盖
+	const sources = applyHealth(run.config.sources, healthByKey);
+	const prefsChanged = JSON.stringify(off.prefs) !== JSON.stringify(run.config.prefs ?? {});
+	const sourcesChanged = JSON.stringify(sources) !== JSON.stringify(run.config.sources);
+	if (prefsChanged || sourcesChanged) {
+		await store.putConfig(run.email, {
+			...run.config,
+			sources,
+			prefs: off.prefs,
+			updatedAt: new Date().toISOString(),
+		});
 	}
 	const genCount = await store.putBrief(run.email, brief, bumpGenCount);
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
@@ -192,7 +227,9 @@ async function generateOne(store: Store, cfg: AiConfig, email: string, date: str
 	if (fetched.candidates.length === 0) {
 		return response(422, { error: "没有抓到任何时间窗内的候选内容", sourceErrors: fetched.sourceErrors });
 	}
-	const { picked, genCount } = await produceBrief(store, cfg, { email, config }, fetched, date, true);
+	// 单用户模式抓的就是他自己的源,status 的 key 直接可用
+	const health = new Map(fetched.sourceStatus.map((s) => [s.key, { ok: s.ok, error: s.error }]));
+	const { picked, genCount } = await produceBrief(store, cfg, { email, config }, fetched, date, true, health);
 	return response(200, {
 		ok: true,
 		date,
@@ -274,19 +311,31 @@ async function generateAll(store: Store, cfg: AiConfig, date: string) {
 					const error = unionName ? errorByUnionName.get(unionName) : undefined;
 					return error ? [{ name: s.name, error }] : [];
 				});
+			// H1 · 并集 key → 该用户自己的源 key,健康才落得对人头上
+			const health = new Map<string, { ok: boolean; error?: string }>();
+			for (const st of fetched.sourceStatus) {
+				const own = byUnionKey.get(st.key)?.perUser.get(run.email);
+				if (own) health.set(own.key, { ok: st.ok, error: st.error });
+			}
 			const userFetched: FetchResult = {
 				candidates,
 				ruleDropped,
 				scanned: candidates.length + ruleDropped.length,
 				sourcesOk: run.config.sources.filter((s) => s.enabled !== false).length - sourceErrors.length,
 				sourceErrors,
+				sourceStatus: [...health].map(([key, st]) => ({ key, ...st })),
 			};
 			if (candidates.length === 0) {
+				// 一条候选都没有也要把健康写回去——「全挂了」正是最该被记下的一天
+				const healed = applyHealth(run.config.sources, health);
+				if (JSON.stringify(healed) !== JSON.stringify(run.config.sources)) {
+					await store.putConfig(run.email, { ...run.config, sources: healed, updatedAt: new Date().toISOString() });
+				}
 				console.log(`[all] ${run.email}: no candidates today, skipped`);
 				results.push({ email: run.email, ok: false, error: "no candidates" });
 				continue;
 			}
-			const { picked } = await produceBrief(store, cfg, run, userFetched, date, false);
+			const { picked } = await produceBrief(store, cfg, run, userFetched, date, false, health);
 			console.log(`[all] ${run.email}: ok picked=${picked} scanned=${userFetched.scanned}`);
 			results.push({ email: run.email, ok: true, picked });
 		} catch (err) {
@@ -298,6 +347,123 @@ async function generateAll(store: Store, cfg: AiConfig, date: string) {
 	const okCount = results.filter((r) => r.ok).length;
 	console.log(`[all] done: ${okCount}/${runs.length} ok`);
 	return response(200, { ok: true, date, users: runs.length, generated: okCount, results });
+}
+
+// ---------- S1–S4 · 周自评(每周一 07:30) ----------
+
+/**
+ * 一个人的一周:先把到期的提案落地(冷却期满 = 沉默即同意),再算指标,
+ * 越线才生成新提案。顺序不能反——先落地再算,新一周的数才反映改动后的状态。
+ */
+async function runWeeklyForUser(store: Store, email: string, now: Date): Promise<Record<string, unknown>> {
+	const config = await store.getConfig(email);
+	if (!config) return { email, ok: false, error: "no config" };
+
+	// 1. 冷却期满的提案自动生效(S4)。沉默即同意,但每一条都留了 7 天否决窗口。
+	const proposals = await store.listProposals(email);
+	let working = config;
+	const applied: string[] = [];
+	for (const p of proposals) {
+		if (p.status !== "pending" || !isCooled(p, now)) continue;
+		const result = applyProposal(working, p);
+		if (result) {
+			working = result.config;
+			if (result.log) {
+				working = {
+					...working,
+					trackers: working.trackers.map((t) =>
+						t.key === result.log!.trackerKey
+							? {
+									...t,
+									changelog: [{ at: now.toISOString(), text: result.log!.text }, ...(t.changelog ?? [])].slice(
+										0,
+										MAX_CHANGELOG,
+									),
+								}
+							: t,
+					),
+				};
+			}
+			applied.push(p.summary);
+		}
+		await store.putProposal(email, { ...p, status: "applied", decidedAt: now.toISOString() });
+	}
+
+	// 2. 指标(S2):纯计算,零 LLM
+	const dates = await store.listBriefDates(email);
+	const cutoff = new Date(now.getTime() - WEEKLY_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+	const briefs = [];
+	for (const date of dates.filter((d) => d >= cutoff).slice(0, 40)) {
+		const stored = await store.getBrief(email, date);
+		if (stored) briefs.push(stored.brief);
+	}
+	const events = await store.listEvents(email, new Date(now.getTime() - WEEKLY_WINDOW_DAYS * 86_400_000).toISOString());
+	const metrics = computeWeeklyMetrics({ config: working, briefs, events, now });
+	await store.putMetrics(email, metrics.week, metrics);
+
+	// 3. 新提案(S3):同一周只生成一次
+	const week = isoWeek(now);
+	let created: string[] = [];
+	if (working.prefs?.lastWeeklyAt !== week) {
+		// 每个追踪器连续多少期零命中——和阅读侧 /api/metrics 同一个算法
+		const noHitStreak = new Map<string, number>();
+		for (const tracker of activeTrackers(working.trackers)) {
+			let streak = 0;
+			for (const brief of briefs) {
+				const section = brief.sections.find((sec) => sec.key === tracker.key);
+				if (!section) continue;
+				if (section.items.length > 0) break;
+				streak++;
+			}
+			noHitStreak.set(tracker.key, streak);
+		}
+		const wantedTitles: string[] = [];
+		for (const ev of events) {
+			if (!("kind" in ev) || ev.kind !== "want") continue;
+			const brief = briefs.find((b) => b.date === ev.date);
+			const dropped = brief?.filteredOut.items.find((d) => d.id === ev.itemId);
+			if (dropped) wantedTitles.push(dropped.title);
+		}
+		let seq = 0;
+		const fresh = makeProposals({
+			config: working,
+			metrics,
+			noHitStreak,
+			wantedTitles,
+			now,
+			idSeed: () => `${week}-${seq++}`,
+		});
+		// 已经挂着的同款提案不重复生成——否则每周都堆一遍,谁都不看了
+		const pendingKeys = new Set(
+			proposals.filter((p) => p.status === "pending").map((p) => JSON.stringify(p.patch)),
+		);
+		for (const p of fresh) {
+			if (pendingKeys.has(JSON.stringify(p.patch))) continue;
+			await store.putProposal(email, p);
+			created.push(p.summary);
+		}
+		working = { ...working, prefs: { ...(working.prefs ?? {}), lastWeeklyAt: week } };
+	}
+
+	if (JSON.stringify(working) !== JSON.stringify(config)) {
+		await store.putConfig(email, { ...working, updatedAt: now.toISOString() });
+	}
+	console.log(`[weekly] ${email}: applied=${applied.length} created=${created.length} briefs=${briefs.length}`);
+	return { email, ok: true, week, applied, created, briefs: briefs.length };
+}
+
+async function generateWeekly(store: Store, now: Date) {
+	const emails = await store.listWhitelist();
+	const results: Record<string, unknown>[] = [];
+	for (const email of emails) {
+		try {
+			results.push(await runWeeklyForUser(store, email, now));
+		} catch (err) {
+			console.error(`[weekly] ${email}: FAILED`, err);
+			results.push({ email, ok: false, error: err instanceof Error ? err.message : String(err) });
+		}
+	}
+	return response(200, { ok: true, mode: "weekly", week: isoWeek(now), users: emails.length, results });
 }
 
 // ---------- 入口 ----------
@@ -320,6 +486,7 @@ export async function handler(event: GenerateEvent) {
 	const date = briefDate(process.env.BRIEF_TZ ?? "America/New_York");
 
 	try {
+		if (payload.mode === "weekly") return await generateWeekly(store, new Date());
 		if (payload.mode === "all") return await generateAll(store, cfg, date);
 		if (payload.email) return await generateOne(store, cfg, payload.email, date);
 		return response(400, { error: 'payload must be {"mode":"all"} or {"email":"..."}' });

@@ -8,10 +8,13 @@
 //   user:<email>:brief:<date>     每日简报 {brief, generatedAt, genCount}
 //   user:<email>:fb:<ts>:<uuid>   反馈事件(expirationTtl 90 天)
 //   user:<email>:click:<ts>:<uuid> 点击事件(同上)
+//   user:<email>:thread:<trackerKey>:<threadKey>  线索台账(无 TTL)
+//   user:<email>:proposal:<id>    周自评提案
 
-import type { Brief } from "../shared/types";
+import type { Brief, Thread } from "../shared/types";
 import type { Store, StoredBrief, StoredEvent } from "../shared/store";
-import { EVENT_TTL_S, MAX_EVENTS_READ } from "../shared/store";
+import { EVENT_TTL_S, MAX_EVENTS_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "../shared/store";
+import type { Proposal } from "../shared/weekly";
 import { dynamoStore } from "../shared/store-dynamo";
 import type { AppEnv } from "./env";
 
@@ -96,6 +99,35 @@ export function kvStore(kv: KVNamespace): Store {
 				.filter((raw): raw is string => Boolean(raw))
 				.map((raw) => JSON.parse(raw) as StoredEvent);
 			return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, cap);
+		},
+
+		async listThreads(email, trackerKey) {
+			const prefix = `user:${email}:thread:${trackerKey ? `${trackerKey}:` : ""}`;
+			const list = await kv.list({ prefix, limit: 300 });
+			const raws = await Promise.all(list.keys.map((k) => kv.get(k.name)));
+			return raws.filter((r): r is string => Boolean(r)).map((r) => JSON.parse(r) as Thread);
+		},
+
+		async putThread(email, thread) {
+			// 线索台账不设 TTL:它是长期资产,和 90 天就该消失的事件流不是一回事
+			await kv.put(`user:${email}:thread:${thread.trackerKey}:${thread.key}`, JSON.stringify(thread));
+		},
+
+		async listProposals(email) {
+			const prefix = `user:${email}:proposal:`;
+			const list = await kv.list({ prefix, limit: 100 });
+			const raws = await Promise.all(list.keys.map((k) => kv.get(k.name)));
+			return raws.filter((r): r is string => Boolean(r)).map((r) => JSON.parse(r) as Proposal);
+		},
+
+		async putProposal(email, proposal) {
+			await kv.put(`user:${email}:proposal:${proposal.id}`, JSON.stringify(proposal), {
+				expirationTtl: PROPOSAL_TTL_S,
+			});
+		},
+
+		async putMetrics(email, week, metrics) {
+			await kv.put(`user:${email}:metrics:${week}`, JSON.stringify(metrics), { expirationTtl: METRICS_TTL_S });
 		},
 
 		async listBriefDates(email) {

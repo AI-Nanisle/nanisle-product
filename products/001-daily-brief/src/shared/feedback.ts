@@ -12,7 +12,7 @@
 // 直接加载本模块,node 不做扩展名搜索(type-only import 会被擦掉,不受此限)。
 import type { Brief, BriefItem, FeedbackEvent, FeedbackKind } from "./types";
 import { ISSUE_ITEM_ID } from "./types.ts";
-import type { Store, StoredEvent } from "./store";
+import type { ClickEvent, Store, StoredEvent } from "./store";
 import { isFeedbackEvent } from "./store.ts";
 
 /** 选材只看近 7 天:再往前的口味已经被后来的反馈覆盖掉了。 */
@@ -46,6 +46,8 @@ export interface FeedbackDigest {
 	/** itemId → 窗口内点击次数。X2 的自动降频和 S 线指标都读它。 */
 	clicks: Map<string, number>;
 	clickCount: number;
+	/** H5 · 原始点击事件(带 host)。按域名聚合的反向发现要用。 */
+	clickEvents: ClickEvent[];
 	/** join 时回查到的往期简报(date → brief),算回响时还要用,别重复读。 */
 	briefs: Map<string, Brief>;
 }
@@ -55,6 +57,7 @@ export const EMPTY_DIGEST: FeedbackDigest = {
 	notes: [],
 	clicks: new Map(),
 	clickCount: 0,
+	clickEvents: [],
 	briefs: new Map(),
 };
 
@@ -106,10 +109,15 @@ export async function loadFeedbackDigest(
 	try {
 		const events: StoredEvent[] = await store.listEvents(email, since);
 		const clicks = new Map<string, number>();
+		const clickEvents: ClickEvent[] = [];
 		const feedback: FeedbackEvent[] = [];
 		for (const ev of events) {
-			if (isFeedbackEvent(ev)) feedback.push(ev);
-			else clicks.set(ev.itemId, (clicks.get(ev.itemId) ?? 0) + 1);
+			if (isFeedbackEvent(ev)) {
+				feedback.push(ev);
+			} else {
+				clicks.set(ev.itemId, (clicks.get(ev.itemId) ?? 0) + 1);
+				clickEvents.push(ev);
+			}
 		}
 		const clickCount = [...clicks.values()].reduce((n, v) => n + v, 0);
 
@@ -126,7 +134,7 @@ export async function loadFeedbackDigest(
 			.map((ev) => toNote(ev, briefs.get(ev.date)))
 			.filter((n): n is FeedbackNote => n !== null);
 		opts.log?.(`[feedback] ${notes.length} notes, ${clickCount} clicks since ${since.slice(0, 10)}`);
-		return { since, notes, clicks, clickCount, briefs };
+		return { since, notes, clicks, clickCount, clickEvents, briefs };
 	} catch (err) {
 		opts.log?.(`[feedback] FAILED, generating without it: ${err}`);
 		return { ...EMPTY_DIGEST, since };

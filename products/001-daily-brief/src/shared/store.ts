@@ -4,7 +4,8 @@
 // 硬规矩:fork 者零配置 `npm run dev` 必须能跑通全流程,AWS 凭证不是前置条件。
 
 import type { SourceConfig, Tracker } from "./pipeline-core";
-import type { Brief, FeedbackEvent } from "./types";
+import type { Brief, FeedbackEvent, Thread } from "./types";
+import type { Proposal } from "./weekly";
 
 /** 未配置 SSO / AWS 时的固定本地用户(单用户模式)。 */
 export const DEV_USER = "dev@local";
@@ -20,13 +21,21 @@ export interface SourceFunnelMetrics {
 	adopted: number;
 }
 
-/** X2 · 破茧相关的读者偏好。缺省 = 全部默认值(老配置无此字段)。 */
+/** 读者偏好与产品自己维护的小状态。缺省 = 全部默认值(老配置无此字段)。 */
 export interface UserPrefs {
-	/** 轴外位开关,默认开;读者手动关、或连续没人点自动关。 */
+	/** X2 · 轴外位开关,默认开;读者手动关、或连续没人点自动关。 */
 	offAxis?: boolean;
-	/** 连续多少期轴外位没被点开。到 OFF_AXIS_MISS_LIMIT 就自动关掉。 */
+	/** X2 · 连续多少期轴外位没被点开。到 OFF_AXIS_MISS_LIMIT 就自动关掉。 */
 	offAxisMisses?: number;
+	/** H5 · 读者说过「不用管这个站」的域名,别再反复提议(最多留 100 条)。 */
+	dismissedHosts?: string[];
+	/** S1 · 最近一次算过周指标的 ISO 周(YYYY-Www),防同周重复生成提案。 */
+	lastWeeklyAt?: string;
 }
+
+/** H5 · 反向发现的窗口与门槛:30 天内点够 4 次,才值得开口问。 */
+export const DISCOVERY_WINDOW_DAYS = 30;
+export const DISCOVERY_MIN_CLICKS = 4;
 
 /** 一个用户的全部配置,整存整取(§4「追踪器仍整存整取」)。 */
 export interface UserConfig {
@@ -55,6 +64,12 @@ export interface ClickEvent {
 	date: string;
 	itemId: string;
 	at: string;
+	/**
+	 * H4 · 被点开那条原文的域名。埋在事件上而不是事后回查简报:简报 90 天后
+	 * 还在,但按 host 聚合是每天都要做的事,现算要拉一堆简报。老事件没有这个
+	 * 字段,聚合时跳过即可。
+	 */
+	host?: string;
 }
 
 /** 读回来的事件流;判别方式和写入侧一致——有 kind 的是反馈。 */
@@ -91,9 +106,22 @@ export interface Store {
 	 * 这是反馈回路的唯一读口:生成前的选材、feedbackEcho、S 线指标都走它。
 	 */
 	listEvents(email: string, sinceISO: string, limit?: number): Promise<StoredEvent[]>;
+	/** T2 · 某人的线索台账;给 trackerKey 就只取那一个追踪器的。含已归档的。 */
+	listThreads(email: string, trackerKey?: string): Promise<Thread[]>;
+	/** T2 · 整条覆盖写。线索条数有限(每追踪器几十条),不做增量。 */
+	putThread(email: string, thread: Thread): Promise<void>;
+	/** S3 · 周自评提案(含已生效/已否决的近期记录)。 */
+	listProposals(email: string): Promise<Proposal[]>;
+	putProposal(email: string, proposal: Proposal): Promise<void>;
+	/** S1 · 周指标快照,一周一条。 */
+	putMetrics(email: string, week: string, metrics: unknown): Promise<void>;
 	/** 阅读页日期下拉,倒序。 */
 	listBriefDates(email: string): Promise<string[]>;
 }
 
 /** 事件条目的保存期:90 天后它已经完成使命(喂给编辑提示词的只看近 7 天)。 */
 export const EVENT_TTL_S = 90 * 24 * 3600;
+/** 提案 60 天后自然消失:那时它要么早生效了,要么早过时了。 */
+export const PROPOSAL_TTL_S = 60 * 24 * 3600;
+/** 周指标留一年多,够看同比。 */
+export const METRICS_TTL_S = 400 * 24 * 3600;

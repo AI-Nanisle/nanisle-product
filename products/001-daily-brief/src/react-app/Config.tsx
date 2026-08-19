@@ -7,6 +7,7 @@ import Wizard from "./Wizard";
 import { refineTracker, wizardSources } from "./editor";
 import type { ProposalItem, TestResult } from "./editor";
 import { apiPath } from "./paths";
+import Proposals from "./Proposals";
 
 // 配置页 = 一叠追踪定义档案。左栏是目录,右边是当前那份定义的全文。
 // 没有「保存全部」:每处改动即改即存,并在这份定义的变更记录里留一行。
@@ -297,8 +298,22 @@ export default function Config() {
 	// 向导视图的草稿:selected 指着的那份带 stage 的追踪器;没有 = 从提问开始
 	const wizardDraft = view === "wizard" ? (trackers.find((t) => t.key === selected && t.stage) ?? null) : null;
 
+	/** S4 · 提案生效后配置就变了,重新拉一次,别让页面停在旧定义上。 */
+	const reloadAfterProposal = () => {
+		void (async () => {
+			const [sres, tres] = await Promise.all([
+				fetch(apiPath("sources"), { headers: headers() }),
+				fetch(apiPath("trackers"), { headers: headers() }),
+			]);
+			if (sres.ok) setSources(((await sres.json()) as { sources: SourceConfig[] }).sources);
+			if (tres.ok) applyTrackers(((await tres.json()) as { trackers: Tracker[] }).trackers);
+		})();
+	};
+
 	return (
-		<div className="grid items-start gap-6 pt-2 pb-8 md:grid-cols-[210px_minmax(0,1fr)]">
+		<div className="pt-2">
+			<Proposals onApplied={reloadAfterProposal} />
+		<div className="grid items-start gap-6 pb-8 md:grid-cols-[210px_minmax(0,1fr)]">
 			{/* 目录 */}
 			<nav className="flex flex-col gap-0.5 md:sticky md:top-5">
 				<p className="font-mono-sc m-0 mb-1.5 text-[10px] uppercase tracking-[0.05em] text-[var(--ink-3)]">
@@ -471,6 +486,7 @@ export default function Config() {
 						</div>
 					))}
 			</div>
+		</div>
 		</div>
 	);
 }

@@ -10,11 +10,15 @@
 //   USER#<email> / BRIEF#<YYYY-MM-DD>            每日简报,genCount 承载立即生成限额
 //   USER#<email> / FB#<ISO>#<uuid>               反馈事件,ttl 90 天
 //   USER#<email> / CLICK#<ISO>#<uuid>            点击事件,ttl 90 天
+//   USER#<email> / THREAD#<trackerKey>#<threadKey>  线索台账,**不设 ttl**
+//   USER#<email> / PROPOSAL#<id>                 周自评提案(S3),ttl 60 天
+//   USER#<email> / METRICS#<YYYY-Www>            周指标快照(S1),ttl 400 天
 
 import { AwsClient } from "aws4fetch";
-import type { Brief, FeedbackEvent, FeedbackKind } from "./types";
+import type { Brief, FeedbackEvent, FeedbackKind, Thread } from "./types";
 import type { ClickEvent, Store, StoredBrief, StoredEvent } from "./store";
-import { EVENT_TTL_S, MAX_EVENTS_READ } from "./store";
+import { EVENT_TTL_S, MAX_EVENTS_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "./store";
+import type { Proposal } from "./weekly";
 
 export interface DynamoOptions {
 	table: string;
@@ -187,6 +191,9 @@ export function dynamoStore(opts: DynamoOptions): Store {
 				item.kind = { S: (ev as FeedbackEvent).kind };
 				const text = (ev as FeedbackEvent).text;
 				if (text) item.text = { S: text };
+			} else {
+				const host = (ev as ClickEvent).host;
+				if (host) item.host = { S: host };
 			}
 			await call("PutItem", { Item: item });
 		},
@@ -222,10 +229,78 @@ export function dynamoStore(opts: DynamoOptions): Store {
 				});
 			}
 			for (const item of click.Items ?? []) {
-				events.push({ date: s(item.date) ?? "", itemId: s(item.itemId) ?? "", at: s(item.at) ?? "" });
+				const host = s(item.host);
+				events.push({
+					date: s(item.date) ?? "",
+					itemId: s(item.itemId) ?? "",
+					at: s(item.at) ?? "",
+					...(host ? { host } : {}),
+				});
 			}
 			// 两条流各自倒序回来,合并后按时间重排一次才是真的「新的在前」
 			return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, cap);
+		},
+
+		async listThreads(email, trackerKey) {
+			const prefix = trackerKey ? `THREAD#${trackerKey}#` : "THREAD#";
+			const out = await call<{ Items?: Item[] }>("Query", {
+				KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+				ExpressionAttributeValues: { ":pk": { S: `USER#${email}` }, ":prefix": { S: prefix } },
+				Limit: 300,
+			});
+			const threads: Thread[] = [];
+			for (const item of out.Items ?? []) {
+				const raw = s(item.thread);
+				if (raw) threads.push(JSON.parse(raw) as Thread);
+			}
+			return threads;
+		},
+
+		async putThread(email, thread) {
+			await call("PutItem", {
+				Item: {
+					PK: { S: `USER#${email}` },
+					SK: { S: `THREAD#${thread.trackerKey}#${thread.key}` },
+					thread: { S: JSON.stringify(thread) },
+					updatedAt: { S: thread.updatedAt },
+				},
+			});
+		},
+
+		async listProposals(email) {
+			const out = await call<{ Items?: Item[] }>("Query", {
+				KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+				ExpressionAttributeValues: { ":pk": { S: `USER#${email}` }, ":prefix": { S: "PROPOSAL#" } },
+				Limit: 50,
+			});
+			const list: Proposal[] = [];
+			for (const item of out.Items ?? []) {
+				const raw = s(item.proposal);
+				if (raw) list.push(JSON.parse(raw) as Proposal);
+			}
+			return list;
+		},
+
+		async putProposal(email, proposal) {
+			await call("PutItem", {
+				Item: {
+					PK: { S: `USER#${email}` },
+					SK: { S: `PROPOSAL#${proposal.id}` },
+					proposal: { S: JSON.stringify(proposal) },
+					ttl: { N: String(Math.floor(Date.now() / 1000) + PROPOSAL_TTL_S) },
+				},
+			});
+		},
+
+		async putMetrics(email, week, metrics) {
+			await call("PutItem", {
+				Item: {
+					PK: { S: `USER#${email}` },
+					SK: { S: `METRICS#${week}` },
+					metrics: { S: JSON.stringify(metrics) },
+					ttl: { N: String(Math.floor(Date.now() / 1000) + METRICS_TTL_S) },
+				},
+			});
 		},
 
 		async listBriefDates(email) {
@@ -252,6 +327,12 @@ export function lambdaClient(opts: Omit<DynamoOptions, "table">): AwsClient {
 }
 
 /** 供 store 之外的裸 ClickEvent 构造用 —— 让 /go 端点不用自己拼字段名。 */
-export function clickEvent(date: string, itemId: string): ClickEvent {
-	return { date, itemId, at: new Date().toISOString() };
+export function clickEvent(date: string, itemId: string, url?: string): ClickEvent {
+	let host: string | undefined;
+	try {
+		if (url) host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+	} catch {
+		// URL 不合法就不记 host,点击本身照记
+	}
+	return { date, itemId, at: new Date().toISOString(), ...(host ? { host } : {}) };
 }

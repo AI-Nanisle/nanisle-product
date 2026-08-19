@@ -29,14 +29,18 @@ import {
 	buildEditorialPrompt,
 	fetchAllSources,
 	fnv1a,
+	MAX_CHANGELOG,
 	isQueryFeedUrl,
+	isUnhealthy,
 	mockEditorial,
 	parseEditorialJson,
 } from "../shared/pipeline-core";
 import type { SourceConfig, TrackerSourceRule } from "../shared/pipeline-core";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../shared/feedback";
+import { computeStage, sortThreadsForDisplay } from "../shared/threads";
+import { PROPOSAL_COOLING_DAYS, applyProposal } from "../shared/weekly";
 import { DEFAULT_FILTERS } from "../shared/default-sources";
-import { lambdaClient } from "../shared/store-dynamo";
+import { clickEvent, lambdaClient } from "../shared/store-dynamo";
 import {
 	MAX_SOURCES,
 	bumpSourceMetrics,
@@ -47,7 +51,7 @@ import {
 	saveTrackers,
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
-import { offAxisEnabled } from "../shared/store";
+import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, offAxisEnabled } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
 import type { WizardContext, WizardResult } from "./wizard";
@@ -283,7 +287,8 @@ app.get("/go/:date/:id", async (c) => {
 	}
 	if (!url) return c.json({ error: "Unknown item" }, 404);
 
-	await store.appendEvent(email ?? "anonymous", { date, itemId: id, at: new Date().toISOString() });
+	// H4 · 带上域名:H5 的「你这个月点了 6 次 xxx.com」按它聚合
+	await store.appendEvent(email ?? "anonymous", clickEvent(date, id, url));
 	return c.redirect(url, 302);
 });
 
@@ -487,7 +492,198 @@ app.get("/api/metrics", userGuard, async (c) => {
 		candidates: config.metrics ?? { shown: 0, adopted: 0 },
 		selection: { total: totalItems, query: queryItems },
 		trackers: [...trackerStats.values()].map(({ streakEnded: _ignored, ...rest }) => rest),
+		// H2 · 坏掉的源必须是个看得见的数,不能只躺在 config 里
+		unhealthy: config.sources.filter((s) => s.enabled !== false && isUnhealthy(s)).length,
 	});
+});
+
+// S4 · 提案的否决权。冷却期里随时能一键否掉,也能不等 7 天直接生效——
+// 「沉默即同意」的前提是**开口就一定管用**,否则那只是强加。
+app.get("/api/proposals", userGuard, async (c) => {
+	const all = await c.get("store").listProposals(c.get("email"));
+	const pending = all
+		.filter((p) => p.status === "pending")
+		.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+	return c.json({ proposals: pending, coolingDays: PROPOSAL_COOLING_DAYS });
+});
+
+app.post("/api/proposals/:id", userGuard, async (c) => {
+	const id = c.req.param("id");
+	let body: { action?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	const action = body.action === "apply" || body.action === "dismiss" ? body.action : null;
+	if (!action) return c.json({ error: 'action must be "apply" or "dismiss"' }, 400);
+
+	const store = c.get("store");
+	const email = c.get("email");
+	const proposal = (await store.listProposals(email)).find((p) => p.id === id);
+	if (!proposal) return c.json({ error: "没有这条提案" }, 404);
+	if (proposal.status !== "pending") return c.json({ error: "这条提案已经处理过了" }, 409);
+
+	const now = new Date().toISOString();
+	if (action === "dismiss") {
+		await store.putProposal(email, { ...proposal, status: "dismissed", decidedAt: now });
+		return c.json({ ok: true, status: "dismissed" });
+	}
+
+	const config = await loadConfig(store, email);
+	const result = applyProposal(config, proposal);
+	if (result) {
+		const next = result.log
+			? {
+					...result.config,
+					trackers: result.config.trackers.map((t) =>
+						t.key === result.log!.trackerKey
+							? {
+									...t,
+									changelog: [{ at: now, text: result.log!.text }, ...(t.changelog ?? [])].slice(0, MAX_CHANGELOG),
+								}
+							: t,
+					),
+				}
+			: result.config;
+		await store.putConfig(email, { ...next, updatedAt: now });
+	}
+	await store.putProposal(email, { ...proposal, status: "applied", decidedAt: now });
+	return c.json({ ok: true, status: "applied", changed: Boolean(result) });
+});
+
+// T6 · 线索台账。追踪定义档案的「事态」节读它——这一节才让「追踪定义档案」
+// 名副其实:看得见一个问题从第一次出现到今天是怎么走的。
+app.get("/api/threads", userGuard, async (c) => {
+	const trackerKey = c.req.query("tracker");
+	const store = c.get("store");
+	const threads = await store.listThreads(c.get("email"), trackerKey || undefined);
+	const today = briefDate(c.env.BRIEF_TZ ?? "America/New_York");
+	const live = threads.filter((t) => !t.archived);
+	return c.json({
+		threads: sortThreadsForDisplay(live, today).map((t) => ({ ...t, stage: computeStage(t, today) })),
+		archived: threads.length - live.length,
+	});
+});
+
+// H3 · 一键自愈:对连续失败的源重跑发现,给出可用的替代 URL 交用户确认。
+// 不自动改配置——换源是语义变化(同一个站的不同栏目内容可能完全不同),
+// 必须过人眼。能力全是现成的(probeFeed 的自动发现 + P0-3 的检索式退路),
+// 缺的只是这个触发器:用户永远不会来报告「我的 feed 挂了」。
+app.post("/api/sources/heal", userAiGuard, async (c) => {
+	let body: { key?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	const key = typeof body.key === "string" ? body.key.trim() : "";
+	if (!key) return c.json({ error: "key required" }, 400);
+	const config = await loadConfig(c.get("store"), c.get("email"));
+	const source = config.sources.find((s) => s.key === key);
+	if (!source) return c.json({ error: "没有这个源" }, 404);
+
+	const tried: { url: string; error: string }[] = [];
+
+	// 1. 原 URL 再试一次:很多失败是暂时的,先别急着换
+	const again = await probeFeed(source.url);
+	if (again.ok) {
+		return c.json({ ok: true, verdict: "recovered", message: "原地址这次抓通了,大概率是上游临时故障。", probe: again });
+	}
+	tried.push({ url: source.url, error: again.error ?? "抓取失败" });
+
+	// 2. 站点首页重跑 feed 自动发现:换栏目/换 CMS 最常见
+	let origin = "";
+	try {
+		origin = new URL(source.url).origin;
+	} catch {
+		// URL 都不合法,直接走第 3 步
+	}
+	if (origin && origin !== source.url) {
+		const rediscovered = await probeFeed(origin);
+		if (rediscovered.ok && rediscovered.url !== source.url) {
+			return c.json({
+				ok: true,
+				verdict: "rediscovered",
+				message: "这个站换地址了,下面是重新发现的 feed——确认后替换。",
+				candidate: { name: source.name, url: rediscovered.url, category: source.category },
+				probe: rediscovered,
+				tried,
+			});
+		}
+		if (!rediscovered.ok) tried.push({ url: origin, error: rediscovered.error ?? "抓取失败" });
+	}
+
+	// 3. 退路:用源名做 Google News 检索源(P0-3 同款),至少不断供
+	const host = origin ? new URL(origin).hostname.replace(/^www\./, "") : source.name;
+	const zh = /[一-龥]/.test(source.name);
+	const query = `site:${host} OR ${source.name}`;
+	const fallback = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${zh ? "zh-CN&gl=CN&ceid=CN:zh-Hans" : "en-US&gl=US&ceid=US:en"}`;
+	const probe = await probeFeed(fallback);
+	return c.json({
+		ok: probe.ok,
+		verdict: probe.ok ? "fallback" : "dead",
+		message: probe.ok
+			? "原站抓不到了,这是一条按站名构造的检索源——内容会杂一些,但不断供。"
+			: "原地址、站点发现、检索源三条路都不通。建议直接删掉这个源。",
+		...(probe.ok ? { candidate: { name: `${source.name}(检索)`, url: probe.url, category: source.category } } : {}),
+		probe,
+		tried,
+	});
+});
+
+// H5 · 从点击反向发现源。比模型凭空推荐可信一个量级:它说的是「你真的点过
+// 这个站 6 次」,而数据早在 v1 的 /go 埋点里就攒着了。只提议,不自动加。
+app.get("/api/sources/discovered", userGuard, async (c) => {
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	const digest = await loadFeedbackDigest(store, email, { days: DISCOVERY_WINDOW_DAYS });
+
+	const known = new Set<string>();
+	for (const s of config.sources) {
+		try {
+			known.add(new URL(s.url).hostname.replace(/^www\./, "").toLowerCase());
+		} catch {
+			// 配置里混进了非法 URL,跳过即可
+		}
+	}
+	// 查询源(Google News / HN / Reddit)的域名是聚合器自己,点击落在原文域名上,
+	// 所以这里天然不会把已订的查询源重复提议出来。
+	const byHost = new Map<string, number>();
+	for (const ev of digest.clickEvents) {
+		if (!ev.host || known.has(ev.host)) continue;
+		byHost.set(ev.host, (byHost.get(ev.host) ?? 0) + 1);
+	}
+	const dismissed = new Set(config.prefs?.dismissedHosts ?? []);
+	const candidates = [...byHost]
+		.filter(([host, n]) => n >= DISCOVERY_MIN_CLICKS && !dismissed.has(host))
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, 5)
+		.map(([host, clicks]) => ({ host, clicks }));
+	return c.json({ windowDays: DISCOVERY_WINDOW_DAYS, minClicks: DISCOVERY_MIN_CLICKS, candidates });
+});
+
+// 「不用管这个站」——记进 prefs,别再提议它
+app.post("/api/sources/dismiss-host", userGuard, async (c) => {
+	let body: { host?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	const host = typeof body.host === "string" ? body.host.trim().toLowerCase().slice(0, 200) : "";
+	if (!host) return c.json({ error: "host required" }, 400);
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	const dismissedHosts = [...new Set([...(config.prefs?.dismissedHosts ?? []), host])].slice(-100);
+	await store.putConfig(email, {
+		...config,
+		prefs: { ...(config.prefs ?? {}), dismissedHosts },
+		updatedAt: new Date().toISOString(),
+	});
+	return c.json({ ok: true });
 });
 
 // ---------- 三步向导与「对编辑说一句」(B11-B14,docs/02 §6.3、§7) ----------

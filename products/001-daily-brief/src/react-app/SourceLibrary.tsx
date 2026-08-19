@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SourceCategory, SourceConfig } from "../shared/pipeline-core";
+import { isUnhealthy } from "../shared/pipeline-core";
 import type { TestResult } from "./editor";
 import CatalogPicker from "./CatalogPicker";
 import { apiPath } from "./paths";
@@ -26,6 +27,22 @@ interface MetricsReport {
 	candidates: { shown: number; adopted: number };
 	selection: { total: number; query: number };
 	trackers: { key: string; name: string; briefs: number; noHitStreak: number; lastHitDate: string | null }[];
+	/** H2 · 连续失败 ≥3 次的启用中源数。 */
+	unhealthy?: number;
+}
+
+/** H3 · 自愈结果:recovered=原地址又通了,rediscovered/fallback=有替代,dead=三条路都断。 */
+interface HealResult {
+	ok: boolean;
+	verdict: "recovered" | "rediscovered" | "fallback" | "dead";
+	message: string;
+	candidate?: { name: string; url: string; category: SourceCategory };
+}
+
+/** H5 · 从点击反向发现的候选站点。 */
+interface DiscoveredHost {
+	host: string;
+	clicks: number;
 }
 
 function pct(part: number, whole: number): string {
@@ -66,6 +83,9 @@ export default function SourceLibrary({
 	const [metrics, setMetrics] = useState<MetricsReport | null>(null);
 	// X2 · 轴外位开关(null = 还没读到)。默认开,所以缺字段按 true 算。
 	const [offAxis, setOffAxis] = useState<boolean | null>(null);
+	// H3/H5 · 自愈结果(按源 key)与反向发现的候选站
+	const [heal, setHeal] = useState<Record<string, HealResult | "healing">>({});
+	const [discovered, setDiscovered] = useState<DiscoveredHost[]>([]);
 
 	const enabledCount = sources.filter((s) => s.enabled !== false).length;
 
@@ -82,6 +102,15 @@ export default function SourceLibrary({
 				if (res.ok) {
 					const data = (await res.json()) as { prefs?: { offAxis?: boolean } };
 					setOffAxis(data.prefs?.offAxis !== false);
+				}
+			} catch {
+				// 同上
+			}
+			try {
+				const res = await fetch(apiPath("sources/discovered"));
+				if (res.ok) {
+					const data = (await res.json()) as { candidates?: DiscoveredHost[] };
+					setDiscovered(data.candidates ?? []);
 				}
 			} catch {
 				// 同上
@@ -139,6 +168,37 @@ export default function SourceLibrary({
 		}
 	};
 
+	/** H3 · 让编辑修一个坏掉的源:先重试原地址,再站点重发现,最后退到检索源。 */
+	const healSource = async (s: SourceConfig) => {
+		setHeal((h) => ({ ...h, [s.key]: "healing" }));
+		try {
+			const res = await fetch(apiPath("sources/heal"), {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ key: s.key }),
+			});
+			const data = (await res.json()) as HealResult & { error?: string };
+			if (!res.ok) throw new Error(data.error ?? "自愈失败");
+			setHeal((h) => ({ ...h, [s.key]: data }));
+		} catch (err) {
+			setHeal((h) => ({
+				...h,
+				[s.key]: { ok: false, verdict: "dead", message: err instanceof Error ? err.message : "自愈失败" },
+			}));
+		}
+	};
+
+	/** 换成自愈找到的替代地址;URL 变了健康状态跟着清零,重新开始记。 */
+	const applyHeal = (i: number, url: string) => {
+		const s = sources[i];
+		onSources(sources.map((x, j) => (j === i ? { ...x, url, health: undefined } : x)));
+		setHeal((h) => {
+			const next = { ...h };
+			delete next[s.key];
+			return next;
+		});
+	};
+
 	const useQuerySource = () => {
 		if (!suggestKw) return;
 		setDraft({ name: `Google News:${suggestKw}`, url: googleNewsQueryUrl(suggestKw), category: "news" });
@@ -161,6 +221,52 @@ export default function SourceLibrary({
 			<p className="mt-4 text-[13px] text-[var(--ink-2)]">
 				所有追踪定义共用这个源池。在某份定义里「指定信源」时,挑的就是这里的源;停用一个源,所有定义都不再从它取材。
 			</p>
+
+			{/* H5 · 从点击反向发现:说的是「你真的点过这个站 N 次」,比模型凭空
+			    推荐可信一个量级——而数据早在 v1 的 /go 埋点里就攒着了。 */}
+			{discovered.length > 0 && (
+				<div className="mt-4 rounded-lg border border-dashed border-[var(--accent)] bg-[var(--accent-soft)] px-4 py-3">
+					<p className="font-mono-sc m-0 text-[10px] uppercase tracking-[0.08em] text-[var(--ink-3)]">
+						你常点、但没订的站
+					</p>
+					<div className="mt-2 space-y-1.5">
+						{discovered.map((d) => (
+							<div key={d.host} className="flex flex-wrap items-center gap-2 text-[13px]">
+								<span className="font-medium">{d.host}</span>
+								<span className="font-mono-sc text-[11px] text-[var(--ink-3)]">近 30 天点了 {d.clicks} 次</span>
+								<button
+									type="button"
+									onClick={() => {
+										setDraft({ name: "", url: `https://${d.host}`, category: "blog" });
+										setAdding(true);
+										setDiscovered((list) => list.filter((x) => x.host !== d.host));
+									}}
+									className="font-mono-sc ml-auto cursor-pointer rounded border border-[var(--line-strong)] bg-[var(--card)] px-2 py-0.5 text-[10px] hover:bg-[var(--ink)] hover:text-[var(--paper)]"
+								>
+									加成信源
+								</button>
+								<button
+									type="button"
+									onClick={() => {
+										setDiscovered((list) => list.filter((x) => x.host !== d.host));
+										void fetch(apiPath("sources/dismiss-host"), {
+											method: "POST",
+											headers: { "content-type": "application/json" },
+											body: JSON.stringify({ host: d.host }),
+										});
+									}}
+									className="font-mono-sc cursor-pointer text-[10px] text-[var(--ink-3)] hover:text-[var(--ink)]"
+								>
+									不用管
+								</button>
+							</div>
+						))}
+					</div>
+					<p className="font-mono-sc m-0 mt-2 text-[10px] text-[var(--ink-3)] opacity-80">
+						「加成信源」会把地址填进下面的添加框并自动做 feed 发现,抓通了才真的加进来。
+					</p>
+				</div>
+			)}
 
 			<div className="mt-4">
 				{sources.map((s, i) => {
@@ -232,6 +338,49 @@ export default function SourceLibrary({
 								)}
 							</div>
 							<p className="font-mono-sc mt-0.5 truncate pl-4 text-[11px] text-[var(--ink-3)] opacity-80">{s.url}</p>
+							{/* H2 · 坏掉的源必须自己喊出来——用户不会来报告 feed 挂了 */}
+							{isUnhealthy(s) && (
+								<div className="mt-1 pl-4">
+									<span className="font-mono-sc text-[11px] text-[var(--accent)]">
+										⚠ 连续抓取失败 {s.health?.consecutiveFailures} 次
+										{s.health?.lastOkAt ? ` · 最近一次成功 ${s.health.lastOkAt.slice(5, 10)}` : " · 从未成功过"}
+									</span>
+									<button
+										type="button"
+										onClick={() => void healSource(s)}
+										disabled={heal[s.key] === "healing"}
+										className="font-mono-sc ml-3 cursor-pointer text-[11px] text-[var(--ink-3)] underline hover:text-[var(--ink)] disabled:cursor-default disabled:opacity-50"
+									>
+										{heal[s.key] === "healing" ? "找替代中…" : "让编辑修一下"}
+									</button>
+									{s.health?.lastError && (
+										<p className="font-mono-sc m-0 mt-0.5 truncate text-[10px] text-[var(--ink-3)] opacity-70">
+											{s.health.lastError}
+										</p>
+									)}
+									{(() => {
+										const h = heal[s.key];
+										if (!h || h === "healing") return null;
+										return (
+											<div className="mt-1.5 border-l-2 border-[var(--line-strong)] pl-3 text-[12px]">
+												<p className="m-0 text-[var(--ink-2)]">{h.message}</p>
+												{h.candidate && (
+													<div className="mt-1 flex flex-wrap items-center gap-2">
+														<span className="font-mono-sc truncate text-[11px] text-[var(--ink-3)]">{h.candidate.url}</span>
+														<button
+															type="button"
+															onClick={() => applyHeal(i, h.candidate!.url)}
+															className="font-mono-sc cursor-pointer rounded border border-[var(--line-strong)] px-2 py-0.5 text-[10px] hover:bg-[var(--ink)] hover:text-[var(--paper)]"
+														>
+															换成这个
+														</button>
+													</div>
+												)}
+											</div>
+										);
+									})()}
+								</div>
+							)}
 							{t && t !== "testing" && (
 								<div className="mt-1.5 border-l-2 border-[var(--line)] pl-3 text-[12px]">
 									{t.ok ? (
@@ -393,6 +542,9 @@ export default function SourceLibrary({
 							入选内容查询源占比 {pct(metrics.selection.query, metrics.selection.total)}
 							({metrics.selection.query}/{metrics.selection.total})
 						</span>
+						{(metrics.unhealthy ?? 0) > 0 && (
+							<span className="text-[var(--accent)]">坏掉的源 {metrics.unhealthy} 个</span>
+						)}
 					</div>
 					{metrics.trackers.some((t) => t.briefs > 0) && (
 						<div className="font-mono-sc mt-1.5 space-y-0.5 text-[11px] text-[var(--ink-3)]">

@@ -10,6 +10,7 @@
 
 import { XMLParser } from "fast-xml-parser";
 import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem } from "./types";
+import { normalizeThreadKey } from "./threads.ts";
 
 export const USER_AGENT =
 	"nanisle-001-daily-brief/0.1 (+https://github.com/AI-Nanisle/nanisle-product)";
@@ -18,6 +19,22 @@ export const USER_AGENT =
 
 export type SourceCategory = "news" | "macro" | "blog" | "podcast" | "paper";
 export const SOURCE_CATEGORIES: SourceCategory[] = ["news", "macro", "blog", "podcast", "paper"];
+
+/**
+ * H1 · 一个源的抓取健康。用户永远不会来报告「我的 feed 挂了」——他只会觉得
+ * 简报变差,然后不来了。所以坏掉必须是产品自己看得见、说得出的状态。
+ */
+export interface SourceHealth {
+	/** 最近一次抓通的时间(ISO)。从没抓通过就没有这个字段。 */
+	lastOkAt?: string;
+	/** 连续失败次数;抓通一次即清零。到 UNHEALTHY_FAILURES 就在来源库标红。 */
+	consecutiveFailures: number;
+	/** 最近一次失败原因,原样留着给自愈和用户看。 */
+	lastError?: string;
+}
+
+/** 连续失败到几次算「坏了」——一次超时是常态,三次是模式。 */
+export const UNHEALTHY_FAILURES = 3;
 
 export interface SourceConfig {
 	/** Stable id (hash of the feed URL when created via the UI). */
@@ -29,6 +46,12 @@ export interface SourceConfig {
 	enabled?: boolean;
 	lang?: string;
 	max_items?: number;
+	/** H1 · 抓取健康,由每次生成回写。 */
+	health?: SourceHealth;
+}
+
+export function isUnhealthy(s: SourceConfig): boolean {
+	return (s.health?.consecutiveFailures ?? 0) >= UNHEALTHY_FAILURES;
 }
 
 export interface Filters {
@@ -320,6 +343,34 @@ export interface FetchResult {
 	scanned: number;
 	sourcesOk: number;
 	sourceErrors: { name: string; error: string }[];
+	/** H1 · 按源 key 记的本轮抓取结果,回写健康状态用(按 key 而非 name:全量
+	 * 生成里源是并集去重抓的,名字可能重复,key 才是身份)。 */
+	sourceStatus: { key: string; ok: boolean; error?: string }[];
+}
+
+/**
+ * H1 · 把一轮抓取结果回写进源库。返回新数组(不原地改),调用方负责落库。
+ * `statusByKey` 的 key 是**本次抓取用的** key——全量生成里那是并集 key,所以
+ * 调用方要先换算回该用户自己的源 key。
+ */
+export function applyHealth(
+	sources: SourceConfig[],
+	statusByKey: Map<string, { ok: boolean; error?: string }>,
+	now = new Date().toISOString(),
+): SourceConfig[] {
+	return sources.map((s) => {
+		const st = statusByKey.get(s.key);
+		if (!st) return s; // 停用的源没抓,健康状态保持原样
+		const prev = s.health;
+		const health: SourceHealth = st.ok
+			? { lastOkAt: now, consecutiveFailures: 0 }
+			: {
+					...(prev?.lastOkAt ? { lastOkAt: prev.lastOkAt } : {}),
+					consecutiveFailures: (prev?.consecutiveFailures ?? 0) + 1,
+					...(st.error ? { lastError: st.error.slice(0, 300) } : {}),
+				};
+		return { ...s, health };
+	});
 }
 
 export async function fetchAllSources(
@@ -334,6 +385,7 @@ export async function fetchAllSources(
 	const candidates: Candidate[] = [];
 	const ruleDropped: DroppedItem[] = [];
 	const sourceErrors: { name: string; error: string }[] = [];
+	const sourceStatus: { key: string; ok: boolean; error?: string }[] = [];
 	let scanned = 0;
 	let sourcesOk = 0;
 
@@ -344,10 +396,12 @@ export async function fetchAllSources(
 		if (result.status === "rejected") {
 			log(`[fetch] FAILED ${active[i].name}: ${result.reason}`);
 			sourceErrors.push({ name: active[i].name, error: String(result.reason) });
+			sourceStatus.push({ key: active[i].key, ok: false, error: String(result.reason) });
 			continue;
 		}
 		const { source, entries } = result.value;
 		sourcesOk++;
+		sourceStatus.push({ key: source.key, ok: true });
 
 		const fresh = entries
 			.filter((e) => e.publishedAt && now - e.publishedAt.getTime() <= maxAgeMs)
@@ -387,7 +441,7 @@ export async function fetchAllSources(
 
 	const seen = new Set<string>();
 	const deduped = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
-	return { candidates: deduped, ruleDropped, scanned, sourcesOk, sourceErrors };
+	return { candidates: deduped, ruleDropped, scanned, sourcesOk, sourceErrors, sourceStatus };
 }
 
 // ---------- editorial ----------
@@ -399,6 +453,10 @@ export interface EditorialPick {
 	relatesTo?: string;
 	merged?: string[];
 	related?: string[];
+	/** T3 · 归到哪条线索:命中已有线索用它的 key,否则给一个新 key。 */
+	threadKey?: string;
+	/** T3 · 新线索的标题(只在 threadKey 是新的时才有意义)。 */
+	threadTitle?: string;
 }
 
 export interface EditorialResult {
@@ -468,6 +526,8 @@ export function buildEditorialPrompt(
 	feedbackBlock = "",
 	/** X2 · 是否要轴外位(读者可关,连续没人点也会自动关)。 */
 	offAxis = false,
+	/** T3 · 追踪器 key → 该追踪器的活跃线索清单(threadsPromptBlock 的产物)。 */
+	threadsByTracker: Map<string, string> = new Map(),
 ): { system: string; user: string } {
 	const system = `你是一份个人每日简报的编辑。简报的哲学:它是当天信息的路由器,不是内容的终点。每条入选内容的任务是帮读者在 10 秒内决定"点进原文还是划过",绝不替读者把原文读完。
 
@@ -490,9 +550,13 @@ export function buildEditorialPrompt(
 12. 用户消息里带了「读者近期反馈」段:那是读者亲口说的,权重高于你的猜测。四类信号方向不同,别混为一谈——「没用」下调同类;「已知道」只提高新鲜度要求、绝不下调那个话题;「有用/多找这种」加权同源同话题;「读者说缺了什么」是选材的空洞,优先补。反馈不能推翻追踪器的「不收」硬排除。`
 			: ""
 	}${
+		/* 台账从第一期就要开始记,所以这条规则永远在:没有已有线索时,模型
+		   给的就全是新线索 key —— 那正是台账的起点。 */ `
+13. 线索归并:读者的追踪器下面列了「进行中的线索」。每条选中项都要给 threadKey——**接得上已有线索就用它的 key**(哪怕角度不同,只要是同一件事的后续),接不上才给一个新 key(小写英文 + 短横线,≤40 字符)并配 threadTitle(≤20 字,说的是这件事本身,不是这一篇文章的标题)。宁可多归到已有线索,也别把同一件事拆成三条新线索——读者要看的是一件事怎么发展的。`
+	}${
 		offAxis
 			? `
-13. 轴外位(offAxis):在所有追踪器之外,再挑 **1 条不属于任何追踪器**的候选——读者没定义过、也不会主动去找,但你判断他该看见的。reason 写清「为什么我觉得你该看见」,别写成又一条摘要。宁缺毋滥:没有真正够格的就给 null。它不占各追踪器的配额,也不受第 9 条总数限制。`
+14. 轴外位(offAxis):在所有追踪器之外,再挑 **1 条不属于任何追踪器**的候选——读者没定义过、也不会主动去找,但你判断他该看见的。reason 写清「为什么我觉得你该看见」,别写成又一条摘要。宁缺毋滥:没有真正够格的就给 null。它不占各追踪器的配额,也不受第 9 条总数限制。`
 			: ""
 	}`;
 
@@ -511,6 +575,9 @@ export function buildEditorialPrompt(
 			} else {
 				lines.push("  信源范围:全部已启用来源");
 			}
+			const threadBlock = threadsByTracker.get(t.key);
+			if (threadBlock) lines.push(`  进行中的线索(能接上就接,别另起炉灶):
+${threadBlock}`);
 			for (const rule of t.sourceRules ?? []) {
 				const parts = [];
 				if (rule.include?.length) parts.push(`只收:${rule.include.join("、")}`);
@@ -541,7 +608,7 @@ ${candidateText}
 返回这个结构的 JSON(sections 里每个追踪器 key 都要出现,没有合格候选就给空数组):
 {
   "sections": {
-    "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
+    "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "threadKey": "接上的线索key或新key", "threadTitle": "仅新线索需要", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
   },
   ${offAxis ? `"offAxis": {"id": "...", "whyClick": "...", "reason": "为什么我觉得你该看见(和任何追踪器都无关)"} 或 null,\n  ` : ""}"notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
   "droppedSummary": "一句话:今天筛掉的主要是什么"
@@ -650,11 +717,15 @@ export async function assembleBrief(
 				url: cand.url,
 				source: cand.source,
 				sourceKey: cand.sourceKey,
+				publishedAt: cand.publishedAt,
 				discussionUrl: opts.lookupDiscussions === false ? undefined : await findHnDiscussion(cand.url),
 				...(extras.length ? { extras } : {}),
 				...(pick.caveat ? { caveat: pick.caveat } : {}),
 				...(pick.relatesTo ? { relatesTo: pick.relatesTo } : {}),
 				...(mergedFrom.length ? { mergedFrom } : {}),
+				// T3 · key 归一后再落:模型给的新 key 什么字符都可能有
+				...(pick.threadKey ? { threadKey: normalizeThreadKey(pick.threadKey, cand.id) } : {}),
+				...(pick.threadTitle ? { threadTitle: pick.threadTitle.slice(0, 80) } : {}),
 			});
 		}
 		// Empty sections stay in: "the radar swept and found nothing" is part
@@ -677,6 +748,7 @@ export async function assembleBrief(
 				url: cand.url,
 				source: cand.source,
 				sourceKey: cand.sourceKey,
+				publishedAt: cand.publishedAt,
 				discussionUrl: undefined,
 				...(offPick.reason ? { relatesTo: offPick.reason } : {}),
 			};

@@ -23,6 +23,7 @@ function digestOf(notes: FeedbackNote[], briefs: Brief[] = []): FeedbackDigest {
 		notes,
 		clicks: new Map(),
 		clickCount: 0,
+		clickEvents: [],
 		briefs: new Map(briefs.map((b) => [b.date, b])),
 	};
 }

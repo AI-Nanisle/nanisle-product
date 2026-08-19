@@ -20,6 +20,11 @@ export interface BriefItem {
 	url: string;
 	/** Human-readable source name (e.g. "Simon Willison"). */
 	source: string;
+	/**
+	 * S2 · When the original was published (ISO). Absent in briefs written
+	 * before the weekly metrics existed — the 时效滞后 metric skips those.
+	 */
+	publishedAt?: string;
 	/** Stable key of the source config this item came from (absent in old briefs). */
 	sourceKey?: string;
 	/** Comment-thread URL (HN etc.) when one exists. */
@@ -32,6 +37,20 @@ export interface BriefItem {
 	relatesTo?: string;
 	/** When several sources covered the same event, the other reports merged into this item. */
 	mergedFrom?: BriefLink[];
+	/** T4 · Which thread this item belongs to (absent in briefs written before T1). */
+	threadKey?: string;
+	/**
+	 * T3 · Title the model proposed for a *new* thread. Transient: it exists
+	 * between the editorial call and the ledger merge, and `stripTransient`
+	 * removes it before the issue is stored.
+	 */
+	threadTitle?: string;
+	/**
+	 * T4 · "本线索第 5 条证据,上次是 12 天前" —— **computed in code**, never
+	 * written by the model, and frozen into the issue at generation time: a
+	 * brief is a snapshot, so recomputing it later would rewrite history.
+	 */
+	threadNote?: string;
 }
 
 export interface DroppedItem {
@@ -92,6 +111,54 @@ export interface Brief {
  * novelty bar, never down-weight the topic); more = strongest positive signal.
  */
 export type FeedbackKind = "up" | "down" | "known" | "more" | "text" | "want";
+
+/**
+ * T1 · 一条线索的一条证据。字段是冗余快照(标题/链接都存下来),不指回简报:
+ * 简报 90 天后可能已经不在了,而台账是长期资产,不该跟着一起失忆。
+ */
+export interface ThreadEvidence {
+	date: string;
+	itemId: string;
+	title: string;
+	url: string;
+	source: string;
+}
+
+/**
+ * fresh  = 刚出现,只有一条证据
+ * active = 还在持续出料
+ * quiet  = 8–20 天没有新证据
+ * dormant= 21 天以上没动静(45 天后移出活跃列表)
+ */
+export type ThreadStage = "fresh" | "active" | "quiet" | "dormant";
+
+/**
+ * T1 · 线索:一个追踪器底下正在发展的一件事。
+ *
+ * 这是「追踪器」从**每日筛选条件**变成**真的在追踪**的那个东西:没有它,
+ * 每期简报生成完即丢,读者永远看不到一个问题三个月来的进展。
+ */
+export interface Thread {
+	key: string;
+	trackerKey: string;
+	title: string;
+	/** 第一次出现的日期(YYYY-MM-DD)。 */
+	firstSeen: string;
+	/** 最近一条证据的日期。阶段机全看它。 */
+	lastEvidence: string;
+	stage: ThreadStage;
+	/** 最新在前,硬上限 MAX_THREAD_EVIDENCE 条,超出挤掉最旧。 */
+	evidence: ThreadEvidence[];
+	/** 沉寂 45 天后置位:移出活跃列表,但**不删**——台账不销毁历史。 */
+	archived?: boolean;
+	updatedAt: string;
+}
+
+/** 一条线索最多留几条证据。有界状态:台账不能无限长。 */
+export const MAX_THREAD_EVIDENCE = 10;
+/** 多少天没新证据算沉寂 / 该归档。 */
+export const THREAD_DORMANT_DAYS = 21;
+export const THREAD_ARCHIVE_DAYS = 45;
 
 /**
  * R5 · 期末一问「今天有什么本该知道却没出现」的 itemId 哨兵。它是刊级反馈,
