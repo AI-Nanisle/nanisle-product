@@ -9,19 +9,25 @@
  * 只写文件,不再推送任何远端(旧 /api/ingest 通道已随多用户版退役)。
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
+	SEEN_WINDOW_DAYS,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
+	dropSeenCandidates,
+	enrichBrief,
 	fetchAllSources,
 	focusEntryToTracker,
 	mockEditorial,
 	parseEditorialJson,
+	seenItemIds,
 } from "../src/shared/pipeline-core.ts";
+import type { Brief } from "../src/shared/types";
+import { fetchArticleTextNode, resolvePickedGoogleUrls } from "./extract.ts";
 import type { Filters, FocusEntry, SourceConfig, Tracker } from "../src/shared/pipeline-core.ts";
 import { DEFAULT_FILTERS, DEFAULT_SOURCES, DEFAULT_TRACKERS, DEMO_TRACKERS } from "../src/shared/default-sources.ts";
 import { complete, resolveProvider } from "../src/shared/ai.ts";
@@ -33,8 +39,16 @@ function loadDevVars(): void {
 	const path = join(ROOT, ".dev.vars");
 	if (!existsSync(path)) return;
 	for (const line of readFileSync(path, "utf8").split("\n")) {
-		const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
-		if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+		const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
+		if (!m || process.env[m[1]] !== undefined) continue;
+		// 按 dotenv 惯例:去尾部空白;未加引号的值剥掉行内「 #注释」——否则注释
+		// 会混进值里(比如进 Authorization 头,fetch 直接抛 ByteString 错)。
+		let value = m[2].trim();
+		if (!value.startsWith('"') && !value.startsWith("'")) {
+			const hash = value.search(/\s#/);
+			if (hash >= 0) value = value.slice(0, hash).trim();
+		}
+		process.env[m[1]] = value;
 	}
 }
 
@@ -77,21 +91,56 @@ function envAiConfig(): AiConfig {
 	return {
 		provider: process.env.AI_PROVIDER,
 		model: process.env.AI_MODEL,
-		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "4096",
+		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "16384",
 		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
 		anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+		anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: process.env.AI_GATEWAY_URL,
 		gatewayKey: process.env.AI_GATEWAY_KEY,
 	};
 }
 
+/** 成稿段换模开关,和 lambda.ts 同一组变量——本地对照的就是生产会用的开关。 */
+function envEnrichAiConfig(base: AiConfig): AiConfig {
+	const provider = process.env.ENRICH_AI_PROVIDER;
+	const model = process.env.ENRICH_AI_MODEL;
+	if (!provider && !model) return base;
+	return {
+		...base,
+		...(provider ? { provider } : {}),
+		...(model ? { model } : {}),
+		...(process.env.ENRICH_AI_MAX_OUTPUT_TOKENS ? { maxOutputTokens: process.env.ENRICH_AI_MAX_OUTPUT_TOKENS } : {}),
+	};
+}
+
+/** 本地防重复:pipeline/out 里近几天的简报就是「已推荐过」的账本。 */
+function localSeenBriefs(outDir: string, today: string): Brief[] {
+	if (!existsSync(outDir)) return [];
+	const cutoff = new Date(Date.now() - SEEN_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+	const briefs: Brief[] = [];
+	for (const f of readdirSync(outDir)) {
+		const m = /^brief-(\d{4}-\d{2}-\d{2})\.json$/.exec(f);
+		if (!m || m[1] < cutoff || m[1] === today) continue;
+		try {
+			briefs.push(JSON.parse(readFileSync(join(outDir, f), "utf8")) as Brief);
+		} catch {
+			// 手改坏的旧文件不挡今天的生成
+		}
+	}
+	return briefs;
+}
+
 async function main(): Promise<void> {
 	loadDevVars();
+	const date = process.env.BRIEF_DATE ?? briefDate(process.env.BRIEF_TZ ?? "America/New_York");
+	const outDir = join(ROOT, "pipeline", "out");
 	const { sources, filters, trackers } = loadConfig();
 	const fetched = await fetchAllSources(sources, filters, (m) => console.log(m));
 	console.log(
 		`[filter] ${fetched.scanned} scanned → ${fetched.candidates.length} candidates (${fetched.ruleDropped.length} rule-dropped, ${fetched.sourcesOk} sources ok)`,
 	);
+	const seenDropped = dropSeenCandidates(fetched, seenItemIds(localSeenBriefs(outDir, date)));
+	if (seenDropped > 0) console.log(`[seen] ${seenDropped} 条近期已入选,不重复推荐`);
 	if (fetched.candidates.length === 0) {
 		throw new Error("no candidates survived filtering — check feeds/network before shipping an empty brief");
 	}
@@ -110,15 +159,38 @@ async function main(): Promise<void> {
 		editorial = parseEditorialJson(result.text, trackers);
 	}
 
+	// 入选条目的 Google News 跳转链换成原文 URL(和 Lambda 同一段逻辑)
+	const pickedIds = new Set([
+		...Object.values(editorial.sections).flat().flatMap((p) => [p.id, ...(p.merged ?? [])]),
+		...(editorial.offAxis ? [editorial.offAxis.id] : []),
+	]);
+	await resolvePickedGoogleUrls(fetched.candidates, pickedIds, (m) => console.log(m));
 	const brief = await assembleBrief(editorial, fetched, {
-		date: process.env.BRIEF_DATE ?? briefDate(process.env.BRIEF_TZ ?? "America/New_York"),
+		date,
 		sourceCount: fetched.sourcesOk,
 		trackers,
 	});
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
 	console.log(`[assemble] ${picked} items across ${brief.sections.length} sections for ${brief.date}`);
 
-	const outDir = join(ROOT, "pipeline", "out");
+	// 第二段 · 成稿:和 Lambda 同一段共享代码 + 同一组 ENRICH_* 开关,本地对照
+	// deepseek 与 claude 在成稿上的差别,看的就是生产会跑的那条链路。
+	const enrichCfg = envEnrichAiConfig(cfg);
+	if (resolveProvider(enrichCfg) !== "mock") {
+		await enrichBrief(
+			brief,
+			fetched,
+			trackers,
+			(system, user) =>
+				complete(enrichCfg, { prompt: user, system, json: true }).then((r) => {
+					console.log(`[enrich] via ${r.provider}/${r.model}`);
+					return r.text;
+				}),
+			(m) => console.log(m),
+			fetchArticleTextNode,
+		);
+	}
+
 	mkdirSync(outDir, { recursive: true });
 	const outPath = join(outDir, `brief-${brief.date}.json`);
 	writeFileSync(outPath, JSON.stringify(brief, null, "\t"), "utf8");

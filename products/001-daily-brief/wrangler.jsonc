@@ -22,7 +22,7 @@
 			"/products/daily-brief/*"
 		]
 	},
-	// One KV namespace stores everything: briefs, feedback events, click events.
+	// One KV namespace stores everything: briefs, feedback/click events, note ledgers.
 	// Before your first real deploy: `wrangler kv namespace create BRIEFS`
 	// and paste the returned id below. Local dev (`npm run dev`) uses an
 	// in-memory KV and ignores the id, so mock mode needs no setup.
@@ -45,8 +45,8 @@
 		// 生产默认 deepseek;没配 DEEPSEEK_API_KEY 时代码自动落回 mock(fork
 		// 零配置照样跑通,误配的实例在 /api/health 与 [mock] 前缀里看得见)
 		"AI_PROVIDER": "deepseek",
-		// model id 按 DeepSeek 控制台实际值填(docs/02 §6.1)
-		"AI_MODEL": "deepseek-chat",
+		// deepseek-chat 已于 2026-07-24 退役;V4 Pro 默认开 thinking(docs/02 §6.1)
+		"AI_MODEL": "deepseek-v4-pro",
 		"AI_MAX_OUTPUT_TOKENS": "4096",
 		"APP_URL": "https://nanisle.com/products/daily-brief",
 		// Where the lock screen sends readers to sign in (the main site's launch gate)

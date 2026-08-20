@@ -12,7 +12,8 @@
 //   4. 提案生效只加不减 = 慢性死亡。定义字段有硬上限,超限必须**替换**。
 
 import type { Brief, FeedbackEvent } from "./types";
-import type { Tracker } from "./pipeline-core";
+import type { SourceCategory, Tracker } from "./pipeline-core";
+import { fnv1a, isQueryFeedUrl } from "./pipeline-core.ts";
 import type { ClickEvent, UserConfig } from "./store";
 import { isFeedbackEvent } from "./store.ts";
 
@@ -193,6 +194,15 @@ export function computeWeeklyMetrics({ config, briefs, events, now }: WeeklyInpu
 
 export type ProposalPatch =
 	| { type: "source-disable"; sourceKey: string }
+	| {
+			/** 观察式发现(docs/02 §7.3 第 4 层):检索源反复命中的域名升级成直连源。 */
+			type: "source-add";
+			name: string;
+			url: string;
+			category: SourceCategory;
+			/** 证据来自哪个追踪器;sourceMode=selected 时新源要同时挂进它的 sourceKeys。 */
+			trackerKey?: string;
+	  }
 	| { type: "tracker-source-mode-all"; trackerKey: string }
 	| { type: "tracker-exclude-remove"; trackerKey: string; term: string };
 
@@ -297,6 +307,118 @@ export function makeProposals(ctx: ProposalContext): Proposal[] {
 	return out.slice(0, MAX_PROPOSALS_PER_WEEK);
 }
 
+// ---------- S3+ · 观察式发现:检索源反复命中的域名 → 直连源提案 ----------
+
+/** 聚合器/平台域名:它们是管道不是出版方,不值得建议「直接订阅」。 */
+const AGGREGATOR_HOSTS = new Set([
+	"news.google.com",
+	"news.ycombinator.com",
+	"reddit.com",
+	"arxiv.org",
+	"youtube.com",
+	"github.com",
+	"medium.com",
+	"substack.com",
+]);
+
+function isAggregatorHost(host: string): boolean {
+	const h = host.replace(/^www\./, "");
+	return AGGREGATOR_HOSTS.has(h) || [...AGGREGATOR_HOSTS].some((a) => h.endsWith(`.${a}`));
+}
+
+export interface QueryFeedDomain {
+	/** 归一后的域名(去 www)。 */
+	domain: string;
+	/** 窗口内经检索源入选的条数。 */
+	count: number;
+	/** 出现最多的追踪器——新源该挂进谁的 sourceKeys。 */
+	trackerKey: string;
+	/** 最近一条的标题,进提案的证据行。 */
+	sample: string;
+}
+
+/**
+ * docs/02 §7.3 第 4 层:检索源是免费的侦察兵,它反复带回同一个域名,说明那个
+ * 站就是用户想要的具体源。这里只做纯统计;试抓(能不能订阅)是调用方的活。
+ */
+export function queryFeedDomains(config: UserConfig, briefs: Brief[], minCount = 3): QueryFeedDomain[] {
+	const queryKeys = new Set(config.sources.filter((s) => isQueryFeedUrl(s.url)).map((s) => s.key));
+	if (queryKeys.size === 0) return [];
+	const ownedHosts = new Set(
+		config.sources
+			.map((s) => {
+				try {
+					return new URL(s.url).hostname.replace(/^www\./, "");
+				} catch {
+					return "";
+				}
+			})
+			.filter(Boolean),
+	);
+	const byDomain = new Map<string, { count: number; trackers: Map<string, number>; sample: string }>();
+	for (const brief of briefs) {
+		for (const section of brief.sections) {
+			for (const item of section.items) {
+				if (!item.sourceKey || !queryKeys.has(item.sourceKey)) continue;
+				let host: string;
+				try {
+					host = new URL(item.url).hostname.replace(/^www\./, "");
+				} catch {
+					continue;
+				}
+				if (!host || isAggregatorHost(host) || ownedHosts.has(host)) continue;
+				const entry = byDomain.get(host) ?? { count: 0, trackers: new Map(), sample: item.title };
+				entry.count++;
+				entry.trackers.set(section.key, (entry.trackers.get(section.key) ?? 0) + 1);
+				if (!entry.sample) entry.sample = item.title;
+				byDomain.set(host, entry);
+			}
+		}
+	}
+	return [...byDomain.entries()]
+		.filter(([, e]) => e.count >= minCount)
+		.map(([domain, e]) => ({
+			domain,
+			count: e.count,
+			trackerKey: [...e.trackers.entries()].sort((a, b) => b[1] - a[1])[0][0],
+			sample: e.sample,
+		}))
+		.sort((a, b) => b.count - a.count);
+}
+
+/**
+ * 试抓通过后把域名升级成 source-add 提案。和 makeProposals 同一条纪律:
+ * evidence 里全是可复算的数字,没有依据的提案不许存在。
+ */
+export function makeSourceAddProposal(
+	found: QueryFeedDomain,
+	probe: { url: string; title?: string; fresh?: number; total?: number },
+	config: UserConfig,
+	metrics: WeeklyMetrics,
+	now: Date,
+	id: string,
+): Proposal | null {
+	if (config.sources.some((s) => s.url === probe.url)) return null;
+	const tracker = config.trackers.find((t) => t.key === found.trackerKey);
+	const name = (probe.title || found.domain).slice(0, 60);
+	return {
+		id: `p-${id}`,
+		createdAt: now.toISOString(),
+		week: isoWeek(now),
+		status: "pending",
+		targetName: name,
+		summary: `把 ${found.domain} 升级成直连来源「${name}」`,
+		evidence: `近 ${metrics.window.briefs} 期里有 ${found.count} 条入选内容经检索源来自它(如《${found.sample.slice(0, 40)}》),它有可直接订阅的 feed(${probe.total ?? "?"} 条,窗口内 ${probe.fresh ?? "?"} 条)。`,
+		patch: {
+			type: "source-add",
+			name,
+			url: probe.url,
+			category: "news",
+			...(tracker ? { trackerKey: tracker.key } : {}),
+		},
+	};
+}
+
 // ---------- S4/S5/S6 · 生效 ----------
 
 /**
@@ -326,6 +448,9 @@ export function capList(list: string[], add: string[], max: number): string[] {
 	return merged.length <= max ? merged : merged.slice(merged.length - max);
 }
 
+/** 与 worker/config.ts 的 MAX_SOURCES 同值;不直接 import 是因为那边 import 本模块。 */
+const MAX_SOURCES_CAP = 30;
+
 /** 把一条提案落到配置上。返回新配置 + 给 changelog 的一行话(没改动则返回 null)。 */
 export function applyProposal(config: UserConfig, p: Proposal): { config: UserConfig; log?: { trackerKey: string; text: string } } | null {
 	const patch = p.patch;
@@ -333,6 +458,26 @@ export function applyProposal(config: UserConfig, p: Proposal): { config: UserCo
 		const sources = config.sources.map((s) => (s.key === patch.sourceKey ? { ...s, enabled: false } : s));
 		if (JSON.stringify(sources) === JSON.stringify(config.sources)) return null;
 		return { config: { ...config, sources } };
+	}
+	if (patch.type === "source-add") {
+		if (config.sources.some((s) => s.url === patch.url)) return null;
+		if (config.sources.length >= MAX_SOURCES_CAP) return null;
+		const key = fnv1a(patch.url);
+		const sources = [...config.sources, { key, name: patch.name, url: patch.url, category: patch.category }];
+		// 证据来自 selected 模式的追踪器时,新源要挂进它的 sourceKeys,否则加了也选不上
+		const trackers = patch.trackerKey
+			? config.trackers.map((t) =>
+					t.key === patch.trackerKey && t.sourceMode === "selected"
+						? { ...t, sourceKeys: [...new Set([...(t.sourceKeys ?? []), key])] }
+						: t,
+				)
+			: config.trackers;
+		return {
+			config: { ...config, sources, trackers },
+			...(patch.trackerKey
+				? { log: { trackerKey: patch.trackerKey, text: `编辑按每周自评加了直连来源「${patch.name}」(依据:${p.evidence})` } }
+				: {}),
+		};
 	}
 
 	const trackers = config.trackers.map((t) => {

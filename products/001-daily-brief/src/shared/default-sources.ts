@@ -43,6 +43,10 @@ export const DEFAULT_FILTERS: Filters = {
 	// Entries older than this never enter the candidate pool. 30h > 24h so a
 	// slightly late daily run still catches yesterday's late posts.
 	max_age_hours: 30,
+	// 类目窗口:news/macro 用上面的 30h;周更的博客/播客放宽到 7 天,论文 3 天。
+	// 否则 Stratechery 这类周更源在日更窗口里几乎永远零贡献。重复入选由
+	// dropSeenCandidates 按往期简报挡住(SEEN_WINDOW_DAYS 与这里的最大值对齐)。
+	category_max_age_hours: { blog: 168, podcast: 168, paper: 72 },
 	// Per-feed cap before any model sees anything (token-cost guard).
 	max_items_per_feed: 10,
 	// Title hits (case-insensitive) are dropped by rule, before the model.

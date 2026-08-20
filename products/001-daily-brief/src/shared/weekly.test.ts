@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Brief } from "./types";
 import type { Tracker } from "./pipeline-core";
+import { fnv1a } from "./pipeline-core.ts";
 import type { UserConfig } from "./store";
 import type { Proposal } from "./weekly.ts";
 import {
@@ -21,7 +22,9 @@ import {
 	isCooled,
 	isoWeek,
 	makeProposals,
+	makeSourceAddProposal,
 	preserveImmutable,
+	queryFeedDomains,
 } from "./weekly.ts";
 
 const NOW = new Date("2026-08-19T12:00:00.000Z");
@@ -253,4 +256,78 @@ test("S6 · 到顶必须替换最旧的,不许无限追加", () => {
 	assert.ok(!next.includes("词0"), "最旧的那个应被挤掉");
 	// 已存在的词不重复追加
 	assert.deepEqual(capList(["a", "b"], ["b"], 12), ["a", "b"]);
+});
+
+// ---------- 观察式发现(检索源域名 → 直连源提案) ----------
+
+test("queryFeedDomains:检索源反复命中的域名被统计,聚合器与已订域名除外", () => {
+	const cfg = config({
+		sources: [
+			{ key: "q1", name: "Google News 检索", url: "https://news.google.com/rss/search?q=agent&hl=en-US&gl=US&ceid=US:en", category: "news" },
+			{ key: "s1", name: "某源", url: "https://a.example/feed", category: "blog" },
+		],
+	});
+	const mk = (date: string, id: string, url: string, sourceKey: string): Brief => ({
+		date,
+		generatedAt: `${date}T11:00:00.000Z`,
+		sections: [
+			{
+				key: "t1",
+				title: "定义一",
+				items: [{ id, title: id, whyClick: "why", url, source: "x", sourceKey, publishedAt: `${date}T00:00:00Z` }],
+			},
+		],
+		filteredOut: { scanned: 1, dropped: 0, summary: "", items: [] },
+		sourceCount: 2,
+	});
+	const briefs = [
+		mk("2026-08-18", "a", "https://siliconangle.com/1", "q1"),
+		mk("2026-08-17", "b", "https://www.siliconangle.com/2", "q1"),
+		mk("2026-08-16", "c", "https://siliconangle.com/3", "q1"),
+		// 聚合器域名与非检索源的条目都不算数
+		mk("2026-08-15", "d", "https://old.reddit.com/r/x/1", "q1"),
+		mk("2026-08-14", "e", "https://siliconangle.com/4", "s1"),
+		// 已经订着的域名不再建议
+		mk("2026-08-13", "f", "https://a.example/5", "q1"),
+	];
+	const found = queryFeedDomains(cfg, briefs, 3);
+	assert.equal(found.length, 1);
+	assert.equal(found[0].domain, "siliconangle.com");
+	assert.equal(found[0].count, 3);
+	assert.equal(found[0].trackerKey, "t1");
+});
+
+test("makeSourceAddProposal:带依据成案;feed 已在库里则不成案", () => {
+	const cfg = config();
+	const metrics = computeWeeklyMetrics({ config: cfg, briefs: [brief("2026-08-18", [])], events: [], now: NOW });
+	const found = { domain: "siliconangle.com", count: 3, trackerKey: "t1", sample: "Fortinet buys Virtue AI" };
+	const p = makeSourceAddProposal(found, { url: "https://siliconangle.com/feed", title: "SiliconANGLE", total: 40, fresh: 6 }, cfg, metrics, NOW, "w-0");
+	assert.ok(p);
+	assert.equal(p.patch.type, "source-add");
+	assert.match(p.evidence, /3 条/);
+	// 同一个 feed 已在库:不成案
+	const dup = config({ sources: [{ key: "sa", name: "SiliconANGLE", url: "https://siliconangle.com/feed", category: "news" }] });
+	assert.equal(makeSourceAddProposal(found, { url: "https://siliconangle.com/feed" }, dup, metrics, NOW, "w-1"), null);
+});
+
+test("applyProposal:source-add 加进源库并挂进出证据的追踪器;重复应用返回 null", () => {
+	const cfg = config({ trackers: [tracker({ sourceMode: "selected", sourceKeys: ["s1"] })] });
+	const p: Proposal = {
+		id: "p-x",
+		createdAt: NOW.toISOString(),
+		week: "2026-W34",
+		targetName: "SiliconANGLE",
+		summary: "把 siliconangle.com 升级成直连来源",
+		evidence: "近 3 期 3 条",
+		status: "pending",
+		patch: { type: "source-add", name: "SiliconANGLE", url: "https://siliconangle.com/feed", category: "news", trackerKey: "t1" },
+	};
+	const res = applyProposal(cfg, p);
+	assert.ok(res);
+	const key = fnv1a("https://siliconangle.com/feed");
+	assert.equal(res.config.sources.length, 2);
+	assert.equal(res.config.sources[1].key, key);
+	assert.ok(res.config.trackers[0].sourceKeys?.includes(key));
+	// 已经加过:第二次应用是 no-op
+	assert.equal(applyProposal(res.config, p), null);
 });

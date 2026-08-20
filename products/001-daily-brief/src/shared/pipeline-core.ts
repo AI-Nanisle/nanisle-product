@@ -11,6 +11,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem } from "./types";
 import { normalizeThreadKey } from "./threads.ts";
+import { countAiTells, normalizeCnStyle } from "./style.ts";
 
 export const USER_AGENT =
 	"nanisle-001-daily-brief/0.1 (+https://github.com/AI-Nanisle/nanisle-product)";
@@ -58,6 +59,12 @@ export interface Filters {
 	max_age_hours: number;
 	max_items_per_feed: number;
 	noise_keywords: string[];
+	/**
+	 * 按类目放宽的新鲜度窗口(小时)。周更的博客/播客在 30 小时窗口里几乎永远
+	 * 是零贡献——一篇三天前的深度长文该和当天新闻同台竞争。没列的类目用
+	 * max_age_hours。放宽的重复风险由「近期已入选」过滤挡(dropSeenCandidates)。
+	 */
+	category_max_age_hours?: Partial<Record<SourceCategory, number>>;
 }
 
 /** Legacy shape (v1 关注点). Kept only so stored configs migrate cleanly. */
@@ -230,6 +237,12 @@ export interface Candidate {
 	url: string;
 	publishedAt: string;
 	excerpt: string;
+	/**
+	 * 真实出版方(Google News 检索源的 `<source>` 标签)。sourceKey/source 仍是
+	 * 用户配置的那个源——配额、健康、指标都记在它头上;publisher 只管展示,
+	 * 读者该看到「SiliconANGLE」而不是检索管道的名字。
+	 */
+	publisher?: string;
 }
 
 // ---------- small utils ----------
@@ -286,6 +299,8 @@ export interface RawEntry {
 	url: string;
 	publishedAt: Date | null;
 	excerpt: string;
+	/** RSS `<source>`(Google News 检索源会带真实出版方名),没有则缺省。 */
+	sourceName?: string;
 }
 
 export interface ParsedFeed {
@@ -304,11 +319,13 @@ export function parseFeedMeta(xml: string): ParsedFeed {
 	for (const item of rssItems) {
 		const dateStr = text(item.pubDate) || text(item["dc:date"]) || "";
 		const body = text(item["content:encoded"]) || text(item.description) || "";
+		const sourceName = stripHtml(text(item.source)).slice(0, 60);
 		entries.push({
 			title: stripHtml(text(item.title)),
 			url: text(item.link).trim() || text(item.guid).trim(),
 			publishedAt: dateStr ? new Date(dateStr) : null,
 			excerpt: stripHtml(body),
+			...(sourceName ? { sourceName } : {}),
 		});
 	}
 
@@ -353,6 +370,53 @@ export function isQueryFeedUrl(url: string): boolean {
 	if ((host === "reddit.com" || host.endsWith(".reddit.com")) && u.pathname.endsWith(".rss")) return true;
 	if (host === "rss.arxiv.org") return true;
 	return false;
+}
+
+/**
+ * Google News 检索源给的是 news.google.com/rss/articles/CBMi… 跳转链,不解开的
+ * 代价是三连:成稿抓不到正文、同一事件和直连源撞不上去重、点击归因落在中转页。
+ * 旧式链接(CBMi 前缀)的 path 段就是 base64url 包着的原文 URL,纯解码即可;
+ * 新式(AU_yqL 前缀)要打 Google 内部接口才解得开,不值得——解不开返回 null,
+ * 调用方保留原链,其余机制照常降级。
+ */
+export function decodeGoogleNewsUrl(url: string): string | null {
+	let u: URL;
+	try {
+		u = new URL(url);
+	} catch {
+		return null;
+	}
+	if (u.hostname !== "news.google.com") return null;
+	const seg = /\/(?:rss\/)?articles\/([^/?#]+)/.exec(u.pathname)?.[1];
+	if (!seg?.startsWith("CBMi")) return null;
+	try {
+		const b64 = seg.replace(/-/g, "+").replace(/_/g, "/");
+		// atob 在 Workers 和 Node 16+ 都是全局的,这里不引 node:buffer 保持运行时无关
+		const bytes = atob(b64);
+		// 解出的字节流是 length-prefixed protobuf,直接按可打印 URL 捞,取最长的
+		// 非 google 域名链接(流里有时还嵌着 AMP 变体)。
+		const matches = bytes.match(/https?:\/\/[\x21-\x7e]+/g) ?? [];
+		const candidates = matches
+			.map((m) => m.replace(/[\x00-\x20"'<>\\]+$/g, ""))
+			.filter((m) => {
+				try {
+					return !new URL(m).hostname.endsWith("google.com");
+				} catch {
+					return false;
+				}
+			})
+			.sort((a, b) => b.length - a.length);
+		return candidates[0] ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** Google News 的标题格式是「Title - Publisher」;知道出版方名就把尾巴剥掉。 */
+export function stripPublisherSuffix(title: string, publisher?: string): string {
+	if (!publisher) return title;
+	const suffix = ` - ${publisher}`;
+	return title.endsWith(suffix) ? title.slice(0, -suffix.length).trimEnd() : title;
 }
 
 export async function fetchFeed(url: string, timeoutMs = 20_000): Promise<RawEntry[]> {
@@ -411,7 +475,6 @@ export async function fetchAllSources(
 ): Promise<FetchResult> {
 	const active = sources.filter((s) => s.enabled !== false);
 	const now = Date.now();
-	const maxAgeMs = filters.max_age_hours * 3600_000;
 	const noise = filters.noise_keywords.map((k) => k.toLowerCase());
 	const candidates: Candidate[] = [];
 	const ruleDropped: DroppedItem[] = [];
@@ -434,6 +497,9 @@ export async function fetchAllSources(
 		sourcesOk++;
 		sourceStatus.push({ key: source.key, ok: true });
 
+		// 类目窗口:news/macro 讲时效,blog/podcast/paper 讲密度——周更长文在
+		// 30 小时窗里永远是零贡献,放宽到几天;重复入选由 dropSeenCandidates 挡
+		const maxAgeMs = (filters.category_max_age_hours?.[source.category] ?? filters.max_age_hours) * 3600_000;
 		const fresh = entries
 			.filter((e) => e.publishedAt && now - e.publishedAt.getTime() <= maxAgeMs)
 			.sort((a, b) => b.publishedAt!.getTime() - a.publishedAt!.getTime());
@@ -444,15 +510,19 @@ export async function fetchAllSources(
 		const cap = source.max_items ?? filters.max_items_per_feed;
 		let kept = 0;
 		for (const entry of fresh) {
-			const id = fnv1a(entry.url);
-			const lowerTitle = entry.title.toLowerCase();
+			// Google News 跳转链解成原文 URL:id 因此按真实 URL 算,和直连源天然
+			// 去重;成稿抓正文、点击归因、HN 讨论查询也都落在真实页面上。
+			const url = decodeGoogleNewsUrl(entry.url) ?? entry.url;
+			const title = stripPublisherSuffix(entry.title, entry.sourceName);
+			const id = fnv1a(url);
+			const lowerTitle = title.toLowerCase();
 			const hit = noise.find((k) => lowerTitle.includes(k));
 			if (hit) {
-				ruleDropped.push({ id, title: entry.title, url: entry.url, source: source.name, reason: `规则过滤:命中「${hit}」` });
+				ruleDropped.push({ id, title, url, source: source.name, reason: `规则过滤:命中「${hit}」` });
 				continue;
 			}
 			if (kept >= cap) {
-				ruleDropped.push({ id, title: entry.title, url: entry.url, source: source.name, reason: "规则过滤:超出单源条数上限" });
+				ruleDropped.push({ id, title, url, source: source.name, reason: "规则过滤:超出单源条数上限" });
 				continue;
 			}
 			kept++;
@@ -461,12 +531,13 @@ export async function fetchAllSources(
 				sourceKey: source.key,
 				source: source.name,
 				category: source.category,
-				title: entry.title,
-				url: entry.url,
+				title,
+				url,
 				publishedAt: entry.publishedAt!.toISOString(),
 				// 存足量正文:选材阶段仍只送 800 字(见 buildEditorialPrompt),但成稿
 				// 阶段要拿全文写实质与判断——在这里砍到 1200,后面再想深也无米下锅。
 				excerpt: entry.excerpt.slice(0, ENRICH_TEXT_CAP),
+				...(entry.sourceName ? { publisher: entry.sourceName } : {}),
 			});
 		}
 		log(`[fetch] ${source.name}: ${entries.length} entries, ${fresh.length} fresh, ${kept} kept`);
@@ -475,6 +546,58 @@ export async function fetchAllSources(
 	const seen = new Set<string>();
 	const deduped = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
 	return { candidates: deduped, ruleDropped, scanned, sourcesOk, sourceErrors, sourceStatus };
+}
+
+// ---------- 近期已入选过滤(类目窗口放宽后的防重复) ----------
+
+/**
+ * 「已推荐过」回看几天。要 ≥ 类目窗口的最大值(7 天):窗口放宽让一篇周更长文
+ * 能连续几天当候选,一旦入选就必须在整个窗口期内挡住它,否则明天原样再来。
+ */
+export const SEEN_WINDOW_DAYS = 7;
+
+/**
+ * 往期简报里「读者已经看到过」的条目 id:正选、轴外位、同事件合并报道。
+ * id 就是 fnv1a(url),合并报道只有链接也能重建出 id。
+ */
+export function seenItemIds(briefs: Brief[]): Set<string> {
+	const seen = new Set<string>();
+	for (const brief of briefs) {
+		for (const section of brief.sections) {
+			for (const item of section.items) {
+				seen.add(item.id);
+				for (const m of item.mergedFrom ?? []) seen.add(fnv1a(m.url));
+			}
+		}
+		if (brief.offAxis) seen.add(brief.offAxis.id);
+	}
+	return seen;
+}
+
+/**
+ * 把已推荐过的候选移进规则过滤区——昨天推荐过的内容今天绝不再上,这是硬规则,
+ * 不进提示词碰运气。挪进 ruleDropped 而不是悄悄扔掉:问责区要能看到这个理由。
+ */
+export function dropSeenCandidates(fetched: FetchResult, seen: Set<string>): number {
+	if (seen.size === 0) return 0;
+	const kept: Candidate[] = [];
+	let dropped = 0;
+	for (const c of fetched.candidates) {
+		if (seen.has(c.id)) {
+			dropped++;
+			fetched.ruleDropped.push({
+				id: c.id,
+				title: c.title,
+				url: c.url,
+				source: c.source,
+				reason: "规则过滤:近期已入选过,不重复推荐",
+			});
+		} else {
+			kept.push(c);
+		}
+	}
+	fetched.candidates = kept;
+	return dropped;
 }
 
 // ---------- editorial ----------
@@ -554,6 +677,20 @@ export function mockEditorial(candidates: Candidate[], trackers: Tracker[]): Edi
 	};
 }
 
+/**
+ * 文风硬规则,选材和成稿两段共用。禁用清单参照 GB/T 15834(引号规范)与
+ * stop-slop-zh / shuorenhua 两套开源去 AI 味规则集,收敛到最伤阅读的十几条——
+ * 词表太长模型反而记不住。写进提示词是第一道,style.ts 的确定性规整是兜底。
+ */
+export const STYLE_RULES = `文风(硬性,违反即不合格):
+- 基准语气:像同事在群里转发链接时顺口说的那句话。直接、具体、不端着,砍掉一切套话。
+- 禁用破折号(——、—)和感叹号。要停顿用逗号,要解释另起一句。
+- 引号只在直接引用原文措辞时用,用中文弯引号“”。普通名词、概念、产品名一律不加引号。
+- 禁用词:凸显、赋能、闭环、或将、迎来、重磅、里程碑、革命性、值得关注、值得注意的是、不容小觑、综上所述、本质上、不难发现、拭目以待、未来可期、深度剖析。
+- 禁用句式:“不是X,而是Y”式转折;三个短语连排;首先/其次/最后式机械分点;把标题换个说法复述一遍。
+- 动词优先:写“改了”不写“进行了优化”。有数字给数字,有名字点名字,能具体绝不概括。
+- 长短句交替,一句话只说一件事,别每句都塞满数据和从句。`;
+
 export function buildEditorialPrompt(
 	candidates: Candidate[],
 	trackers: Tracker[],
@@ -595,7 +732,9 @@ export function buildEditorialPrompt(
 			? `
 14. 轴外位(offAxis):在所有追踪器之外,再挑 **1 条不属于任何追踪器**的候选——读者没定义过、也不会主动去找,但你判断他该看见的。reason 写清「为什么我觉得你该看见」,别写成又一条摘要。宁缺毋滥:没有真正够格的就给 null。它不占各追踪器的配额,也不受第 9 条总数限制。`
 			: ""
-	}`;
+	}
+
+${STYLE_RULES}`;
 
 	const trackerText = activeTrackers(trackers)
 		.map((t) => {
@@ -661,11 +800,26 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 	parsed.droppedSummary ??= "";
 	// Keep only known trackers, clamp per-tracker quotas; unknown keys from the
 	// model are dropped, never invented into sections.
+	let tells = 0;
+	const clean = (s: string | undefined): string | undefined => {
+		if (typeof s !== "string" || !s) return undefined;
+		tells += countAiTells(s);
+		return normalizeCnStyle(s);
+	};
 	const sections: Record<string, EditorialPick[]> = {};
 	for (const t of activeTrackers(trackers)) {
-		sections[t.key] = (parsed.sections?.[t.key] ?? []).slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA));
+		sections[t.key] = (parsed.sections?.[t.key] ?? [])
+			.slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA))
+			.map((p) => ({
+				...p,
+				whyClick: clean(p.whyClick) ?? "",
+				...(p.caveat ? { caveat: clean(p.caveat) } : {}),
+				...(p.relatesTo ? { relatesTo: clean(p.relatesTo) } : {}),
+			}));
 	}
 	parsed.sections = sections;
+	parsed.notableDrops = parsed.notableDrops.map((d) => ({ ...d, reason: clean(d.reason) ?? "" }));
+	parsed.droppedSummary = clean(parsed.droppedSummary) ?? "";
 	// 「今天为什么是空的」是这个产品最常被问的问题,把答案留在日志里:
 	// 是模型一条没选(选材太严),还是候选池里本来就没有(源的问题)。
 	const picked = Object.entries(sections).map(([k, v]) => `${k}=${v.length}`).join(" ");
@@ -674,17 +828,19 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 	const off = parsed.offAxis;
 	parsed.offAxis =
 		off && typeof off.id === "string" && typeof off.whyClick === "string"
-			? { id: off.id, whyClick: off.whyClick, reason: typeof off.reason === "string" ? off.reason : "" }
+			? { id: off.id, whyClick: clean(off.whyClick) ?? "", reason: clean(typeof off.reason === "string" ? off.reason : "") ?? "" }
 			: null;
 	// E1 · 三句话只做清洗(去空、截长、最多 3 句);格式不对就整个丢掉,
 	// 兜底拼接在 assembleBrief 里——那里才拿得到最终入选的条目。
 	parsed.tldr = Array.isArray(parsed.tldr)
 		? parsed.tldr
 				.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
-				.map((s) => s.trim().slice(0, 60))
+				.map((s) => (clean(s.trim()) ?? "").slice(0, 60))
 				.slice(0, 3)
 		: undefined;
 	if (!parsed.tldr?.length) parsed.tldr = undefined;
+	// 换模对照的可比数字:规整前模型原文里有多少处 AI 腔(破折号/直角引号/套话)
+	if (tells > 0) console.log(`[style] editorial AI 腔命中 ${tells} 处,标点已规整`);
 	return parsed;
 }
 
@@ -753,7 +909,7 @@ export async function assembleBrief(
 				const m = byId.get(mid);
 				if (m && !usedIds.has(mid)) {
 					usedIds.add(mid);
-					mergedFrom.push({ label: `${m.source} · ${m.title}`, url: m.url });
+					mergedFrom.push({ label: `${m.publisher ?? m.source} · ${m.title}`, url: m.url });
 				}
 			}
 			const extras: BriefLink[] = [];
@@ -766,7 +922,8 @@ export async function assembleBrief(
 				title: cand.title,
 				whyClick: pick.whyClick,
 				url: cand.url,
-				source: cand.source,
+				// 展示真实出版方(检索源条目);配额、健康、指标仍按 sourceKey 记
+				source: cand.publisher ?? cand.source,
 				sourceKey: cand.sourceKey,
 				publishedAt: cand.publishedAt,
 				discussionUrl: opts.lookupDiscussions === false ? undefined : await findHnDiscussion(cand.url),
@@ -797,7 +954,7 @@ export async function assembleBrief(
 				title: cand.title,
 				whyClick: offPick.whyClick,
 				url: cand.url,
-				source: cand.source,
+				source: cand.publisher ?? cand.source,
 				sourceKey: cand.sourceKey,
 				publishedAt: cand.publishedAt,
 				discussionUrl: undefined,
@@ -823,14 +980,14 @@ export async function assembleBrief(
 	});
 	const filteredItems = [...overflow, ...unselected, ...fetched.ruleDropped].slice(0, 100);
 
-	// E1 · 三句话:编辑给了就用;漏给时从各版块首条机械拼(《标题》——whyClick
+	// E1 · 三句话:编辑给了就用;漏给时从各版块首条机械拼(《标题》:whyClick
 	// 前 30 字)。兜底文案生硬没关系,邮件的任务只是把人叫回网页。
 	let tldr = editorial.tldr;
 	if (!tldr?.length) {
 		tldr = sections
 			.filter((s) => s.items.length > 0)
 			.slice(0, 3)
-			.map((s) => `《${s.items[0].title.slice(0, 24)}》——${s.items[0].whyClick.slice(0, 30)}`);
+			.map((s) => `《${s.items[0].title.slice(0, 24)}》:${s.items[0].whyClick.slice(0, 30)}`);
 	}
 
 	return {
@@ -879,6 +1036,9 @@ export const MIN_ENRICH_TEXT = 400;
  */
 export async function fetchArticleText(url: string, timeoutMs = 8000): Promise<string> {
 	try {
+		// 没解开的 Google News 新式跳转链是个 JS 壳页,stripHtml 出来的是导航噪音,
+		// 混进成稿比拿不到正文更糟——直接放弃,让该条保持路由式文案。
+		if (new URL(url).hostname === "news.google.com") return "";
 		const res = await fetch(url, {
 			headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml" },
 			signal: AbortSignal.timeout(timeoutMs),
@@ -938,7 +1098,9 @@ take 的硬边界(违反就是在编):
 - 不许写「值得关注」「有待观察」「未来可期」这类正确的废话。
 
 正文为空或过短的条目:substance 和 take 都给空字符串,不许靠标题猜内容。
-只输出 JSON,不要任何其他文字。`;
+只输出 JSON,不要任何其他文字。
+
+${STYLE_RULES}`;
 
 export function buildEnrichPrompt(items: EnrichSource[]): { system: string; user: string } {
 	const blocks = items.map((it) => {
@@ -959,18 +1121,26 @@ export function parseEnrichJson(raw: string): Record<string, EnrichPick> {
 	const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
 	const parsed = JSON.parse(cleaned) as { items?: Record<string, EnrichPick> };
 	const out: Record<string, EnrichPick> = {};
+	let tells = 0;
 	for (const [id, pick] of Object.entries(parsed.items ?? {})) {
 		if (!pick || typeof pick !== "object") continue;
-		const take = (str: unknown, cap: number) =>
-			typeof str === "string" && str.trim() ? str.trim().slice(0, cap) : undefined;
+		const take = (str: unknown, cap: number) => {
+			if (typeof str !== "string" || !str.trim()) return undefined;
+			tells += countAiTells(str);
+			return normalizeCnStyle(str.trim()).slice(0, cap);
+		};
+		const whyClick = take(pick.whyClick, 200);
+		// substance 要 150-320 字,截断上限给够余量:提示词负责控长度,这里
+		// 只防失控;卡在 400 会把最后一句话砍掉一半,比长一点难看得多。
+		const substance = take(pick.substance, 900);
+		const judgement = take(pick.take, 400);
 		out[id] = {
-			...(take(pick.whyClick, 200) ? { whyClick: take(pick.whyClick, 200) } : {}),
-			// substance 要 150-320 字,截断上限给够余量:提示词负责控长度,这里
-			// 只防失控;卡在 400 会把最后一句话砍掉一半,比长一点难看得多。
-			...(take(pick.substance, 900) ? { substance: take(pick.substance, 900) } : {}),
-			...(take(pick.take, 400) ? { take: take(pick.take, 400) } : {}),
+			...(whyClick ? { whyClick } : {}),
+			...(substance ? { substance } : {}),
+			...(judgement ? { take: judgement } : {}),
 		};
 	}
+	if (tells > 0) console.log(`[style] enrich AI 腔命中 ${tells} 处,标点已规整`);
 	return out;
 }
 
@@ -997,6 +1167,11 @@ export async function collectEnrichTexts(
 	items: { id: string; url: string }[],
 	excerptById: Map<string, string>,
 	log: (msg: string) => void = () => {},
+	/**
+	 * 正文抽取的接缝:默认是 shared 里的正则版(哪个运行时都能跑);Node 侧
+	 * (Lambda/CLI)注入 readability 版,抽得干净得多。签名只认 URL→纯文本。
+	 */
+	fetchText: (url: string) => Promise<string> = fetchArticleText,
 ): Promise<Map<string, string>> {
 	const out = new Map<string, string>();
 	const needFetch: { id: string; url: string }[] = [];
@@ -1005,7 +1180,7 @@ export async function collectEnrichTexts(
 		if (excerpt.length >= TEASER_THRESHOLD) out.set(item.id, excerpt.slice(0, ENRICH_TEXT_CAP));
 		else needFetch.push(item);
 	}
-	const fetched = await Promise.all(needFetch.map(async (it) => [it.id, await fetchArticleText(it.url)] as const));
+	const fetched = await Promise.all(needFetch.map(async (it) => [it.id, await fetchText(it.url)] as const));
 	for (const [id, text] of fetched) {
 		const excerpt = excerptById.get(id) ?? "";
 		// 抓回来的比 feed 摘要长才算数,否则 feed 那点导语还更干净
@@ -1028,6 +1203,7 @@ export async function enrichBrief(
 	trackers: Tracker[],
 	call: (system: string, user: string) => Promise<string>,
 	log: (msg: string) => void = () => {},
+	fetchText?: (url: string) => Promise<string>,
 ): Promise<number> {
 	const byTracker = new Map(trackers.map((t) => [t.key, t]));
 	const targets: EnrichSource[] = [];
@@ -1058,7 +1234,7 @@ export async function enrichBrief(
 
 	try {
 		const excerptById = new Map(fetched.candidates.map((c) => [c.id, c.excerpt]));
-		const texts = await collectEnrichTexts(targets, excerptById, log);
+		const texts = await collectEnrichTexts(targets, excerptById, log, fetchText);
 		for (const t of targets) t.text = texts.get(t.id) ?? "";
 		// 拿不到足量正文的条目直接不送:让它保持第一段的路由式文案,
 		// 也好过一段看起来像事实、实则靠标题猜出来的「实质」。

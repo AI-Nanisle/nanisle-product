@@ -59,6 +59,8 @@ export interface AppEnv {
 	DEEPSEEK_API_KEY?: string;
 	/** Secret. AI_PROVIDER=anthropic only. */
 	ANTHROPIC_API_KEY?: string;
+	/** Secret. AI_PROVIDER=anthropic 的另一种凭证:Claude Code 订阅的 setup token(OAuth)。 */
+	ANTHROPIC_AUTH_TOKEN?: string;
 	/** Base URL of an Anthropic-compatible endpoint — AI_PROVIDER=gateway only. */
 	AI_GATEWAY_URL?: string;
 	/** Secret. Virtual key issued by the gateway, sent as `Authorization: Bearer`. */
@@ -73,6 +75,7 @@ export function aiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConfig {
 		maxOutputTokens: env.AI_MAX_OUTPUT_TOKENS,
 		deepseekApiKey: env.DEEPSEEK_API_KEY,
 		anthropicApiKey: env.ANTHROPIC_API_KEY,
+		anthropicAuthToken: env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: env.AI_GATEWAY_URL,
 		gatewayKey: env.AI_GATEWAY_KEY,
 		...overrides,

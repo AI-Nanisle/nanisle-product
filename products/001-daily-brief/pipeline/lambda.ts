@@ -13,16 +13,19 @@
 import { Buffer } from "node:buffer";
 import {
 	OFF_AXIS_MISS_LIMIT,
+	SEEN_WINDOW_DAYS,
 	activeTrackers,
 	applyHealth,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
+	dropSeenCandidates,
 	fetchAllSources,
 	enrichBrief,
 	fnv1a,
 	mockEditorial,
 	parseEditorialJson,
+	seenItemIds,
 } from "../src/shared/pipeline-core";
 import type { FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../src/shared/default-sources";
@@ -31,7 +34,20 @@ import type { AiConfig } from "../src/shared/ai";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
 import type { FeedbackDigest } from "../src/shared/feedback";
 import { applyThreads, stripTransient, threadsPromptBlock } from "../src/shared/threads";
-import { WEEKLY_WINDOW_DAYS, applyProposal, computeWeeklyMetrics, isCooled, isoWeek, makeProposals } from "../src/shared/weekly";
+import {
+	MAX_PROPOSALS_PER_WEEK,
+	WEEKLY_WINDOW_DAYS,
+	applyProposal,
+	computeWeeklyMetrics,
+	isCooled,
+	isoWeek,
+	makeProposals,
+	makeSourceAddProposal,
+	queryFeedDomains,
+} from "../src/shared/weekly";
+// probeFeed 只依赖全局 fetch,放在 worker/ 只是历史路径,Lambda 直接用
+import { probeFeed } from "../src/worker/feeds";
+import { fetchArticleTextNode, resolvePickedGoogleUrls } from "./extract";
 import { MAX_CHANGELOG } from "../src/shared/pipeline-core";
 import { dynamoStore } from "../src/shared/store-dynamo";
 import { renderBriefEmail, sendBriefEmail, unsubToken } from "../src/shared/email";
@@ -76,12 +92,30 @@ function envAiConfig(): AiConfig {
 	return {
 		provider: process.env.AI_PROVIDER,
 		model: process.env.AI_MODEL,
-		// 编辑 JSON 需要空间;没显式配置时给足,别让 1024 默认值截断整期
-		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "4096",
+		// 编辑 JSON 需要空间,V4 的思考也占同一份输出预算——默认给足,别让截断毁整期
+		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "16384",
 		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
 		anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+		anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: process.env.AI_GATEWAY_URL,
 		gatewayKey: process.env.AI_GATEWAY_KEY,
+	};
+}
+
+/**
+ * 成稿(enrich)的换模开关:ENRICH_AI_PROVIDER / ENRICH_AI_MODEL 只覆盖成稿
+ * 这一段——读者读到的散文全在这里,是换更好模型收益最大的一段;选材 JSON
+ * 留给便宜模型。没设就跟主配置走,一切照旧。
+ */
+function envEnrichAiConfig(base: AiConfig): AiConfig {
+	const provider = process.env.ENRICH_AI_PROVIDER;
+	const model = process.env.ENRICH_AI_MODEL;
+	if (!provider && !model) return base;
+	return {
+		...base,
+		...(provider ? { provider } : {}),
+		...(model ? { model } : {}),
+		...(process.env.ENRICH_AI_MAX_OUTPUT_TOKENS ? { maxOutputTokens: process.env.ENRICH_AI_MAX_OUTPUT_TOKENS } : {}),
 	};
 }
 
@@ -157,6 +191,8 @@ interface UserRun {
 async function produceBrief(
 	store: Store,
 	cfg: AiConfig,
+	/** 成稿段的 AI 配置(ENRICH_* 开关,没设时就是 cfg 本身)。 */
+	enrichCfg: AiConfig,
 	run: UserRun,
 	fetched: FetchResult,
 	date: string,
@@ -164,6 +200,23 @@ async function produceBrief(
 	/** H1 · 本轮抓取结果,**已换算成该用户自己的源 key**(全量模式抓的是并集)。 */
 	healthByKey: Map<string, { ok: boolean; error?: string }>,
 ): Promise<{ picked: number; genCount: number; brief: Brief }> {
+	// 近期已入选的绝不重复推荐:类目窗口放宽后(blog/podcast 看 7 天),同一篇
+	// 长文会连续几天出现在候选池里,这道闸在编辑看到候选之前就把它挡掉。
+	// 读取失败只是少了防重复,不该挡当天的简报。
+	try {
+		const cutoff = new Date(Date.now() - SEEN_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+		const dates = (await store.listBriefDates(run.email)).filter((d) => d >= cutoff && d !== date);
+		const prior: Brief[] = [];
+		for (const d of dates) {
+			const stored = await store.getBrief(run.email, d);
+			if (stored) prior.push(stored.brief);
+		}
+		const dropped = dropSeenCandidates(fetched, seenItemIds(prior));
+		if (dropped > 0) console.log(`[${run.email}] [seen] ${dropped} 条近期已入选,不重复推荐`);
+	} catch (err) {
+		console.log(`[${run.email}] [seen] 读取往期失败,本期不做防重复: ${err}`);
+	}
+
 	// R2 · 近 7 天反馈先读出来:它既进选材提示词,也是回响的原料。读失败会
 	// 降级成空摘要(见 loadFeedbackDigest),不会让当天的简报生不出来。
 	const digest = await loadFeedbackDigest(store, run.email, { log: (m) => console.log(`[${run.email}] ${m}`) });
@@ -183,6 +236,13 @@ async function produceBrief(
 	}
 
 	const editorial = await runEditorial(cfg, fetched, run.config.trackers, digest, off.enabled, threadsByTracker);
+	// 入选条目里的 Google News 跳转链换成原文 URL(id 不变):阅读页、成稿、
+	// HN 讨论、每周域名统计从此都落在真实页面上。解析失败保留跳转链,照常降级。
+	const pickedIds = new Set([
+		...Object.values(editorial.sections).flat().flatMap((p) => [p.id, ...(p.merged ?? [])]),
+		...(editorial.offAxis ? [editorial.offAxis.id] : []),
+	]);
+	await resolvePickedGoogleUrls(fetched.candidates, pickedIds, (m) => console.log(`[${run.email}] ${m}`));
 	const brief = await assembleBrief(editorial, fetched, {
 		date,
 		sourceCount: fetched.sourcesOk,
@@ -193,10 +253,15 @@ async function produceBrief(
 	// R3 · 回响在简报成形之后算:它要比对「上一期 vs 这一期」的真实条数
 	// 第二段 · 成稿:只对已入选的条目取全文,写实质与判断。选材阶段每条只看
 	// 800 字,写不出深度;这一次调用才是简报从「标题改写」变成有内容的地方。
-	if (resolveProvider(cfg) !== "mock") {
+	// 正文抽取用 readability(Node 侧注入),成稿模型走 ENRICH_* 开关。
+	if (resolveProvider(enrichCfg) !== "mock") {
 		await enrichBrief(brief, fetched, run.config.trackers, (system, user) =>
-			complete(cfg, { prompt: user, system, json: true }).then((r) => r.text),
+			complete(enrichCfg, { prompt: user, system, json: true }).then((r) => {
+				console.log(`[${run.email}] [enrich] via ${r.provider}/${r.model}`);
+				return r.text;
+			}),
 			(m) => console.log(`[${run.email}] ${m}`),
+			fetchArticleTextNode,
 		);
 	}
 
@@ -267,7 +332,7 @@ async function pushBriefEmail(email: string, brief: Brief): Promise<boolean> {
 
 // ---------- 单用户模式(立即生成) ----------
 
-async function generateOne(store: Store, cfg: AiConfig, email: string, date: string) {
+async function generateOne(store: Store, cfg: AiConfig, enrichCfg: AiConfig, email: string, date: string) {
 	const config = await store.getConfig(email);
 	if (!config) return response(422, { error: "该用户还没有配置。先在配置页建一个追踪器。" });
 	if (activeTrackers(config.trackers).length === 0) {
@@ -279,7 +344,7 @@ async function generateOne(store: Store, cfg: AiConfig, email: string, date: str
 	}
 	// 单用户模式抓的就是他自己的源,status 的 key 直接可用
 	const health = new Map(fetched.sourceStatus.map((s) => [s.key, { ok: s.ok, error: s.error }]));
-	const { picked, genCount } = await produceBrief(store, cfg, { email, config }, fetched, date, true, health);
+	const { picked, genCount } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, true, health);
 	return response(200, {
 		ok: true,
 		date,
@@ -299,7 +364,7 @@ interface UnionEntry {
 	perUser: Map<string, SourceConfig>;
 }
 
-async function generateAll(store: Store, cfg: AiConfig, date: string) {
+async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, date: string) {
 	const emails = await store.listWhitelist();
 	const runs: UserRun[] = [];
 	for (const email of emails) {
@@ -385,7 +450,7 @@ async function generateAll(store: Store, cfg: AiConfig, date: string) {
 				results.push({ email: run.email, ok: false, error: "no candidates" });
 				continue;
 			}
-			const { picked, brief } = await produceBrief(store, cfg, run, userFetched, date, false, health);
+			const { picked, brief } = await produceBrief(store, cfg, enrichCfg, run, userFetched, date, false, health);
 			console.log(`[all] ${run.email}: ok picked=${picked} scanned=${userFetched.scanned}`);
 			// E1 · 刊已落库,再发提醒邮件。缺省为开(prefs.emailPush !== false);
 			// 发信失败只记日志——邮件是门铃,门铃坏了不能把刊也砸了。
@@ -502,6 +567,25 @@ async function runWeeklyForUser(store: Store, email: string, now: Date): Promise
 			await store.putProposal(email, p);
 			created.push(p.summary);
 		}
+
+		// 观察式发现(docs/02 §7.3 第 4 层):检索源反复带回同一个域名,说明那个
+		// 站就是用户要的具体源。纯统计选出域名,真实试抓通过才成为提案——
+		// 反捏造纪律和向导一致:没抓通的 URL 不会出现在用户面前。
+		if (created.length < MAX_PROPOSALS_PER_WEEK) {
+			for (const found of queryFeedDomains(working, briefs).slice(0, 2)) {
+				if (created.length >= MAX_PROPOSALS_PER_WEEK) break;
+				try {
+					const probe = await probeFeed(found.domain);
+					if (!probe.ok) continue;
+					const proposal = makeSourceAddProposal(found, probe, working, metrics, now, `${week}-${seq++}`);
+					if (!proposal || pendingKeys.has(JSON.stringify(proposal.patch))) continue;
+					await store.putProposal(email, proposal);
+					created.push(proposal.summary);
+				} catch (err) {
+					console.log(`[weekly] ${email}: probe ${found.domain} FAILED: ${err}`);
+				}
+			}
+		}
 		working = { ...working, prefs: { ...(working.prefs ?? {}), lastWeeklyAt: week } };
 	}
 
@@ -543,12 +627,13 @@ export async function handler(event: GenerateEvent) {
 		return response(500, { error: err instanceof Error ? err.message : String(err) });
 	}
 	const cfg = envAiConfig();
+	const enrichCfg = envEnrichAiConfig(cfg);
 	const date = briefDate(process.env.BRIEF_TZ ?? "America/New_York");
 
 	try {
 		if (payload.mode === "weekly") return await generateWeekly(store, new Date());
-		if (payload.mode === "all") return await generateAll(store, cfg, date);
-		if (payload.email) return await generateOne(store, cfg, payload.email, date);
+		if (payload.mode === "all") return await generateAll(store, cfg, enrichCfg, date);
+		if (payload.email) return await generateOne(store, cfg, enrichCfg, payload.email, date);
 		return response(400, { error: 'payload must be {"mode":"all"} or {"email":"..."}' });
 	} catch (err) {
 		if (err instanceof AiError) return response(err.status, { error: err.message });

@@ -5,8 +5,15 @@
 # AI seam mode: deepseek (production default) | mock (zero keys) | anthropic | gateway.
 # deepseek without DEEPSEEK_API_KEY falls back to mock, so local dev needs no keys.
 AI_PROVIDER=mock
-#AI_MODEL=deepseek-chat
+# deepseek 默认 deepseek-v4-pro(deepseek-chat 已于 2026-07-24 退役);省钱档 deepseek-v4-flash
+#AI_MODEL=deepseek-v4-pro
 AI_MAX_OUTPUT_TOKENS=4096
+# 成稿(enrich)换模对照:只覆盖成稿那一次调用,选材照旧走 AI_PROVIDER。
+# 例:ENRICH_AI_PROVIDER=anthropic + 下面的 ANTHROPIC_AUTH_TOKEN,即可用
+# Claude 订阅额度跑成稿、deepseek 跑选材,npm run generate 直接对照两版文风。
+#ENRICH_AI_PROVIDER=anthropic
+#ENRICH_AI_MODEL=claude-opus-5
+#ENRICH_AI_MAX_OUTPUT_TOKENS=4096
 # Shared with the nanisle main site: verifies SSO handoff tokens so readers can
 # sign in with their nanisle account. Leave unset locally for open access.
 #NANISLE_SSO_SECRET=same-value-as-main-site
@@ -48,6 +55,9 @@ APP_URL=http://localhost:3000/products/daily-brief
 #DEEPSEEK_API_KEY=sk-...
 # AI_PROVIDER=anthropic only:
 #ANTHROPIC_API_KEY=sk-ant-...
+# 或者用 Claude Code 订阅的 setup token(`claude setup-token` 生成,sk-ant-oat 开头,
+# OAuth 凭证走 Bearer 头)。两个都给时 ANTHROPIC_API_KEY 优先。
+#ANTHROPIC_AUTH_TOKEN=sk-ant-oat...
 # AI_PROVIDER=gateway only:
 #AI_GATEWAY_URL=https://your-gateway.example.com
 #AI_GATEWAY_KEY=vk-...
