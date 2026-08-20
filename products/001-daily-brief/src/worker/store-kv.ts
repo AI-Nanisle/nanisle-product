@@ -9,11 +9,12 @@
 //   user:<email>:fb:<ts>:<uuid>   反馈事件(expirationTtl 90 天)
 //   user:<email>:click:<ts>:<uuid> 点击事件(同上)
 //   user:<email>:thread:<trackerKey>:<threadKey>  线索台账(无 TTL)
+//   user:<email>:note:<date>:<itemId>  想法台账(无 TTL)
 //   user:<email>:proposal:<id>    周自评提案
 
-import type { Brief, Thread } from "../shared/types";
+import type { Brief, ItemNote, Thread } from "../shared/types";
 import type { Store, StoredBrief, StoredEvent } from "../shared/store";
-import { EVENT_TTL_S, MAX_EVENTS_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "../shared/store";
+import { EVENT_TTL_S, MAX_EVENTS_READ, MAX_NOTES_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "../shared/store";
 import type { Proposal } from "../shared/weekly";
 import { dynamoStore } from "../shared/store-dynamo";
 import type { AppEnv } from "./env";
@@ -132,6 +133,28 @@ export function kvStore(kv: KVNamespace): Store {
 
 		async listBriefDates(email) {
 			return listDates(email);
+		},
+
+		async getNote(email, date, itemId) {
+			const raw = await kv.get(`user:${email}:note:${date}:${itemId}`);
+			return raw ? (JSON.parse(raw) as ItemNote) : null;
+		},
+
+		async putNote(email, note) {
+			// 想法台账不设 TTL:同线索台账,读者自己的长期资产
+			await kv.put(`user:${email}:note:${note.date}:${note.itemId}`, JSON.stringify(note));
+		},
+
+		async listNotes(email, limit = MAX_NOTES_READ) {
+			const prefix = `user:${email}:note:`;
+			// 键名以日期开头,升序 list 反转即「新账在前」(同 listDates 的道理)
+			const list = await kv.list({ prefix, limit: 1000 });
+			const keys = list.keys
+				.map((k) => k.name)
+				.reverse()
+				.slice(0, Math.min(Math.max(1, limit), MAX_NOTES_READ));
+			const raws = await Promise.all(keys.map((k) => kv.get(k)));
+			return raws.filter((r): r is string => Boolean(r)).map((r) => JSON.parse(r) as ItemNote);
 		},
 	};
 }

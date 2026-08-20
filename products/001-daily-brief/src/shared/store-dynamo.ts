@@ -11,13 +11,14 @@
 //   USER#<email> / FB#<ISO>#<uuid>               反馈事件,ttl 90 天
 //   USER#<email> / CLICK#<ISO>#<uuid>            点击事件,ttl 90 天
 //   USER#<email> / THREAD#<trackerKey>#<threadKey>  线索台账,**不设 ttl**
+//   USER#<email> / NOTE#<date>#<itemId>          想法台账(N1),**不设 ttl**
 //   USER#<email> / PROPOSAL#<id>                 周自评提案(S3),ttl 60 天
 //   USER#<email> / METRICS#<YYYY-Www>            周指标快照(S1),ttl 400 天
 
 import { AwsClient } from "aws4fetch";
-import type { Brief, FeedbackEvent, FeedbackKind, Thread } from "./types";
+import type { Brief, FeedbackEvent, FeedbackKind, ItemNote, Thread } from "./types";
 import type { ClickEvent, Store, StoredBrief, StoredEvent } from "./store";
-import { EVENT_TTL_S, MAX_EVENTS_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "./store";
+import { EVENT_TTL_S, MAX_EVENTS_READ, MAX_NOTES_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "./store";
 import type { Proposal } from "./weekly";
 
 export interface DynamoOptions {
@@ -311,6 +312,42 @@ export function dynamoStore(opts: DynamoOptions): Store {
 			return (out.Items ?? [])
 				.map((item) => s(item.SK)?.slice("BRIEF#".length) ?? "")
 				.filter(Boolean);
+		},
+
+		async getNote(email, date, itemId) {
+			const out = await call<{ Item?: Item }>("GetItem", {
+				Key: { PK: { S: `USER#${email}` }, SK: { S: `NOTE#${date}#${itemId}` } },
+			});
+			const raw = s(out.Item?.note);
+			return raw ? (JSON.parse(raw) as ItemNote) : null;
+		},
+
+		async putNote(email, note) {
+			// 想法台账不设 ttl:同 putThread,长期资产不跟事件流一起过期
+			await call("PutItem", {
+				Item: {
+					PK: { S: `USER#${email}` },
+					SK: { S: `NOTE#${note.date}#${note.itemId}` },
+					note: { S: JSON.stringify(note) },
+					updatedAt: { S: note.updatedAt },
+				},
+			});
+		},
+
+		async listNotes(email, limit = MAX_NOTES_READ) {
+			// SK 是 NOTE#<date>#<itemId>,日期字典序即时间序,倒序 Query 就是新账在前
+			const out = await call<{ Items?: Item[] }>("Query", {
+				KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+				ExpressionAttributeValues: { ":pk": { S: `USER#${email}` }, ":prefix": { S: "NOTE#" } },
+				ScanIndexForward: false,
+				Limit: Math.min(Math.max(1, limit), MAX_NOTES_READ),
+			});
+			const notes: ItemNote[] = [];
+			for (const item of out.Items ?? []) {
+				const raw = s(item.note);
+				if (raw) notes.push(JSON.parse(raw) as ItemNote);
+			}
+			return notes;
 		},
 	};
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Brief, BriefItem, DroppedItem, FeedbackKind } from "../shared/types";
 import { ISSUE_ITEM_ID } from "../shared/types";
 import Config from "./Config";
+import Notes from "./Notes";
 import { SiteHeader } from "./SiteChrome";
 import { apiPath, pathForView, productPath, type ProductView, viewFromPathname } from "./paths";
 
@@ -98,7 +99,7 @@ function ItemFeedback({ date, itemId }: { date: string; itemId: string }) {
 						onClick={send}
 						className="font-mono-sc text-[12px] px-3 rounded-md border border-[var(--line-strong)] hover:bg-[var(--ink)] hover:text-[var(--paper)] transition-colors cursor-pointer"
 					>
-						{sent ? "已收到" : "发送"}
+						{sent ? "已记入想法页" : "发送"}
 					</button>
 				</div>
 			)}
@@ -503,7 +504,7 @@ function ProductPage() {
 						No.001 · 每周一个产品
 					</span>
 					<div className="inline-flex items-center gap-0.5 rounded-lg border border-[var(--line)] bg-[var(--card)] p-[3px]">
-						{(["brief", "config"] as const).map((v) => (
+						{(["brief", "notes", "config"] as const).map((v) => (
 							<button
 								key={v}
 								type="button"
@@ -512,7 +513,7 @@ function ProductPage() {
 									view === v ? "bg-[var(--ink)] text-[var(--paper)]" : "text-[var(--ink-2)] hover:bg-[var(--paper-deep)] hover:text-[var(--ink)]"
 								}`}
 							>
-								{v === "brief" ? "简报" : "配置"}
+								{v === "brief" ? "简报" : v === "notes" ? "想法" : "配置"}
 							</button>
 						))}
 					</div>
@@ -525,6 +526,11 @@ function ProductPage() {
 						<>
 							<span className="text-[var(--accent)] font-medium">配置 · 追踪定义</span>
 							<span>AI 起草,你圈改,虚线处都能直接编辑</span>
+						</>
+					) : view === "notes" ? (
+						<>
+							<span className="text-[var(--accent)] font-medium">想法 · 你留下的反馈与思考</span>
+							<span>按日期记账,原文快照不过期,随时补记</span>
 						</>
 					) : brief ? (
 						<>
@@ -606,6 +612,8 @@ function ProductPage() {
 
 			{view === "config" ? (
 				<Config />
+			) : view === "notes" ? (
+				<Notes />
 			) : !brief ? (
 				/* 空态:还没生成过任何一期。引导两步——先定义追踪器,再生成 */
 				<div className="mx-auto max-w-[672px]">

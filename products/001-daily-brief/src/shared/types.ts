@@ -193,3 +193,36 @@ export interface FeedbackEvent {
 	text?: string;
 	at: string;
 }
+
+/** N1 · 想法台账里的一次表态:一票或一段话,带时间。 */
+export interface NoteEntry {
+	at: string;
+	kind: FeedbackKind;
+	text?: string;
+}
+
+/**
+ * N1 · 想法台账:一条简报内容名下,读者留过的全部反馈与想法。
+ *
+ * 事件流(FeedbackEvent)是写给选材模型的——只存 itemId、90 天过期;想法是
+ * 读者自己的资产,道理同 T1 的线索台账:字段是冗余快照(标题/链接/分区都
+ * 存下来,不指回简报),**不设 TTL**。简报会过期,「我当时是怎么想的」不该
+ * 跟着一起失忆。刊级反馈(期末一问)没有条目可指,快照字段全缺省,靠
+ * itemId === ISSUE_ITEM_ID 识别。
+ */
+export interface ItemNote {
+	/** 所属简报的日期(YYYY-MM-DD)。 */
+	date: string;
+	itemId: string;
+	/** 落台账当时从简报里抄下的快照;简报已被覆盖/过期时缺省。 */
+	title?: string;
+	url?: string;
+	source?: string;
+	sectionTitle?: string;
+	/** 时间正序,追加写;满了挤掉最旧(有界状态,同 MAX_THREAD_EVIDENCE)。 */
+	entries: NoteEntry[];
+	updatedAt: string;
+}
+
+/** 一条内容名下最多留几次表态。50 = 对同一条写 50 段想法,现实里到不了。 */
+export const MAX_NOTE_ENTRIES = 50;

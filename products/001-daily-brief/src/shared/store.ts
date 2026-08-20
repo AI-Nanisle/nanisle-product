@@ -4,7 +4,7 @@
 // 硬规矩:fork 者零配置 `npm run dev` 必须能跑通全流程,AWS 凭证不是前置条件。
 
 import type { SourceConfig, Tracker } from "./pipeline-core";
-import type { Brief, FeedbackEvent, Thread } from "./types";
+import type { Brief, FeedbackEvent, ItemNote, Thread } from "./types";
 import type { Proposal } from "./weekly";
 
 /** 未配置 SSO / AWS 时的固定本地用户(单用户模式)。 */
@@ -122,7 +122,19 @@ export interface Store {
 	putMetrics(email: string, week: string, metrics: unknown): Promise<void>;
 	/** 阅读页日期下拉,倒序。 */
 	listBriefDates(email: string): Promise<string[]>;
+	/** N2 · 想法台账:追加前回读一条(读改写在 Worker 侧,写入频率是人手速)。 */
+	getNote(email: string, date: string, itemId: string): Promise<ItemNote | null>;
+	/** N2 · 整条覆盖写。**不设 TTL**——同线索台账,这是长期资产。 */
+	putNote(email: string, note: ItemNote): Promise<void>;
+	/** N2 · 想法页整页一次拉回,按简报日期倒序,最多 MAX_NOTES_READ 条。 */
+	listNotes(email: string, limit?: number): Promise<ItemNote[]>;
 }
+
+/**
+ * 一次 listNotes 最多读回多少条账。一天至多留几条想法,300 条 ≈ 大半年的量;
+ * 真攒到上限时最老的想法仍在库里,只是这一页先不渲染——将来再谈分页。
+ */
+export const MAX_NOTES_READ = 300;
 
 /** 事件条目的保存期:90 天后它已经完成使命(喂给编辑提示词的只看近 7 天)。 */
 export const EVENT_TTL_S = 90 * 24 * 3600;

@@ -11,12 +11,13 @@ export function apiPath(path: string): string {
 	return productPath(`api/${path.replace(/^\/+/, "")}`);
 }
 
-export type ProductView = "brief" | "config";
+export type ProductView = "brief" | "notes" | "config";
 
 export function viewFromPathname(pathname: string): ProductView {
-	return pathname === productPath("config") || pathname.startsWith(`${productPath("config")}/`)
-		? "config"
-		: "brief";
+	for (const view of ["config", "notes"] as const) {
+		if (pathname === productPath(view) || pathname.startsWith(`${productPath(view)}/`)) return view;
+	}
+	return "brief";
 }
 
 export function pathForView(view: ProductView): string {

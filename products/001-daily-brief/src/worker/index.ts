@@ -39,6 +39,7 @@ import {
 } from "../shared/pipeline-core";
 import type { SourceConfig, TrackerSourceRule } from "../shared/pipeline-core";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../shared/feedback";
+import { applyEventToNote } from "../shared/notes";
 import { applyThreads, computeStage, sortThreadsForDisplay, stripTransient, threadsPromptBlock } from "../shared/threads";
 import { PROPOSAL_COOLING_DAYS, applyProposal } from "../shared/weekly";
 import { DEFAULT_FILTERS } from "../shared/default-sources";
@@ -220,8 +221,28 @@ app.post("/api/feedback", userGuard, async (c) => {
 		...(typeof text === "string" && text.trim() ? { text: text.trim() } : {}),
 		at: new Date().toISOString(),
 	};
-	await c.get("store").appendEvent(c.get("email"), event);
+	const store = c.get("store");
+	const email = c.get("email");
+	await store.appendEvent(email, event);
+	// N1 · 同一条反馈同时落想法台账:事件是写给选材模型的(90 天过期),台账是
+	// 读者自己回溯用的(不过期,自带快照)。台账写坏了不拦反馈本身——事件已
+	// 落地,选材照常;只有回看少一条,下一条反馈还有机会补账。
+	try {
+		const existing = await store.getNote(email, date, itemId);
+		// 快照只在建账时抄;刊级反馈没有条目可查,别为它白读一次简报
+		const brief =
+			existing || itemId === ISSUE_ITEM_ID ? null : ((await store.getBrief(email, date))?.brief ?? null);
+		await store.putNote(email, applyEventToNote(existing, event, brief));
+	} catch (err) {
+		console.error("feedback: note ledger write failed", err);
+	}
 	return c.json({ ok: true });
+});
+
+// N3 · 想法台账的读口:整页一次拉回(新账在前,MAX_NOTES_READ 封顶),搜索
+// 和过滤都在前端做——几百条的量级不值得为它设计服务端分页与检索。
+app.get("/api/notes", userGuard, async (c) => {
+	return c.json({ notes: await c.get("store").listNotes(c.get("email")) });
 });
 
 // X2 · 轴外位开关 + E1 · 邮件提醒开关。护栏之二:读者随时能关(关掉就真的没有)。
