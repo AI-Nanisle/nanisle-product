@@ -58,7 +58,8 @@ import {
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
 import { verifyUnsubToken } from "../shared/email";
-import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, QUOTA_LIMITS, offAxisEnabled } from "../shared/store";
+import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, QUOTA_LIMITS, genStepWriter, offAxisEnabled } from "../shared/store";
+import type { GenRun, Store } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
 import type { WizardContext, WizardResult } from "./wizard";
@@ -869,63 +870,205 @@ async function invokeGenerate(env: AppEnv, payload: Record<string, unknown>): Pr
 	});
 }
 
+/**
+ * 一趟生成实测约 4-5 分钟(deepseek-v4-pro 选材 + 成稿两次大输入调用),
+ * Lambda 自身的天花板是 15 分钟(infra/lib/daily-brief-stack.ts)。进度记录
+ * 超过这个岁数还没收尾、也没见到新简报落库,就判这趟已死:status 报失败,
+ * 并发闸放行下一次点火。判早了代价只是一句错话(简报落库后真相自己浮出来),
+ * 判晚了是把人白白闸在门外,所以取实测的两倍多一点。
+ */
+const GEN_RUNNING_MAX_MS = 10 * 60_000;
+/**
+ * 转调在这个时间之内就断,基本是「请求根本没送进 Lambda」(URL 错、签名错、
+ * 拒连),可以放心退额度;比它更晚才断的是边缘 ~100s 超时——Lambda 其实还在
+ * 跑,简报稍后会自己落库,这时既不退钱也不判死,把收尾交给落库推断。
+ */
+const GEN_FAST_FAIL_MS = 15_000;
+
+type GenOutcome = { status: number; body: Record<string, unknown> };
+
+/**
+ * 一趟生成的当前真相。进度记录没有 finishedAt 不一定是还在跑:waitUntil 可能
+ * 在 Lambda 回话前就被回收,收尾记录永远写不上。所以拿简报落库时间对照——
+ * generatedAt >= startedAt 即这趟已成;两头都没有且过了 GEN_RUNNING_MAX_MS,
+ * 才判失败。POST 的并发闸和 GET status 都从这里读,别各自另写一套。
+ */
+async function resolveGenState(
+	store: Store,
+	email: string,
+): Promise<{ state: "idle" | "running" | "done" | "failed"; run?: GenRun }> {
+	const run = await store.getGenRun(email);
+	if (!run) return { state: "idle" };
+	if (run.finishedAt) return { state: run.ok ? "done" : "failed", run };
+	const stored = await store.getBrief(email);
+	if (stored && stored.generatedAt >= run.startedAt) return { state: "done", run };
+	// 判死的时钟从最近一次进度写入起算,不是起跑:进度还在走就没死
+	if (Date.now() - new Date(run.updatedAt ?? run.startedAt).getTime() > GEN_RUNNING_MAX_MS) {
+		return {
+			state: "failed",
+			run: { ...run, error: "这次生成一直没有回音,多半已经失败,请再试一次。" },
+		};
+	}
+	return { state: "running", run };
+}
+
+/** 生产路径:转调 Lambda 并等它回话(在 waitUntil 里跑)。null = 边缘断开但 Lambda 多半还在跑,别写收尾。 */
+async function generateViaLambda(
+	env: AppEnv,
+	store: Store,
+	email: string,
+	today: string,
+	startedAt: string,
+): Promise<GenOutcome | null> {
+	const t0 = Date.now();
+	let res: Response;
+	try {
+		// runStartedAt = 进度记录的键:Lambda 每过一个分段就写回 GENRUN,
+		// 前端轮询 status 才有「第 X/5 步」可显示
+		res = await invokeGenerate(env, { email, runStartedAt: startedAt });
+	} catch (err) {
+		console.error("generate: lambda invoke failed", err);
+		if (Date.now() - t0 > GEN_FAST_FAIL_MS) return null;
+		// 快速失败 = 请求没送进 Lambda,一个 token 都没花,把刚占的额度退回去
+		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
+		return { status: 502, body: { error: "生成服务暂时不可用,请稍后重试。" } };
+	}
+	const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+	if (!res.ok || !body) {
+		console.error("generate: lambda returned", res.status, JSON.stringify(body)?.slice(0, 500));
+		// 边缘超时以 5xx 空壳响应的形态出现(没有 JSON 体):同上,Lambda 还在跑
+		if (!body && res.status >= 500 && Date.now() - t0 > GEN_FAST_FAIL_MS) return null;
+		// 422 是「没有生效的追踪器 / 今天没抓到候选」——Lambda 在这三种情况下
+		// 都是**调模型之前**就返回的,零 token,退还。其余状态码一律不退:
+		// 它跑过了,钱可能已经花在半截的管线上。
+		if (res.status === 422) {
+			await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
+		}
+		const error = typeof body?.error === "string" ? body.error : "生成失败,请稍后重试。";
+		return { status: 502, body: { error } };
+	}
+	return { status: 200, body };
+}
+
+/** 后台跑完一趟生成,把收尾写回进度记录(写不上也不要紧,resolveGenState 会用落库时间兜底)。 */
+async function performGenerate(
+	env: AppEnv,
+	store: Store,
+	email: string,
+	today: string,
+	startedAt: string,
+): Promise<void> {
+	let outcome: GenOutcome | null;
+	try {
+		outcome =
+			env.GENERATE_URL && awsConfigured(env)
+				? await generateViaLambda(env, store, email, today, startedAt)
+				: await generateInline(env, store, email, today, startedAt);
+	} catch (err) {
+		console.error("generate: run failed", err);
+		outcome = { status: 500, body: { error: "生成失败,请稍后重试。" } };
+	}
+	if (!outcome) return;
+	const ok = outcome.status < 400 && outcome.body.ok === true;
+	const b = outcome.body;
+	await store
+		.putGenRun(email, {
+			startedAt,
+			finishedAt: new Date().toISOString(),
+			ok,
+			...(ok
+				? {
+						result: {
+							date: typeof b.date === "string" ? b.date : today,
+							picked: typeof b.picked === "number" ? b.picked : 0,
+							scanned: typeof b.scanned === "number" ? b.scanned : 0,
+							...(Array.isArray(b.sourceErrors) && b.sourceErrors.length > 0
+								? { sourceErrors: b.sourceErrors as { name: string; error: string }[] }
+								: {}),
+						},
+					}
+				: { error: typeof b.error === "string" ? b.error : `生成失败(HTTP ${outcome.status})。` }),
+		})
+		.catch((err) => console.error("generate: record finish failed", err));
+}
+
 app.post("/api/generate", userAiGuard, async (c) => {
 	const env = c.env;
 	const store = c.get("store");
 	const email = c.get("email");
 	const today = briefDate(env.BRIEF_TZ ?? "America/New_York");
 
+	// 并发闸:同一人已有一趟在跑就不再点火(一趟 = 完整管线,全站最贵的动作),
+	// 也不占额度。前端拿到 409 会转去盯已有那趟的进度。
+	const existing = await resolveGenState(store, email);
+	if (existing.state === "running") {
+		return c.json(
+			{ error: "已有一次生成正在进行。", running: true, startedAt: existing.run?.startedAt },
+			409,
+		);
+	}
+
 	// 限额:**先占位后干活**(§8.3)。原子自增 + 判上限在同一个 DynamoDB 条件
-	// 写里。旧版是「读计数 → 转调 Lambda 等 30–60 秒 → Lambda 结束时才自增」,
+	// 写里。旧版是「读计数 → 转调 Lambda 等几分钟 → Lambda 结束时才自增」,
 	// 那期间并发打进来的请求会全部读到同一个旧计数、全部通过检查,10 次/日的
 	// 闸门在一次并发爆发面前形同虚设——而这是全站最贵的端点。
 	const quota = await store.reserveQuota(email, today, "gen");
 	if (!quota.ok) return c.json({ error: GEN_LIMIT_MSG }, 429);
 
-	// 生产路径:转调 Lambda,同步等结果(30-60 秒;Worker 等子请求不计 CPU)
-	if (env.GENERATE_URL && awsConfigured(env)) {
-		let res: Response;
-		try {
-			res = await invokeGenerate(env, { email });
-		} catch (err) {
-			console.error("generate: lambda invoke failed", err);
-			// 根本没调通 = 一个 token 都没花,把刚占的额度退回去。Lambda 返回 502
-			// 的那条路不退:它跑过了,钱可能已经花在半截的管线上。
-			await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
-			return c.json({ error: "生成服务暂时不可用,请稍后重试。" }, 502);
-		}
-		const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-		if (!res.ok || !body) {
-			console.error("generate: lambda returned", res.status, JSON.stringify(body)?.slice(0, 500));
-			// 422 是「没有生效的追踪器 / 今天没抓到候选」——Lambda 在这三种情况下
-			// 都是**调模型之前**就返回的,零 token,退还。其余状态码一律不退。
-			if (res.status === 422) {
-				await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
-			}
-			const error = typeof body?.error === "string" ? body.error : "生成失败,请稍后重试。";
-			return c.json({ error }, 502);
-		}
-		// 额度是 Worker 这一侧占的,Lambda 不知道;读数由这里补上
-		return c.json({ ...body, genUsed: quota.used });
-	}
+	// 立即 202,活儿转后台(和下面 generate-all 同一个道理:一趟要几分钟,
+	// 同步等待会先撞上边缘 ~100s 超时,响应没人收得到,还诱导重试翻倍计费)。
+	// 进度先落库:刷新页面的人靠 GET /api/generate/status 把进度接回去,
+	// 转圈不再是浏览器内存里一刷就没的幻觉。
+	const startedAt = new Date().toISOString();
+	await store.putGenRun(email, { startedAt });
+	c.executionCtx.waitUntil(
+		performGenerate(env, store, email, today, startedAt).catch((err) =>
+			console.error("generate: background run failed", err),
+		),
+	);
+	return c.json({ ok: true, startedAt, genUsed: quota.used }, 202);
+});
 
-	// dev / fork 回落:无 AWS 时在 Worker 里直跑(通常 mock 模式)。生成逻辑
-	// 的生产版本只在 pipeline/lambda.ts 维护,这里只为零配置演示保底。
+// 进度查询(前端每几秒轮询一次)。走 userGuard 不走 userAiGuard:看进度不花
+// token,和 /api/usage 一个道理。
+app.get("/api/generate/status", userGuard, async (c) => {
+	const { state, run } = await resolveGenState(c.get("store"), c.get("email"));
+	return c.json({
+		state,
+		...(run?.startedAt ? { startedAt: run.startedAt } : {}),
+		...(run?.progress ? { progress: run.progress } : {}),
+		...(run?.result ? { result: run.result } : {}),
+		...(run?.error ? { error: run.error } : {}),
+	});
+});
+
+// dev / fork 回落:无 AWS 时在 Worker 里直跑(通常 mock 模式)。生成逻辑
+// 的生产版本只在 pipeline/lambda.ts 维护,这里只为零配置演示保底。
+async function generateInline(
+	env: AppEnv,
+	store: Store,
+	email: string,
+	today: string,
+	startedAt: string,
+): Promise<GenOutcome> {
+	// 分段点与 Lambda 的 produceBrief 一一对应,前端看到的五步在两条路上一致
+	const onStep = genStepWriter(store, email, startedAt, (m) => console.log(m));
 	const config = await loadConfig(store, email);
 	// 和 Lambda 的 generateOne 一样先挡一道:草稿追踪器(带 stage)不参与生成,
 	// 只有草稿时直接说清楚,别产出一份空简报让人以为是选材失败
 	if (activeTrackers(config.trackers).length === 0) {
 		// 同 Lambda 路径:还没调过模型,额度退还
 		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
-		return c.json({ error: "没有生效的追踪器——向导走完三步、点「完成」之后才会参与生成。" }, 422);
+		return { status: 422, body: { error: "没有生效的追踪器——向导走完三步、点「完成」之后才会参与生成。" } };
 	}
+	await onStep(1); // 抓取信息源
 	const fetched = await fetchAllSources(config.sources, DEFAULT_FILTERS, (m) => console.log(m));
 	if (fetched.candidates.length === 0) {
 		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
-		return c.json(
-			{ error: "没有抓到任何时间窗内的候选内容", sourceErrors: fetched.sourceErrors },
-			422,
-		);
+		return {
+			status: 422,
+			body: { error: "没有抓到任何时间窗内的候选内容", sourceErrors: fetched.sourceErrors },
+		};
 	}
 
 	const cfg = aiConfig(env);
@@ -933,13 +1076,14 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	try {
 		provider = resolveProvider(cfg);
 	} catch (err) {
-		if (err instanceof AiError) return c.json({ error: err.message }, 500);
+		if (err instanceof AiError) return { status: 500, body: { error: err.message } };
 		throw err;
 	}
 
 	// R2/T3 · dev/fork 回落路径要和 Lambda 走同一套:反馈回路、线索台账、源健康
 	// 一个都不能少。这条路是「fork 零配置跑通全流程」的保证,也是本地验证新
 	// 生成逻辑的唯一入口——它和生产分叉,本地就永远测不到真正会上线的行为。
+	await onStep(2); // 按追踪定义选材(含反馈摘要、口味画像等准备)
 	const digest = await loadFeedbackDigest(store, email, { log: (m) => console.log(m) });
 	const threads = await store.listThreads(email);
 	const threadsByTracker = new Map<string, string>();
@@ -984,14 +1128,17 @@ app.post("/api/generate", userAiGuard, async (c) => {
 			const result = await complete(genCfg, { prompt: user, system, json: true });
 			editorial = parseEditorialJson(result.text, config.trackers);
 		} catch (err) {
-			if (err instanceof AiError) return c.json({ error: err.message }, err.status as 500);
-			if (err instanceof SyntaxError) return c.json({ error: "模型返回的编辑结果不是合法 JSON,请重试。" }, 502);
+			if (err instanceof AiError) return { status: err.status, body: { error: err.message } };
+			if (err instanceof SyntaxError) {
+				return { status: 502, body: { error: "模型返回的编辑结果不是合法 JSON,请重试。" } };
+			}
 			console.error("generate: upstream error", err);
-			return c.json({ error: "上游 AI 错误,请稍后重试。" }, 502);
+			return { status: 502, body: { error: "上游 AI 错误,请稍后重试。" } };
 		}
 	}
 	applySameStoryMerges(editorial, mergedByPrimary);
 
+	await onStep(3); // 解析原文链接(这条路没有 gn 还原,只有组装)
 	const brief = await assembleBrief(editorial, fetched, {
 		date: today,
 		sourceCount: fetched.sourcesOk,
@@ -1001,6 +1148,7 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	});
 	// 第二段 · 成稿(和 Lambda 同一套)。免费档子请求预算:抓原文最多 10 次,
 	// 加上抓源本身仍在 50 以内;真超了 fetchArticleText 会静默失败退回摘要。
+	await onStep(4); // 抓取原文并成稿
 	if (provider !== "mock") {
 		await enrichBrief(brief, fetched, config.trackers, (system, user) =>
 			complete({ ...cfg, maxOutputTokens: "4096" }, { prompt: user, system, json: true }).then((r) => r.text),
@@ -1008,6 +1156,7 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		);
 	}
 
+	await onStep(5); // 写回台账与落库
 	// T4/T5 · 并进台账(注记由代码算),临时字段抹掉才落库
 	const { changed } = applyThreads(brief, threads, today);
 	stripTransient(brief);
@@ -1031,16 +1180,18 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	await store.putBrief(email, brief);
 
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
-	return c.json({
-		ok: true,
-		date: brief.date,
-		provider,
-		picked,
-		scanned: fetched.scanned,
-		sourceErrors: fetched.sourceErrors,
-		genUsed: quota.used,
-	});
-});
+	return {
+		status: 200,
+		body: {
+			ok: true,
+			date: brief.date,
+			provider,
+			picked,
+			scanned: fetched.scanned,
+			sourceErrors: fetched.sourceErrors,
+		},
+	};
+}
 
 // 手动触发全量生成(站长凭证;白名单增删走主仓 infra/ 的脚本,不开 API)。
 // 全量生成是分钟级任务(每用户一次 LLM 调用,串行):同步等待会先撞上边缘

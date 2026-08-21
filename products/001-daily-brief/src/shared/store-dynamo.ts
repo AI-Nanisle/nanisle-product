@@ -9,6 +9,7 @@
 //   USER#<email> / CONFIG                        配置整存整取
 //   USER#<email> / BRIEF#<YYYY-MM-DD>            每日简报
 //   USER#<email> / USAGE#<YYYY-MM-DD>            当日额度计数(gen / ai),ttl 7 天
+//   USER#<email> / GENRUN                        立即生成的进度记录(B9),ttl 1 小时
 //   USER#<email> / FB#<ISO>#<uuid>               反馈事件,ttl 90 天
 //   USER#<email> / CLICK#<ISO>#<uuid>            点击事件,ttl 90 天
 //   USER#<email> / THREAD#<trackerKey>#<threadKey>  线索台账,**不设 ttl**
@@ -18,9 +19,10 @@
 
 import { AwsClient } from "aws4fetch";
 import type { Brief, FeedbackEvent, FeedbackKind, ItemNote, Thread } from "./types";
-import type { ClickEvent, Store, StoredBrief, StoredEvent } from "./store";
+import type { ClickEvent, GenRun, Store, StoredBrief, StoredEvent } from "./store";
 import {
 	EVENT_TTL_S,
+	GEN_RUN_TTL_S,
 	MAX_EVENTS_READ,
 	MAX_NOTES_READ,
 	METRICS_TTL_S,
@@ -203,6 +205,25 @@ export function dynamoStore(opts: DynamoOptions): Store {
 				ExpressionAttributeValues: {
 					":b": { S: JSON.stringify(brief) },
 					":g": { S: brief.generatedAt },
+				},
+			});
+		},
+
+		async getGenRun(email) {
+			const out = await call<{ Item?: Item }>("GetItem", {
+				Key: { PK: { S: `USER#${email}` }, SK: { S: "GENRUN" } },
+			});
+			const raw = s(out.Item?.run);
+			return raw ? (JSON.parse(raw) as GenRun) : null;
+		},
+
+		async putGenRun(email, run) {
+			await call("PutItem", {
+				Item: {
+					PK: { S: `USER#${email}` },
+					SK: { S: "GENRUN" },
+					run: { S: JSON.stringify(run) },
+					ttl: { N: String(Math.floor(Date.now() / 1000) + GEN_RUN_TTL_S) },
 				},
 			});
 		},
@@ -430,7 +451,12 @@ export function dynamoStore(opts: DynamoOptions): Store {
 	};
 }
 
-/** 供 Worker 转调 generate Lambda(Function URL,IAM 鉴权)用的签名客户端。 */
+/**
+ * 供 Worker 转调 generate Lambda(Function URL,IAM 鉴权)用的签名客户端。
+ * retries: 0 是成本闸,不是可调参数:aws4fetch 默认对任何 5xx 重试 **10 次**,
+ * 而一趟生成要跑几分钟,边缘超时回 5xx 时 Lambda 其实还在跑——每次「重试」都是
+ * 又一条完整管线、又一份模型账单(2026-08-21 实测 3 次点击被放大成 8 次调用)。
+ */
 export function lambdaClient(opts: Omit<DynamoOptions, "table">): AwsClient {
 	return new AwsClient({
 		accessKeyId: opts.accessKeyId,
@@ -438,6 +464,7 @@ export function lambdaClient(opts: Omit<DynamoOptions, "table">): AwsClient {
 		...(opts.sessionToken ? { sessionToken: opts.sessionToken } : {}),
 		region: opts.region,
 		service: "lambda",
+		retries: 0,
 	});
 }
 

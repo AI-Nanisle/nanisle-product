@@ -7,6 +7,7 @@
 //   user:<email>:config           配置整存整取
 //   user:<email>:brief:<date>     每日简报 {brief, generatedAt}
 //   user:<email>:usage:<date>     当日额度计数 {gen, ai}(expirationTtl 7 天)
+//   user:<email>:genrun           立即生成的进度记录(B9,expirationTtl 1 小时)
 //   user:<email>:fb:<ts>:<uuid>   反馈事件(expirationTtl 90 天)
 //   user:<email>:click:<ts>:<uuid> 点击事件(同上)
 //   user:<email>:thread:<trackerKey>:<threadKey>  线索台账(无 TTL)
@@ -14,9 +15,10 @@
 //   user:<email>:proposal:<id>    周自评提案
 
 import type { Brief, ItemNote, Thread } from "../shared/types";
-import type { QuotaUsed, Store, StoredBrief, StoredEvent } from "../shared/store";
+import type { GenRun, QuotaUsed, Store, StoredBrief, StoredEvent } from "../shared/store";
 import {
 	EVENT_TTL_S,
+	GEN_RUN_TTL_S,
 	MAX_EVENTS_READ,
 	MAX_NOTES_READ,
 	METRICS_TTL_S,
@@ -107,6 +109,15 @@ export function kvStore(kv: KVNamespace): Store {
 
 		async getQuota(email, date) {
 			return readQuota(email, date);
+		},
+
+		async getGenRun(email) {
+			const raw = await kv.get(`user:${email}:genrun`);
+			return raw ? (JSON.parse(raw) as GenRun) : null;
+		},
+
+		async putGenRun(email, run) {
+			await kv.put(`user:${email}:genrun`, JSON.stringify(run), { expirationTtl: GEN_RUN_TTL_S });
 		},
 
 		async appendEvent(email, ev) {

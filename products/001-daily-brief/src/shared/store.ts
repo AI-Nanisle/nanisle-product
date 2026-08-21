@@ -103,6 +103,83 @@ export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
 /** 额度条目留 7 天:够回看这一周,又不用另写清理任务(DynamoDB 原生 TTL)。 */
 export const QUOTA_TTL_S = 7 * 24 * 3600;
 
+// ---------- 立即生成的进度记录(docs/02 §8.2) ----------
+
+/**
+ * B9 · 一次「立即生成」的进度。生成是后台任务(POST 立即 202),浏览器内存里
+ * 的转圈撑不过一次刷新——进度必须落库,GET /api/generate/status 才有东西可答。
+ * 一人同时至多一趟,整存整取覆盖写。
+ *
+ * 没有 finishedAt 不一定是还在跑:Worker 的 waitUntil 可能先被回收,收尾记录
+ * 就永远写不上。判定真相靠简报落库时间(generatedAt >= startedAt 即这趟已成),
+ * 这套推断收在 Worker 的 resolveGenState 里,别在别处另写一份。
+ */
+export interface GenRun {
+	startedAt: string;
+	/** 最近一次进度写入。判死看它而不是 startedAt:进度还在走就没死。 */
+	updatedAt?: string;
+	finishedAt?: string;
+	ok?: boolean;
+	/** 失败时给读者看的原因(成功时无)。 */
+	error?: string;
+	/** 走到第几步(GEN_STEPS),生成方(Lambda 或 dev 回落)在分段点写。 */
+	progress?: GenProgress;
+	/** 成功收尾时的读数,前端拼那句「已生成:扫描 X 条,入选 Y 条」用。 */
+	result?: {
+		date: string;
+		picked: number;
+		scanned: number;
+		sourceErrors?: { name: string; error: string }[];
+	};
+}
+
+export interface GenProgress {
+	step: number;
+	total: number;
+	label: string;
+}
+
+/**
+ * 管线的五个分段,前端进度行按「第 X/5 步 · 标签」显示。分段点选在 lambda.ts
+ * 的 produceBrief(dev 回落同样这五段):选材和成稿是两次几十秒到几分钟的
+ * 模型调用,其余三段只是几秒——但正因为长短悬殊,读者才需要知道卡在哪一段。
+ */
+export const GEN_STEPS = [
+	"抓取信息源",
+	"按追踪定义选材",
+	"解析原文链接",
+	"抓取原文并成稿",
+	"写回台账与落库",
+] as const;
+
+/**
+ * 造一个分步进度写入器(Lambda 和 Worker dev 回落共用)。没有 runStartedAt
+ * 就是空操作——定时全量不该碰任何人的进度记录。写失败只记日志:进度是
+ * 装饰,别让它挡简报落库。
+ */
+export function genStepWriter(
+	store: Pick<Store, "putGenRun">,
+	email: string,
+	runStartedAt: string | undefined,
+	log: (msg: string) => void = () => {},
+): (step: number) => Promise<void> {
+	if (!runStartedAt) return async () => {};
+	return async (step) => {
+		try {
+			await store.putGenRun(email, {
+				startedAt: runStartedAt,
+				updatedAt: new Date().toISOString(),
+				progress: { step, total: GEN_STEPS.length, label: GEN_STEPS[step - 1] ?? "" },
+			});
+		} catch (err) {
+			log(`[progress] 第 ${step} 步写入失败: ${err}`);
+		}
+	};
+}
+
+/** 进度记录留 1 小时:一趟几分钟,过夜的旧记录只会造成误判。 */
+export const GEN_RUN_TTL_S = 3600;
+
 /** /go 埋点的点击事件(和 FeedbackEvent 的区别:没有 kind)。 */
 export interface ClickEvent {
 	date: string;
@@ -156,6 +233,9 @@ export interface Store {
 	refundQuota(email: string, date: string, kind: QuotaKind): Promise<void>;
 	/** 当日两个计数器的已用量,给前端的额度读数(GET /api/usage)。 */
 	getQuota(email: string, date: string): Promise<QuotaUsed>;
+	/** B9 · 立即生成的进度记录,一人一条整存整取(ttl 1 小时)。 */
+	getGenRun(email: string): Promise<GenRun | null>;
+	putGenRun(email: string, run: GenRun): Promise<void>;
 	/** 反馈/点击事件,一事件一条,TTL 90 天。有 kind 字段的是反馈。 */
 	appendEvent(email: string, ev: FeedbackEvent | ClickEvent): Promise<void>;
 	/**

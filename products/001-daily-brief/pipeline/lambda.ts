@@ -56,12 +56,14 @@ import { MAX_CHANGELOG } from "../src/shared/pipeline-core";
 import { dynamoStore } from "../src/shared/store-dynamo";
 import { renderBriefEmail, sendBriefEmail, unsubToken } from "../src/shared/email";
 import type { Store, UserConfig } from "../src/shared/store";
+import { genStepWriter } from "../src/shared/store";
 import type { Brief } from "../src/shared/types";
 import type { EditorialResult } from "../src/shared/pipeline-core";
 
 export interface GenerateEvent {
 	mode?: string;
 	email?: string;
+	runStartedAt?: string;
 	/** Function URL 调用时 payload 在 HTTP event 的 body 里(JSON 字符串)。 */
 	body?: string;
 	isBase64Encoded?: boolean;
@@ -70,6 +72,9 @@ export interface GenerateEvent {
 interface Payload {
 	mode?: string;
 	email?: string;
+	/** B9 · 手动点火时 Worker 传进来的进度记录键(= GENRUN 的 startedAt)。
+	 *  带它才写分步进度;定时全量没有它,不碰任何人的进度记录。 */
+	runStartedAt?: string;
 }
 
 function parsePayload(event: GenerateEvent): Payload {
@@ -81,7 +86,7 @@ function parsePayload(event: GenerateEvent): Payload {
 			return {};
 		}
 	}
-	return { mode: event.mode, email: event.email };
+	return { mode: event.mode, email: event.email, runStartedAt: event.runStartedAt };
 }
 
 function response(statusCode: number, body: Record<string, unknown>) {
@@ -205,7 +210,10 @@ async function produceBrief(
 	date: string,
 	/** H1 · 本轮抓取结果,**已换算成该用户自己的源 key**(全量模式抓的是并集)。 */
 	healthByKey: Map<string, { ok: boolean; error?: string }>,
+	/** B9 · 分步进度(GEN_STEPS)。只有手动点火传真写入器;定时全量用默认空操作。 */
+	onStep: (step: number) => Promise<void> = async () => {},
 ): Promise<{ picked: number; brief: Brief }> {
+	await onStep(2); // 按追踪定义选材(含防重复、反馈摘要、口味画像等准备)
 	// 近期已入选的绝不重复推荐:类目窗口放宽后(blog/podcast 看 7 天),同一篇
 	// 长文会连续几天出现在候选池里,这道闸在编辑看到候选之前就把它挡掉。
 	// 读取失败只是少了防重复,不该挡当天的简报。
@@ -269,6 +277,7 @@ async function produceBrief(
 		tastePromptBlock(taste),
 	);
 	applySameStoryMerges(editorial, mergedByPrimary);
+	await onStep(3); // 解析原文链接(gn 跳转链还原 + 组装 + HN 讨论区)
 	// 入选条目里的 Google News 跳转链换成原文 URL(id 不变):阅读页、成稿、
 	// HN 讨论、每周域名统计从此都落在真实页面上。解析失败保留跳转链,照常降级。
 	const pickedIds = new Set([
@@ -287,6 +296,7 @@ async function produceBrief(
 	// 第二段 · 成稿:只对已入选的条目取全文,写实质与判断。选材阶段每条只看
 	// 800 字,写不出深度;这一次调用才是简报从「标题改写」变成有内容的地方。
 	// 正文抽取用 readability(Node 侧注入),成稿模型走 ENRICH_* 开关。
+	await onStep(4); // 抓取原文并成稿(第二次大模型调用)
 	if (resolveProvider(enrichCfg) !== "mock") {
 		await enrichBrief(brief, fetched, run.config.trackers, (system, user) =>
 			complete(enrichCfg, { prompt: user, system, json: true }).then((r) => {
@@ -298,6 +308,7 @@ async function produceBrief(
 		);
 	}
 
+	await onStep(5); // 写回台账与落库
 	// T4/T5 · 并进台账(注记由代码算),再把临时字段抹掉才落库
 	const { changed } = applyThreads(brief, threads, date);
 	stripTransient(brief);
@@ -369,19 +380,28 @@ async function pushBriefEmail(email: string, brief: Brief): Promise<boolean> {
 
 // ---------- 单用户模式(立即生成) ----------
 
-async function generateOne(store: Store, cfg: AiConfig, enrichCfg: AiConfig, email: string, date: string) {
+async function generateOne(
+	store: Store,
+	cfg: AiConfig,
+	enrichCfg: AiConfig,
+	email: string,
+	date: string,
+	runStartedAt?: string,
+) {
+	const onStep = genStepWriter(store, email, runStartedAt, (m) => console.log(`[${email}] ${m}`));
 	const config = await store.getConfig(email);
 	if (!config) return response(422, { error: "该用户还没有配置。先在配置页建一个追踪器。" });
 	if (activeTrackers(config.trackers).length === 0) {
 		return response(422, { error: "没有生效的追踪器,先在配置页建一个。" });
 	}
+	await onStep(1); // 抓取信息源
 	const fetched = await fetchAllSources(config.sources, DEFAULT_FILTERS, (m) => console.log(`[${email}] ${m}`));
 	if (fetched.candidates.length === 0) {
 		return response(422, { error: "没有抓到任何时间窗内的候选内容", sourceErrors: fetched.sourceErrors });
 	}
 	// 单用户模式抓的就是他自己的源,status 的 key 直接可用
 	const health = new Map(fetched.sourceStatus.map((s) => [s.key, { ok: s.ok, error: s.error }]));
-	const { picked } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, health);
+	const { picked } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, health, onStep);
 	return response(200, {
 		ok: true,
 		date,
@@ -718,7 +738,9 @@ export async function handler(event: GenerateEvent) {
 	try {
 		if (payload.mode === "weekly") return await generateWeekly(store, new Date());
 		if (payload.mode === "all") return await generateAll(store, cfg, enrichCfg, date);
-		if (payload.email) return await generateOne(store, cfg, enrichCfg, payload.email, date);
+		if (payload.email) {
+			return await generateOne(store, cfg, enrichCfg, payload.email, date, payload.runStartedAt);
+		}
 		return response(400, { error: 'payload must be {"mode":"all"} or {"email":"..."}' });
 	} catch (err) {
 		if (err instanceof AiError) return response(err.status, { error: err.message });

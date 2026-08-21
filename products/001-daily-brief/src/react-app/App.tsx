@@ -16,6 +16,29 @@ interface Usage {
 	ai: { used: number; limit: number };
 }
 
+/**
+ * GET /api/generate/status 的回包。生成是后台任务(POST 立即 202),这个端点
+ * 是唯一的进度真相——浏览器内存里的转圈撑不过一次刷新,轮询它才撑得过。
+ */
+interface GenStatus {
+	state: "idle" | "running" | "done" | "failed";
+	startedAt?: string;
+	error?: string;
+	/** 走到第几步(服务端 GEN_STEPS 五段),生成方在每个分段点写回。 */
+	progress?: { step: number; total: number; label: string };
+	result?: {
+		date: string;
+		picked: number;
+		scanned: number;
+		sourceErrors?: { name: string; error: string }[];
+	};
+}
+
+function fmtElapsed(s: number): string {
+	if (s < 60) return `${s} 秒`;
+	return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒`;
+}
+
 // 请求不带 x-access-code:userGuard 只认会话 cookie(F6)。访问码已降级为
 // 站长凭证,不再是阅读凭证——前端没有它的位置。
 async function postFeedback(date: string, itemId: string, kind: FeedbackKind, text?: string) {
@@ -358,6 +381,11 @@ function ProductPage() {
 		window.history.pushState(null, "", pathForView(v));
 	};
 	const [generating, setGenerating] = useState(false);
+	// 正在盯的那趟后台生成的起点。非 null 才开轮询:轮询必须等 POST 落地后再
+	// 开,否则会把上一趟留下的旧收尾记录当成这一趟的结果。
+	const [genStartedAt, setGenStartedAt] = useState<string | null>(null);
+	const [genProgress, setGenProgress] = useState<GenStatus["progress"] | null>(null);
+	const [genElapsedS, setGenElapsedS] = useState(0);
 	const [genMsg, setGenMsg] = useState("");
 	const [usage, setUsage] = useState<Usage | null>(null);
 
@@ -422,39 +450,116 @@ function ProductPage() {
 		return () => window.removeEventListener("popstate", syncView);
 	}, []);
 
+	// 点火。POST 立即返回 202(一趟要几分钟,活儿在 AWS 侧后台跑),这里只负责
+	// 把 genStartedAt 立起来,下面的轮询 effect 接手盯到收尾。
 	const generate = async () => {
 		setGenerating(true);
 		setGenMsg("");
+		setGenProgress(null);
 		try {
 			const res = await fetch(apiPath("generate"), { method: "POST" });
-			const data = (await res.json()) as {
+			const data = (await res.json().catch(() => ({}))) as {
 				ok?: boolean;
-				date?: string;
-				picked?: number;
-				scanned?: number;
+				startedAt?: string;
+				running?: boolean;
 				error?: string;
-				sourceErrors?: { name: string; error: string }[];
 			};
+			if (res.status === 409 && data.running) {
+				// 已有一趟在跑(另一个标签页点的,或刷新前点的):直接接上它的进度
+				setGenStartedAt(data.startedAt ?? new Date().toISOString());
+				return;
+			}
 			if (!res.ok || !data.ok) {
 				// 429 = 今日限额打满:服务端文案已含「明早定时生成照常」,原样展示,
 				// 不加「失败」前缀——这不是故障,是预期内的刹车(F7)
 				setGenMsg(res.status === 429 && data.error ? data.error : `生成失败:${data.error ?? `HTTP ${res.status}`}`);
-			} else {
-				const failed = data.sourceErrors?.length
-					? `(${data.sourceErrors.length} 个源抓取失败)`
-					: "";
-				setGenMsg(`✓ ${data.date} 已生成:扫描 ${data.scanned} 条,入选 ${data.picked} 条 ${failed}`);
-				setView("brief");
-				await load();
+				setGenerating(false);
+				return;
 			}
+			setGenStartedAt(data.startedAt ?? new Date().toISOString());
 		} catch {
 			setGenMsg("生成失败:网络错误");
-		} finally {
 			setGenerating(false);
-			// 成功扣一次,429 也要刷(读数正好该跳到「已用完」)
+		} finally {
+			// 点火即扣一次,429 也要刷(读数正好该跳到「已用完」)
 			void loadUsage();
 		}
 	};
+
+	// 盯进度:每 5 秒问一次 /api/generate/status,直到收尾。收尾读数由服务端
+	// 落库的记录给出;waitUntil 被提前回收、记录没写上时,服务端会用简报落库
+	// 时间兜底判成,这里拿不到读数就把话交给下面那行「✓ 已生成」的常态读数。
+	useEffect(() => {
+		if (!genStartedAt) return;
+		let alive = true;
+		const tick = async () => {
+			let st: GenStatus;
+			try {
+				const res = await fetch(apiPath("generate/status"));
+				if (!res.ok) return; // 瞬时故障:下个周期再问
+				st = (await res.json()) as GenStatus;
+			} catch {
+				return; // 网络抖动:下个周期再问
+			}
+			if (!alive) return;
+			if (st.state === "running") {
+				setGenProgress(st.progress ?? null);
+				return;
+			}
+			// 收尾了(idle = 记录过期,比如页面放了一夜,安静收场)
+			setGenStartedAt(null);
+			setGenProgress(null);
+			setGenerating(false);
+			if (st.state === "done") {
+				const r = st.result;
+				setGenMsg(
+					r
+						? `✓ ${r.date} 已生成:扫描 ${r.scanned} 条,入选 ${r.picked} 条 ${r.sourceErrors?.length ? `(${r.sourceErrors.length} 个源抓取失败)` : ""}`
+						: "",
+				);
+				setView("brief");
+				await load();
+			} else if (st.state === "failed") {
+				setGenMsg(`生成失败:${st.error ?? "未知原因,请稍后重试"}`);
+			}
+			void loadUsage();
+		};
+		void tick();
+		const timer = setInterval(() => void tick(), 5000);
+		return () => {
+			alive = false;
+			clearInterval(timer);
+		};
+	}, [genStartedAt, load, loadUsage]);
+
+	// 刷新不丢进度:挂载时问一次,有没跑完的就接着盯。锁屏/未准入时这个请求
+	// 本来就 401/403,静默略过。
+	useEffect(() => {
+		void (async () => {
+			try {
+				const res = await fetch(apiPath("generate/status"));
+				if (!res.ok) return;
+				const st = (await res.json()) as GenStatus;
+				if (st.state === "running") {
+					setGenerating(true);
+					setGenStartedAt(st.startedAt ?? new Date().toISOString());
+					setGenProgress(st.progress ?? null);
+				}
+			} catch {
+				/* 静默 */
+			}
+		})();
+	}, []);
+
+	// 进度行右侧的已跑时长,秒级走字——几分钟的等待,一个不动的转圈会被当成死机
+	useEffect(() => {
+		if (!genStartedAt) return;
+		const started = new Date(genStartedAt).getTime();
+		const update = () => setGenElapsedS(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+		update();
+		const timer = setInterval(update, 1000);
+		return () => clearInterval(timer);
+	}, [genStartedAt]);
 
 	// 额度用完就把按钮停掉:与其让人点下去再吃一个 429,不如按钮自己说清楚。
 	const genLeft = usage ? Math.max(0, usage.gen.limit - usage.gen.used) : null;
@@ -587,17 +692,22 @@ function ProductPage() {
 					{generating ? (
 						<>
 							<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
-								<span className="text-[var(--accent)]">▸</span> 抓取信息源,按追踪定义编选…
+								<span className="text-[var(--accent)]">▸</span>{" "}
+								{genProgress
+									? `第 ${genProgress.step}/${genProgress.total} 步 · ${genProgress.label}…`
+									: "抓取信息源,按追踪定义编选…"}
 								<span className="caret ml-1" />
 							</span>
-							<span className="font-mono-sc ml-auto shrink-0 text-[11px] text-[var(--ink-3)]">约半分钟</span>
+							<span className="font-mono-sc ml-auto shrink-0 text-[11px] text-[var(--ink-3)]">
+								{genStartedAt ? `已跑 ${fmtElapsed(genElapsedS)} · ` : ""}一趟约四五分钟,刷新或离开都不丢
+							</span>
 						</>
 					) : (
 						<>
 							<span className="font-mono-sc text-[12px] text-[var(--ink-2)]">
 								{genMsg ||
 									(view === "config" ? (
-										<>改完定义按右边试一期 · 抓取加编选约半分钟,跑完自动跳到简报页</>
+										<>改完定义按右边试一期 · 一趟约四五分钟,跑完自动跳到简报页,中途刷新也不丢</>
 									) : brief && genTime ? (
 										<>
 											<span className="text-[var(--ok)]">✓</span> {genTime.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" })} 已生成 ·
