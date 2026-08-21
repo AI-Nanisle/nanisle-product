@@ -4,7 +4,7 @@
 //   {"mode":"all"}  全量:Query 白名单 → 过滤有生效追踪器的人 → 并集去重抓取
 //                   (每个 feed 只抓一次)→ 按各自源切出人均候选池 → 每人一次
 //                   编辑调用(失败只跳过该人)→ 各写 BRIEF#<date>
-//   {"email":"…"}   单用户(立即生成):只抓其启用源,putBrief 原子自增 genCount
+//   {"email":"…"}   单用户(立即生成):只抓其启用源。当日额度由 Worker 转调前占好,这里不计数
 //
 // 打包:主仓 infra/ 的 NodejsFunction 用 esbuild 把这里连同 src/shared/* 一起
 // 打进 Lambda。凭证来自执行角色(运行时注入 AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN),
@@ -16,23 +16,27 @@ import {
 	SEEN_WINDOW_DAYS,
 	activeTrackers,
 	applyHealth,
+	applySameStoryMerges,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
+	clusterSameStory,
 	dropSeenCandidates,
 	fetchAllSources,
 	enrichBrief,
 	fnv1a,
+	isUnhealthy,
 	mockEditorial,
 	parseEditorialJson,
 	seenItemIds,
 } from "../src/shared/pipeline-core";
-import type { FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-core";
+import type { Candidate, FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../src/shared/default-sources";
 import { AiError, complete, resolveProvider } from "../src/shared/ai";
 import type { AiConfig } from "../src/shared/ai";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
 import type { FeedbackDigest } from "../src/shared/feedback";
+import { maybeDistillTaste, tastePromptBlock } from "../src/shared/taste";
 import { applyThreads, stripTransient, threadsPromptBlock } from "../src/shared/threads";
 import {
 	MAX_PROPOSALS_PER_WEEK,
@@ -131,22 +135,25 @@ function envStore(): Store {
 	});
 }
 
-/** 一次编辑调用:候选 + 追踪器定义 + 近期反馈 → 编辑结果(反捏造护栏在 parse 里)。 */
+/** 一次编辑调用:候选 + 追踪器定义 + 近期反馈 + 口味画像 → 编辑结果(反捏造护栏在 parse 里)。 */
 async function runEditorial(
 	cfg: AiConfig,
-	fetched: FetchResult,
+	/** 已归簇的主报道(clusterSameStory 的产物),不是完整候选池。 */
+	candidates: Candidate[],
 	trackers: Tracker[],
 	digest: FeedbackDigest,
 	offAxis: boolean,
 	threadsByTracker: Map<string, string>,
+	tasteBlock: string,
 ): Promise<EditorialResult> {
-	if (resolveProvider(cfg) === "mock") return mockEditorial(fetched.candidates, trackers);
+	if (resolveProvider(cfg) === "mock") return mockEditorial(candidates, trackers);
 	const { system, user } = buildEditorialPrompt(
-		fetched.candidates,
+		candidates,
 		trackers,
 		feedbackPromptBlock(digest),
 		offAxis,
 		threadsByTracker,
+		tasteBlock,
 	);
 	const result = await complete(cfg, { prompt: user, system, json: true });
 	return parseEditorialJson(result.text, trackers);
@@ -196,10 +203,9 @@ async function produceBrief(
 	run: UserRun,
 	fetched: FetchResult,
 	date: string,
-	bumpGenCount: boolean,
 	/** H1 · 本轮抓取结果,**已换算成该用户自己的源 key**(全量模式抓的是并集)。 */
 	healthByKey: Map<string, { ok: boolean; error?: string }>,
-): Promise<{ picked: number; genCount: number; brief: Brief }> {
+): Promise<{ picked: number; brief: Brief }> {
 	// 近期已入选的绝不重复推荐:类目窗口放宽后(blog/podcast 看 7 天),同一篇
 	// 长文会连续几天出现在候选池里,这道闸在编辑看到候选之前就把它挡掉。
 	// 读取失败只是少了防重复,不该挡当天的简报。
@@ -235,7 +241,34 @@ async function produceBrief(
 		if (block) threadsByTracker.set(t.key, block);
 	}
 
-	const editorial = await runEditorial(cfg, fetched, run.config.trackers, digest, off.enabled, threadsByTracker);
+	// R9 · 口味画像:攒够新反馈就重蒸馏(一次小调用),没攒够沿用存着的旧画像
+	let taste = run.config.taste;
+	if (resolveProvider(cfg) !== "mock") {
+		const fresh = await maybeDistillTaste(store, run.email, run.config, {
+			call: (system, user) => complete(cfg, { prompt: user, system, json: true }).then((r) => r.text),
+			log: (m) => console.log(`[${run.email}] ${m}`),
+		});
+		if (fresh) taste = fresh;
+	}
+
+	// 同事件归簇:只让每簇的主报道进编辑提示词,选中后其余并回 merged
+	const { primaries, mergedByPrimary } = clusterSameStory(fetched.candidates);
+	if (primaries.length < fetched.candidates.length) {
+		console.log(
+			`[${run.email}] [cluster] ${fetched.candidates.length} 条候选并成 ${primaries.length} 条,${fetched.candidates.length - primaries.length} 条同事件报道预合并`,
+		);
+	}
+
+	const editorial = await runEditorial(
+		cfg,
+		primaries,
+		run.config.trackers,
+		digest,
+		off.enabled,
+		threadsByTracker,
+		tastePromptBlock(taste),
+	);
+	applySameStoryMerges(editorial, mergedByPrimary);
 	// 入选条目里的 Google News 跳转链换成原文 URL(id 不变):阅读页、成稿、
 	// HN 讨论、每周域名统计从此都落在真实页面上。解析失败保留跳转链,照常降级。
 	const pickedIds = new Set([
@@ -275,21 +308,25 @@ async function produceBrief(
 	if (echo) brief.feedbackEcho = echo;
 	if (off.note) brief.offAxisNote = off.note;
 
-	// H1 + X2 的配置写回合成一次 putConfig:整存整取的配置写两遍会互相覆盖
+	// H1 + X2 + R9 的配置写回合成一次 putConfig:整存整取的配置写两遍会互相覆盖
 	const sources = applyHealth(run.config.sources, healthByKey);
 	const prefsChanged = JSON.stringify(off.prefs) !== JSON.stringify(run.config.prefs ?? {});
 	const sourcesChanged = JSON.stringify(sources) !== JSON.stringify(run.config.sources);
-	if (prefsChanged || sourcesChanged) {
+	const tasteChanged = JSON.stringify(taste ?? null) !== JSON.stringify(run.config.taste ?? null);
+	if (prefsChanged || sourcesChanged || tasteChanged) {
 		await store.putConfig(run.email, {
 			...run.config,
 			sources,
 			prefs: off.prefs,
+			...(taste ? { taste } : {}),
 			updatedAt: new Date().toISOString(),
 		});
 	}
-	const genCount = await store.putBrief(run.email, brief, bumpGenCount);
+	// 当日额度由 Worker 在转调之前就占掉了(§8.3 的「先占位后干活」),这里
+	// 只管落库——Lambda 自己不认识额度,定时全量更不该消耗任何人的额度。
+	await store.putBrief(run.email, brief);
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
-	return { picked, genCount, brief };
+	return { picked, brief };
 }
 
 // ---------- E1 · 邮件推送(docs/04) ----------
@@ -344,7 +381,7 @@ async function generateOne(store: Store, cfg: AiConfig, enrichCfg: AiConfig, ema
 	}
 	// 单用户模式抓的就是他自己的源,status 的 key 直接可用
 	const health = new Map(fetched.sourceStatus.map((s) => [s.key, { ok: s.ok, error: s.error }]));
-	const { picked, genCount } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, true, health);
+	const { picked } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, health);
 	return response(200, {
 		ok: true,
 		date,
@@ -352,7 +389,6 @@ async function generateOne(store: Store, cfg: AiConfig, enrichCfg: AiConfig, ema
 		picked,
 		scanned: fetched.scanned,
 		sourceErrors: fetched.sourceErrors,
-		genCount,
 	});
 }
 
@@ -362,6 +398,8 @@ async function generateOne(store: Store, cfg: AiConfig, enrichCfg: AiConfig, ema
 interface UnionEntry {
 	union: SourceConfig;
 	perUser: Map<string, SourceConfig>;
+	/** H6 · 至少一个订阅者的副本还健康。全员都连续失败的 feed 这轮不抓。 */
+	anyHealthy: boolean;
 }
 
 async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, date: string) {
@@ -385,16 +423,26 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 			if (s.enabled === false) continue;
 			let entry = byUrl.get(s.url);
 			if (!entry) {
-				entry = { union: { ...s, key: fnv1a(s.url), enabled: undefined }, perUser: new Map() };
+				// health 不进并集条目(fetchAllSources 会按它跳过,而并集的健康
+				// 是「至少一个订阅者认为它还活着」);逐用户的健康回写仍按各自
+				// 副本的 key 落(下面的 health map)。
+				entry = { union: { ...s, key: fnv1a(s.url), enabled: undefined, health: undefined }, perUser: new Map(), anyHealthy: false };
 				byUrl.set(s.url, entry);
 			}
 			const cap = s.max_items ?? DEFAULT_FILTERS.max_items_per_feed;
 			const unionCap = entry.union.max_items ?? DEFAULT_FILTERS.max_items_per_feed;
 			if (cap > unionCap) entry.union.max_items = cap;
+			if (!isUnhealthy(s)) entry.anyHealthy = true;
 			entry.perUser.set(run.email, s);
 		}
 	}
-	const unionSources = [...byUrl.values()].map((e) => e.union);
+	// H6 · 全员副本都连续失败的 feed 这轮不抓;只要有一个订阅者的副本健康,
+	// 就照常抓——抓通了顺带把其他人的坏账清零(health map 覆盖全体订阅者)。
+	const skippedUnion = [...byUrl.values()].filter((e) => !e.anyHealthy);
+	if (skippedUnion.length > 0) {
+		console.log(`[all] [fetch] ${skippedUnion.length} 个源全员连续失败中,本轮跳过:${skippedUnion.map((e) => e.union.name).join("、")}`);
+	}
+	const unionSources = [...byUrl.values()].filter((e) => e.anyHealthy).map((e) => e.union);
 	const fetched = await fetchAllSources(unionSources, DEFAULT_FILTERS, (m) => console.log(m));
 
 	const byUnionKey = new Map([...byUrl.values()].map((e) => [e.union.key, e]));
@@ -450,7 +498,7 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 				results.push({ email: run.email, ok: false, error: "no candidates" });
 				continue;
 			}
-			const { picked, brief } = await produceBrief(store, cfg, enrichCfg, run, userFetched, date, false, health);
+			const { picked, brief } = await produceBrief(store, cfg, enrichCfg, run, userFetched, date, health);
 			console.log(`[all] ${run.email}: ok picked=${picked} scanned=${userFetched.scanned}`);
 			// E1 · 刊已落库,再发提醒邮件。缺省为开(prefs.emailPush !== false);
 			// 发信失败只记日志——邮件是门铃,门铃坏了不能把刊也砸了。
@@ -512,6 +560,43 @@ async function runWeeklyForUser(store: Store, email: string, now: Date): Promise
 			applied.push(p.summary);
 		}
 		await store.putProposal(email, { ...p, status: "applied", decidedAt: now.toISOString() });
+	}
+
+	// 1.5 · H6 · 复检坏源:每日生成已经不抓连续失败的源了(fetchAllSources
+	// 跳过),它们自动复活的唯一通道就是这里每周一次的真实试抓——通了清零,
+	// 红标消失,第二天恢复进抓取;还挂着的计数 +1,并在下面的 makeProposals
+	// 里升级成带证据的停用提案。最多 30 源,逐个 probe 有界。
+	{
+		let healedCount = 0;
+		let touched = false;
+		const rechecked: SourceConfig[] = [];
+		for (const s of working.sources) {
+			if (s.enabled === false || !isUnhealthy(s)) {
+				rechecked.push(s);
+				continue;
+			}
+			try {
+				const probe = await probeFeed(s.url);
+				touched = true;
+				if (probe.ok) {
+					healedCount++;
+					rechecked.push({ ...s, health: { lastOkAt: now.toISOString(), consecutiveFailures: 0 } });
+				} else {
+					rechecked.push({
+						...s,
+						health: {
+							...(s.health?.lastOkAt ? { lastOkAt: s.health.lastOkAt } : {}),
+							consecutiveFailures: (s.health?.consecutiveFailures ?? 0) + 1,
+							...(probe.error ? { lastError: probe.error.slice(0, 300) } : {}),
+						},
+					});
+				}
+			} catch {
+				rechecked.push(s); // probe 本身炸了不动健康账
+			}
+		}
+		if (touched) working = { ...working, sources: rechecked };
+		if (healedCount > 0) console.log(`[weekly] ${email}: ${healedCount} 个坏源复检通过,恢复抓取`);
 	}
 
 	// 2. 指标(S2):纯计算,零 LLM

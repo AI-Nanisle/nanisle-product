@@ -7,7 +7,8 @@
 // 键约定(§4,和 infra/lib/daily-brief-stack.ts 的表声明一致):
 //   WHITELIST / <email>                          白名单,一份数据两用(也是定时全量的用户清单)
 //   USER#<email> / CONFIG                        配置整存整取
-//   USER#<email> / BRIEF#<YYYY-MM-DD>            每日简报,genCount 承载立即生成限额
+//   USER#<email> / BRIEF#<YYYY-MM-DD>            每日简报
+//   USER#<email> / USAGE#<YYYY-MM-DD>            当日额度计数(gen / ai),ttl 7 天
 //   USER#<email> / FB#<ISO>#<uuid>               反馈事件,ttl 90 天
 //   USER#<email> / CLICK#<ISO>#<uuid>            点击事件,ttl 90 天
 //   USER#<email> / THREAD#<trackerKey>#<threadKey>  线索台账,**不设 ttl**
@@ -18,8 +19,32 @@
 import { AwsClient } from "aws4fetch";
 import type { Brief, FeedbackEvent, FeedbackKind, ItemNote, Thread } from "./types";
 import type { ClickEvent, Store, StoredBrief, StoredEvent } from "./store";
-import { EVENT_TTL_S, MAX_EVENTS_READ, MAX_NOTES_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "./store";
+import {
+	EVENT_TTL_S,
+	MAX_EVENTS_READ,
+	MAX_NOTES_READ,
+	METRICS_TTL_S,
+	PROPOSAL_TTL_S,
+	QUOTA_LIMITS,
+	QUOTA_TTL_S,
+} from "./store";
 import type { Proposal } from "./weekly";
+
+/**
+ * DynamoDB 返回的错误,带上错误码(`__type` 的最后一段)。额度的条件写靠它
+ * 分辨「上限到了」和「真的出故障了」——前者是预期内的刹车,后者才是事故。
+ */
+export class DynamoError extends Error {
+	// 显式字段而不是构造器参数属性:tsconfig 开了 erasableSyntaxOnly
+	// (`node --experimental-strip-types` 只擦类型,不做代码生成)。
+	readonly kind: string;
+
+	constructor(kind: string, message: string) {
+		super(message);
+		this.name = "DynamoError";
+		this.kind = kind;
+	}
+}
 
 export interface DynamoOptions {
 	table: string;
@@ -65,7 +90,10 @@ export function dynamoStore(opts: DynamoOptions): Store {
 			// __type 形如 com.amazonaws.dynamodb.v20120810#ResourceNotFoundException
 			const detail = (await res.json().catch(() => ({}))) as { __type?: string; message?: string };
 			const kind = detail.__type?.split("#").pop() ?? `HTTP ${res.status}`;
-			throw new Error(`DynamoDB ${action} failed: ${kind}${detail.message ? ` — ${detail.message}` : ""}`);
+			throw new DynamoError(
+				kind,
+				`DynamoDB ${action} failed: ${kind}${detail.message ? ` — ${detail.message}` : ""}`,
+			);
 		}
 		return (await res.json()) as T;
 	}
@@ -86,8 +114,12 @@ export function dynamoStore(opts: DynamoOptions): Store {
 		return {
 			brief: JSON.parse(raw) as Brief,
 			generatedAt: s(item?.generatedAt) ?? "",
-			genCount: n(item?.genCount) ?? 0,
 		};
+	}
+
+	/** 额度条目的主键;gen 与 ai 两个计数器同住一条,一次点查就能出读数。 */
+	function usageKey(email: string, date: string) {
+		return { PK: { S: `USER#${email}` }, SK: { S: `USAGE#${date}` } };
 	}
 
 	return {
@@ -162,20 +194,66 @@ export function dynamoStore(opts: DynamoOptions): Store {
 			return toStoredBrief(out.Items?.[0]);
 		},
 
-		async putBrief(email, brief, bumpGenCount) {
-			// UpdateItem 而非 PutItem:genCount 要原子自增(§8.3 的限额执行点),
-			// 且重复生成覆盖简报内容但不清零当日计数。
-			const out = await call<{ Attributes?: Item }>("UpdateItem", {
+		async putBrief(email, brief) {
+			// UpdateItem 而非 PutItem:重复生成覆盖简报内容,但不碰这条 SK 上可能
+			// 存在的其他属性。限额的执行点已经搬去 USAGE#<date>(§8.3)。
+			await call("UpdateItem", {
 				Key: { PK: { S: `USER#${email}` }, SK: { S: `BRIEF#${brief.date}` } },
-				UpdateExpression: "SET brief = :b, generatedAt = :g ADD genCount :inc",
+				UpdateExpression: "SET brief = :b, generatedAt = :g",
 				ExpressionAttributeValues: {
 					":b": { S: JSON.stringify(brief) },
 					":g": { S: brief.generatedAt },
-					":inc": { N: bumpGenCount ? "1" : "0" },
 				},
-				ReturnValues: "UPDATED_NEW",
 			});
-			return n(out.Attributes?.genCount) ?? 0;
+		},
+
+		async reserveQuota(email, date, kind) {
+			const limit = QUOTA_LIMITS[kind];
+			try {
+				const out = await call<{ Attributes?: Item }>("UpdateItem", {
+					Key: usageKey(email, date),
+					// 自增与判上限在同一个原子写里:条件不成立时这次自增根本没发生,
+					// 所以并发请求里恰好只有前 limit 个能通过。
+					UpdateExpression: "SET #ttl = :ttl ADD #k :one",
+					ConditionExpression: "attribute_not_exists(#k) OR #k < :limit",
+					// 三个都用占位名:ttl 是 DynamoDB 保留字,#k 是运行时才定的属性名。
+					ExpressionAttributeNames: { "#k": kind, "#ttl": "ttl" },
+					ExpressionAttributeValues: {
+						":one": { N: "1" },
+						":limit": { N: String(limit) },
+						":ttl": { N: String(Math.floor(Date.now() / 1000) + QUOTA_TTL_S) },
+					},
+					ReturnValues: "UPDATED_NEW",
+				});
+				return { ok: true, used: n(out.Attributes?.[kind]) ?? 0 };
+			} catch (err) {
+				// 条件写失败 = 已经到上限,不是故障。到了上限用量必然正好等于 limit。
+				if (err instanceof DynamoError && err.kind === "ConditionalCheckFailedException") {
+					return { ok: false, used: limit };
+				}
+				throw err;
+			}
+		},
+
+		async refundQuota(email, date, kind) {
+			try {
+				await call("UpdateItem", {
+					Key: usageKey(email, date),
+					UpdateExpression: "ADD #k :minusOne",
+					// 没有计数器就没有可退的:条件挡住,别把计数写成负数
+					ConditionExpression: "#k > :zero",
+					ExpressionAttributeNames: { "#k": kind },
+					ExpressionAttributeValues: { ":minusOne": { N: "-1" }, ":zero": { N: "0" } },
+				});
+			} catch (err) {
+				if (err instanceof DynamoError && err.kind === "ConditionalCheckFailedException") return;
+				throw err;
+			}
+		},
+
+		async getQuota(email, date) {
+			const out = await call<{ Item?: Item }>("GetItem", { Key: usageKey(email, date) });
+			return { gen: n(out.Item?.gen) ?? 0, ai: n(out.Item?.ai) ?? 0 };
 		},
 
 		async appendEvent(email, ev) {

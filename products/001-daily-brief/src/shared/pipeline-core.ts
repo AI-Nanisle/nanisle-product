@@ -186,7 +186,19 @@ export function purposeOptions(generated?: string[]): string[] {
 	return [...base.filter((o) => o !== PURPOSE_OPT_OUT), PURPOSE_OPT_OUT];
 }
 
-export const MAX_TRACKER_QUOTA = 3;
+/** 每期条数的三个档位——配置页下拉给的就是这三个,不是连续值。 */
+export const QUOTA_OPTIONS = [3, 5, 7] as const;
+
+/**
+ * 把任意历史值收敛到档位上:缺省/非法给最小档,其余就近归位(平手取小)。
+ * 旧配置里的 1/2 条会变成 3——这是有意的放宽,不是数据损坏。
+ */
+export function normalizeQuota(raw?: number): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw)) return QUOTA_OPTIONS[0];
+	let best: number = QUOTA_OPTIONS[0];
+	for (const opt of QUOTA_OPTIONS) if (Math.abs(opt - raw) < Math.abs(best - raw)) best = opt;
+	return best;
+}
 /** The whole issue stays bounded no matter how many trackers exist. */
 export const TOTAL_ITEM_CAP = 10;
 /**
@@ -225,7 +237,7 @@ export function joinSegments(segments: IntentSegment[]): string {
 }
 
 export function focusEntryToTracker(f: FocusEntry): Tracker {
-	return { key: fnv1a(`focus:${f.name}`), name: f.name, question: f.detail ?? "", quota: 2 };
+	return { key: fnv1a(`focus:${f.name}`), name: f.name, question: f.detail ?? "", quota: 3 };
 }
 
 export interface Candidate {
@@ -441,6 +453,8 @@ export interface FetchResult {
 	/** H1 · 按源 key 记的本轮抓取结果,回写健康状态用(按 key 而非 name:全量
 	 * 生成里源是并集去重抓的,名字可能重复,key 才是身份)。 */
 	sourceStatus: { key: string; ok: boolean; error?: string }[];
+	/** H6 · 本轮因连续失败被跳过的源名(不抓、不计健康,见 fetchAllSources)。 */
+	skippedUnhealthy?: string[];
 }
 
 /**
@@ -473,7 +487,15 @@ export async function fetchAllSources(
 	filters: Filters,
 	log: (msg: string) => void = () => {},
 ): Promise<FetchResult> {
-	const active = sources.filter((s) => s.enabled !== false);
+	// H6 · 连续失败 ≥3 的源直接不抓(miniflux 的纪律):它九成还是挂的,每天
+	// 白花一次抓取预算。跳过时不写 sourceStatus,健康计数原地不动;复活的路
+	// 有两条——周自评对坏源真实试抓一轮(通了清零,见 lambda 的 weekly),
+	// 或用户在来源库「让编辑修一下」换掉它。
+	const active = sources.filter((s) => s.enabled !== false && !isUnhealthy(s));
+	const skippedUnhealthy = sources.filter((s) => s.enabled !== false && isUnhealthy(s)).map((s) => s.name);
+	if (skippedUnhealthy.length > 0) {
+		log(`[fetch] ${skippedUnhealthy.length} 个源连续失败中,本轮跳过:${skippedUnhealthy.join("、")}`);
+	}
 	const now = Date.now();
 	const noise = filters.noise_keywords.map((k) => k.toLowerCase());
 	const candidates: Candidate[] = [];
@@ -545,7 +567,15 @@ export async function fetchAllSources(
 
 	const seen = new Set<string>();
 	const deduped = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
-	return { candidates: deduped, ruleDropped, scanned, sourcesOk, sourceErrors, sourceStatus };
+	return {
+		candidates: deduped,
+		ruleDropped,
+		scanned,
+		sourcesOk,
+		sourceErrors,
+		sourceStatus,
+		...(skippedUnhealthy.length > 0 ? { skippedUnhealthy } : {}),
+	};
 }
 
 // ---------- 近期已入选过滤(类目窗口放宽后的防重复) ----------
@@ -598,6 +628,96 @@ export function dropSeenCandidates(fetched: FetchResult, seen: Set<string>): num
 	}
 	fetched.candidates = kept;
 	return dropped;
+}
+
+// ---------- 同事件归簇(选材前的语义去重) ----------
+//
+// 同一事件被多个源报道时,让它们各占一个候选位有两重浪费:编辑提示词按条数
+// 花 token,选材时还可能「三个源转发同一条新闻占了三个坑」。提示词第 6 条
+// 让模型自己合并,但那是碰运气;这里在模型看到候选之前先按标题相似度把机械
+// 转载并成一簇,只送主报道进提示词,选中后再把同簇其余报道并回 merged。
+
+/**
+ * 标题相似度阈值(词元 Jaccard)。取保守值:漏合并的代价只是编辑多看一条
+ * (提示词第 6 条还能兜),错合并会把两件事捏成一件、且用户无从发现。
+ */
+export const SAME_STORY_SIM = 0.5;
+
+/** 标题 → 词元集合:ASCII 按词切,CJK 按二字组——中文标题没有空格可切。 */
+export function titleTokens(title: string): Set<string> {
+	const lower = title.toLowerCase();
+	const tokens = new Set<string>();
+	for (const m of lower.matchAll(/[a-z0-9][a-z0-9.+#-]*/g)) {
+		if (m[0].length >= 2) tokens.add(m[0]);
+	}
+	const cjk = lower.match(/[一-鿿぀-ヿ]/g) ?? [];
+	for (let i = 0; i < cjk.length - 1; i++) tokens.add(cjk[i] + cjk[i + 1]);
+	return tokens;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+	if (a.size === 0 || b.size === 0) return 0;
+	let inter = 0;
+	for (const t of a) if (b.has(t)) inter++;
+	return inter / (a.size + b.size - inter);
+}
+
+export interface StoryClusters {
+	/** 每簇一条主报道(未归簇的候选原样在内),保持原候选顺序。 */
+	primaries: Candidate[];
+	/** 主报道 id → 同簇其余报道的 id(选中后并进 EditorialPick.merged)。 */
+	mergedByPrimary: Map<string, string[]>;
+}
+
+/**
+ * 贪心归簇:逐条和已有簇的主报道比标题相似度。主报道优先直连源(publisher
+ * 字段只有检索源条目才带),同级取正文更长的——成稿阶段有米下锅。O(n·簇数),
+ * 候选池按 30 源 × 10 条封顶,量级无虞。
+ */
+export function clusterSameStory(candidates: Candidate[]): StoryClusters {
+	const clusters: { primary: Candidate; tokens: Set<string>; dups: Candidate[] }[] = [];
+	for (const c of candidates) {
+		const tokens = titleTokens(c.title);
+		const hit = clusters.find((cl) => jaccard(cl.tokens, tokens) >= SAME_STORY_SIM);
+		if (!hit) {
+			clusters.push({ primary: c, tokens, dups: [] });
+			continue;
+		}
+		const better =
+			Number(!c.publisher) - Number(!hit.primary.publisher) || c.excerpt.length - hit.primary.excerpt.length;
+		if (better > 0) {
+			hit.dups.push(hit.primary);
+			hit.primary = c;
+			hit.tokens = tokens;
+		} else {
+			hit.dups.push(c);
+		}
+	}
+	const primaryIds = new Set(clusters.map((cl) => cl.primary.id));
+	const mergedByPrimary = new Map<string, string[]>();
+	for (const cl of clusters) {
+		if (cl.dups.length > 0) mergedByPrimary.set(cl.primary.id, cl.dups.map((d) => d.id));
+	}
+	return { primaries: candidates.filter((c) => primaryIds.has(c.id)), mergedByPrimary };
+}
+
+/**
+ * 把预归簇的同事件报道并进编辑结果。这些 id 编辑没见过(没进提示词),
+ * 这里补进 merged,assembleBrief 照常把它们渲染成「同事件其他报道」链,
+ * seenItemIds 也照常把它们记进「已推荐过」。返回并入条数(日志用)。
+ */
+export function applySameStoryMerges(editorial: EditorialResult, mergedByPrimary: Map<string, string[]>): number {
+	if (mergedByPrimary.size === 0) return 0;
+	let n = 0;
+	for (const picks of Object.values(editorial.sections)) {
+		for (const pick of picks) {
+			const dups = mergedByPrimary.get(pick.id);
+			if (!dups?.length) continue;
+			pick.merged = [...new Set([...(pick.merged ?? []), ...dups])];
+			n += dups.length;
+		}
+	}
+	return n;
 }
 
 // ---------- editorial ----------
@@ -661,7 +781,7 @@ export function mockEditorial(candidates: Candidate[], trackers: Tracker[]): Edi
 			if (t.key === "learn") return c.category === "podcast" || c.category === "paper";
 			return c.category === "blog";
 		});
-		sections[t.key] = matches.slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA)).map((c) => {
+		sections[t.key] = matches.slice(0, normalizeQuota(t.quota)).map((c) => {
 			used.add(c.id);
 			return {
 				id: c.id,
@@ -700,6 +820,8 @@ export function buildEditorialPrompt(
 	offAxis = false,
 	/** T3 · 追踪器 key → 该追踪器的活跃线索清单(threadsPromptBlock 的产物)。 */
 	threadsByTracker: Map<string, string> = new Map(),
+	/** R9 · 长期口味画像段(tastePromptBlock 的产物)。空串 = 还没有画像。 */
+	tasteBlock = "",
 ): { system: string; user: string } {
 	const system = `你是一份个人每日简报的编辑。简报的哲学:它是当天信息的路由器,不是内容的终点。每条入选内容的任务是帮读者在 10 秒内决定"点进原文还是划过",绝不替读者把原文读完。
 
@@ -732,13 +854,18 @@ export function buildEditorialPrompt(
 			? `
 14. 轴外位(offAxis):在所有追踪器之外,再挑 **1 条不属于任何追踪器**的候选——读者没定义过、也不会主动去找,但你判断他该看见的。reason 写清「为什么我觉得你该看见」,别写成又一条摘要。宁缺毋滥:没有真正够格的就给 null。它不占各追踪器的配额,也不受第 9 条总数限制。`
 			: ""
+	}${
+		tasteBlock
+			? `
+15. 用户消息里带了「读者的长期口味画像」段:它是过去几个月反馈的蒸馏,比单日反馈稳,但只是背景校准——与追踪器定义或「读者近期反馈」冲突时,以后两者为准;它同样不能推翻「不收」硬排除。`
+			: ""
 	}
 
 ${STYLE_RULES}`;
 
 	const trackerText = activeTrackers(trackers)
 		.map((t) => {
-			const lines = [`- key=${t.key} 「${t.name}」(每期最多 ${Math.min(t.quota, MAX_TRACKER_QUOTA)} 条)`];
+			const lines = [`- key=${t.key} 「${t.name}」(每期最多 ${normalizeQuota(t.quota)} 条)`];
 			if (t.question) lines.push(`  问题原话:${t.question}`);
 			// R7 · 读者拿它干什么。同一个话题,做产品的人和看投资的人该收到的
 			// 是完全不同的两批内容——这一行就是那个分岔口。
@@ -777,7 +904,7 @@ ${threadBlock}`);
 
 	const user = `读者的追踪器(sections 的 key 必须逐一对应这里的 key):
 ${trackerText}
-${feedbackBlock ? `\n${feedbackBlock}\n` : ""}
+${tasteBlock ? `\n${tasteBlock}\n` : ""}${feedbackBlock ? `\n${feedbackBlock}\n` : ""}
 今天的候选(共 ${candidates.length} 条):
 ${candidateText}
 
@@ -809,7 +936,7 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 	const sections: Record<string, EditorialPick[]> = {};
 	for (const t of activeTrackers(trackers)) {
 		sections[t.key] = (parsed.sections?.[t.key] ?? [])
-			.slice(0, Math.min(t.quota, MAX_TRACKER_QUOTA))
+			.slice(0, normalizeQuota(t.quota))
 			.map((p) => ({
 				...p,
 				whyClick: clean(p.whyClick) ?? "",

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MAX_INTENT_SEGMENTS, MAX_TRACKER_QUOTA, joinSegments, trackerSegments } from "../shared/pipeline-core";
+import { MAX_INTENT_SEGMENTS, QUOTA_OPTIONS, joinSegments, normalizeQuota, trackerSegments } from "../shared/pipeline-core";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
 import type { CatalogEntry } from "../shared/catalog";
 import type { ProposalItem, TestResult } from "./editor";
@@ -514,12 +514,12 @@ export default function Dossier({
 				{paused && <span className="font-mono-sc text-[10px] text-[var(--accent)]">已停用</span>}
 				<span className="ml-auto flex items-baseline gap-2">
 					<select
-						value={Math.min(t.quota, MAX_TRACKER_QUOTA)}
+						value={normalizeQuota(t.quota)}
 						onChange={(e) => onPatch({ quota: Number(e.target.value) }, `你把每期上限改成 ${e.target.value} 条`)}
 						title="这份定义每期最多几条"
 						className="font-mono-sc cursor-pointer border-0 bg-transparent text-[10px] text-[var(--ink-3)] outline-none"
 					>
-						{Array.from({ length: MAX_TRACKER_QUOTA }, (_, n) => n + 1).map((n) => (
+						{QUOTA_OPTIONS.map((n) => (
 							<option key={n} value={n}>
 								{n}条/期
 							</option>

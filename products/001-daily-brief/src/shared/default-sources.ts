@@ -87,7 +87,7 @@ export const DEMO_TRACKERS: Tracker[] = [
 		key: "learn",
 		name: "教我新东西",
 		question: "论文、深度播客、博主观点——允许和当下项目无关,但必须说得清『新在哪』",
-		quota: 2,
+		quota: 3,
 	},
 ];
 

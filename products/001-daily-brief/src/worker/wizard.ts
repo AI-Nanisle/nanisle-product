@@ -287,7 +287,7 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 			intent: joinSegments(segments),
 			sourceMode: "selected",
 			sourceKeys: [],
-			quota: 2,
+			quota: 3,
 			stage: "understanding",
 			changelog: [{ at: now, text: "向导开始:编辑起草了这份理解,等你圈改" }],
 		};

@@ -7,7 +7,7 @@
 		"dev": "vite",
 		"build": "tsc -b && vite build",
 		"check": "tsc -b && vite build && wrangler deploy --dry-run",
-		"test": "node --experimental-strip-types --test src/worker/wizard.test.ts src/shared/feedback.test.ts src/shared/weekly.test.ts src/shared/email.test.ts src/shared/notes.test.ts src/shared/style.test.ts",
+		"test": "node --experimental-strip-types --test src/worker/wizard.test.ts src/shared/feedback.test.ts src/shared/weekly.test.ts src/shared/email.test.ts src/shared/notes.test.ts src/shared/style.test.ts src/shared/pipeline-core.test.ts src/shared/taste.test.ts",
 		"deploy": "npm run build && wrangler deploy",
 		"generate": "node --experimental-strip-types pipeline/generate.ts",
 		"cf-typegen": "wrangler types"

@@ -15,9 +15,11 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import {
 	SEEN_WINDOW_DAYS,
+	applySameStoryMerges,
 	assembleBrief,
 	briefDate,
 	buildEditorialPrompt,
+	clusterSameStory,
 	dropSeenCandidates,
 	enrichBrief,
 	fetchAllSources,
@@ -147,17 +149,24 @@ async function main(): Promise<void> {
 
 	// 编辑调用走 shared/ai.ts 的接缝——和 Lambda 生产路径同一段代码,本地拿
 	// 真 key 验证的就是生产会用的那条链路(deepseek / anthropic / gateway)。
+	// 同事件归簇(和 Lambda 同一套):主报道进提示词,其余选中后并回 merged
+	const { primaries, mergedByPrimary } = clusterSameStory(fetched.candidates);
+	if (primaries.length < fetched.candidates.length) {
+		console.log(`[cluster] ${fetched.candidates.length} 条候选并成 ${primaries.length} 条`);
+	}
+
 	const cfg = envAiConfig();
 	const provider = resolveProvider(cfg);
 	let editorial;
 	if (provider === "mock") {
-		editorial = mockEditorial(fetched.candidates, trackers);
+		editorial = mockEditorial(primaries, trackers);
 	} else {
-		const { system, user } = buildEditorialPrompt(fetched.candidates, trackers);
-		console.log(`[editorial] asking ${provider}/${cfg.model ?? "(default model)"} to pick from ${fetched.candidates.length} candidates…`);
+		const { system, user } = buildEditorialPrompt(primaries, trackers);
+		console.log(`[editorial] asking ${provider}/${cfg.model ?? "(default model)"} to pick from ${primaries.length} candidates…`);
 		const result = await complete(cfg, { prompt: user, system, json: true });
 		editorial = parseEditorialJson(result.text, trackers);
 	}
+	applySameStoryMerges(editorial, mergedByPrimary);
 
 	// 入选条目的 Google News 跳转链换成原文 URL(和 Lambda 同一段逻辑)
 	const pickedIds = new Set([

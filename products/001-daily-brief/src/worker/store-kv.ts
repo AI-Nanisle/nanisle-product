@@ -5,7 +5,8 @@
 //
 // 键约定(全部带用户前缀,和旧版的全局键 config:*/brief:* 彻底分开):
 //   user:<email>:config           配置整存整取
-//   user:<email>:brief:<date>     每日简报 {brief, generatedAt, genCount}
+//   user:<email>:brief:<date>     每日简报 {brief, generatedAt}
+//   user:<email>:usage:<date>     当日额度计数 {gen, ai}(expirationTtl 7 天)
 //   user:<email>:fb:<ts>:<uuid>   反馈事件(expirationTtl 90 天)
 //   user:<email>:click:<ts>:<uuid> 点击事件(同上)
 //   user:<email>:thread:<trackerKey>:<threadKey>  线索台账(无 TTL)
@@ -13,14 +14,33 @@
 //   user:<email>:proposal:<id>    周自评提案
 
 import type { Brief, ItemNote, Thread } from "../shared/types";
-import type { Store, StoredBrief, StoredEvent } from "../shared/store";
-import { EVENT_TTL_S, MAX_EVENTS_READ, MAX_NOTES_READ, METRICS_TTL_S, PROPOSAL_TTL_S } from "../shared/store";
+import type { QuotaUsed, Store, StoredBrief, StoredEvent } from "../shared/store";
+import {
+	EVENT_TTL_S,
+	MAX_EVENTS_READ,
+	MAX_NOTES_READ,
+	METRICS_TTL_S,
+	PROPOSAL_TTL_S,
+	QUOTA_LIMITS,
+	QUOTA_TTL_S,
+} from "../shared/store";
 import type { Proposal } from "../shared/weekly";
 import { dynamoStore } from "../shared/store-dynamo";
 import type { AppEnv } from "./env";
 
 export function kvStore(kv: KVNamespace): Store {
 	const briefKey = (email: string, date: string) => `user:${email}:brief:${date}`;
+	const usageKey = (email: string, date: string) => `user:${email}:usage:${date}`;
+
+	async function readQuota(email: string, date: string): Promise<QuotaUsed> {
+		const raw = await kv.get(usageKey(email, date));
+		const parsed = raw ? (JSON.parse(raw) as Partial<QuotaUsed>) : null;
+		return { gen: parsed?.gen ?? 0, ai: parsed?.ai ?? 0 };
+	}
+
+	async function writeQuota(email: string, date: string, used: QuotaUsed): Promise<void> {
+		await kv.put(usageKey(email, date), JSON.stringify(used), { expirationTtl: QUOTA_TTL_S });
+	}
 
 	async function listDates(email: string): Promise<string[]> {
 		const prefix = `user:${email}:brief:`;
@@ -64,13 +84,29 @@ export function kvStore(kv: KVNamespace): Store {
 			return raw ? (JSON.parse(raw) as StoredBrief) : null;
 		},
 
-		async putBrief(email, brief: Brief, bumpGenCount) {
-			// 单用户本地库,读改写没有并发问题;原子性只有 DynamoDB 实现需要保证
-			const existing = await this.getBrief(email, brief.date);
-			const genCount = (existing?.genCount ?? 0) + (bumpGenCount ? 1 : 0);
-			const stored: StoredBrief = { brief, generatedAt: brief.generatedAt, genCount };
+		async putBrief(email, brief: Brief) {
+			const stored: StoredBrief = { brief, generatedAt: brief.generatedAt };
 			await kv.put(briefKey(email, brief.date), JSON.stringify(stored));
-			return genCount;
+		},
+
+		// 额度三件套。读改写不是原子的——KV 只在本地 dev / fork 出现,那里没有
+		// 并发对手;生产的原子性由 store-dynamo.ts 的条件写保证(§8.3)。
+		async reserveQuota(email, date, kind) {
+			const used = await readQuota(email, date);
+			if (used[kind] >= QUOTA_LIMITS[kind]) return { ok: false, used: used[kind] };
+			const next = { ...used, [kind]: used[kind] + 1 };
+			await writeQuota(email, date, next);
+			return { ok: true, used: next[kind] };
+		},
+
+		async refundQuota(email, date, kind) {
+			const used = await readQuota(email, date);
+			if (used[kind] <= 0) return;
+			await writeQuota(email, date, { ...used, [kind]: used[kind] - 1 });
+		},
+
+		async getQuota(email, date) {
+			return readQuota(email, date);
 		},
 
 		async appendEvent(email, ev) {

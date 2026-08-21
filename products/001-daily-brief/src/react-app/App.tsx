@@ -4,7 +4,17 @@ import { ISSUE_ITEM_ID } from "../shared/types";
 import Config from "./Config";
 import Notes from "./Notes";
 import { SiteHeader } from "./SiteChrome";
-import { apiPath, pathForView, productPath, type ProductView, viewFromPathname } from "./paths";
+import { USAGE_CHANGED, apiPath, pathForView, productPath, type ProductView, viewFromPathname } from "./paths";
+
+/**
+ * 今日额度读数(GET /api/usage,docs/02 §8.3)。gen = 立即生成,ai = 编辑调用。
+ * 上限由服务端下发而不是前端硬编码:改额度只该动一处(shared/store.ts)。
+ */
+interface Usage {
+	date: string;
+	gen: { used: number; limit: number };
+	ai: { used: number; limit: number };
+}
 
 // 请求不带 x-access-code:userGuard 只认会话 cookie(F6)。访问码已降级为
 // 站长凭证,不再是阅读凭证——前端没有它的位置。
@@ -349,6 +359,7 @@ function ProductPage() {
 	};
 	const [generating, setGenerating] = useState(false);
 	const [genMsg, setGenMsg] = useState("");
+	const [usage, setUsage] = useState<Usage | null>(null);
 
 	const load = useCallback(async (date?: string) => {
 		setState("loading");
@@ -382,9 +393,28 @@ function ProductPage() {
 		}
 	}, []);
 
+	// 额度读数。取不到就让它保持 null——页眉少一行灰字,总好过为一个装饰性
+	// 数字弹一个错误态出来。锁屏/未准入时这个请求本来就会 401/403。
+	const loadUsage = useCallback(async () => {
+		try {
+			const res = await fetch(apiPath("usage"));
+			if (res.ok) setUsage((await res.json()) as Usage);
+		} catch {
+			/* 读数不是关键路径,静默 */
+		}
+	}, []);
+
 	useEffect(() => {
 		void load();
 	}, [load]);
+
+	useEffect(() => {
+		void loadUsage();
+		// 配置页的编辑调用花的是同一份额度,它花完会广播(editor.ts)
+		const onChanged = () => void loadUsage();
+		window.addEventListener(USAGE_CHANGED, onChanged);
+		return () => window.removeEventListener(USAGE_CHANGED, onChanged);
+	}, [loadUsage]);
 
 	useEffect(() => {
 		const syncView = () => setViewState(viewFromPathname(window.location.pathname));
@@ -421,8 +451,14 @@ function ProductPage() {
 			setGenMsg("生成失败:网络错误");
 		} finally {
 			setGenerating(false);
+			// 成功扣一次,429 也要刷(读数正好该跳到「已用完」)
+			void loadUsage();
 		}
 	};
+
+	// 额度用完就把按钮停掉:与其让人点下去再吃一个 429,不如按钮自己说清楚。
+	const genLeft = usage ? Math.max(0, usage.gen.limit - usage.gen.used) : null;
+	const genExhausted = genLeft === 0;
 
 	const totalItems = useMemo(
 		() => brief?.sections.reduce((n, s) => n + s.items.length, 0) ?? 0,
@@ -572,6 +608,18 @@ function ProductPage() {
 									))}
 							</span>
 							<span className="ml-auto flex shrink-0 items-center gap-3">
+								{/* 今日额度读数(§8.3):额度是产品的一部分,不该等到点下去被拦住
+								    才知道。简报页只显示生成额度;配置页的编辑调用花另一份,
+								    所以那里两个都摆出来。 */}
+								{usage && (
+									<span
+										className={`font-mono-sc text-[11px] ${genExhausted ? "text-[var(--accent)]" : "text-[var(--ink-3)]"}`}
+										title={`今日额度按美东日期计,每天 0 点重置。立即生成 ${usage.gen.used}/${usage.gen.limit} 次,编辑调用(向导与「对编辑说一句」)${usage.ai.used}/${usage.ai.limit} 次。`}
+									>
+										今日 {usage.gen.used}/{usage.gen.limit}
+										{view === "config" && ` · 编辑 ${usage.ai.used}/${usage.ai.limit}`}
+									</span>
+								)}
 								{view === "brief" && brief && dates.length > 0 && (
 									<select
 										value={brief.date}
@@ -589,7 +637,13 @@ function ProductPage() {
 								{/* 配置页上这是唯一的行动号召,用版记章(index.css .btn-stamp);
 								    简报页的正文才是主角,「重新生成」退回一行灰字,不跟标题抢眼睛。 */}
 								{view === "config" ? (
-									<button type="button" onClick={() => void generate()} className="btn-stamp">
+									<button
+										type="button"
+										onClick={() => void generate()}
+										disabled={genExhausted}
+										title={genExhausted ? "今日试生成次数已用完,明早定时生成照常" : undefined}
+										className="btn-stamp disabled:cursor-not-allowed disabled:opacity-40"
+									>
 										<span className="mark" aria-hidden="true">
 											▸
 										</span>
@@ -599,9 +653,11 @@ function ProductPage() {
 									<button
 										type="button"
 										onClick={() => void generate()}
-										className="font-mono-sc cursor-pointer text-[11px] text-[var(--ink-3)] transition-colors hover:text-[var(--accent)]"
+										disabled={genExhausted}
+										title={genExhausted ? "今日重新生成次数已用完,明早定时生成照常" : undefined}
+										className="font-mono-sc cursor-pointer text-[11px] text-[var(--ink-3)] transition-colors hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:text-[var(--ink-3)] disabled:opacity-40 disabled:hover:text-[var(--ink-3)]"
 									>
-										{brief ? "重新生成 ↻" : "生成第一期 ↻"}
+										{genExhausted ? "今日已用完" : brief ? "重新生成 ↻" : "生成第一期 ↻"}
 									</button>
 								)}
 							</span>

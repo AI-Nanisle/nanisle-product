@@ -25,7 +25,9 @@ import { ISSUE_ITEM_ID } from "../shared/types";
 import {
 	activeTrackers,
 	applyHealth,
+	applySameStoryMerges,
 	assembleBrief,
+	clusterSameStory,
 	enrichBrief,
 	briefDate,
 	buildEditorialPrompt,
@@ -37,6 +39,7 @@ import {
 	mockEditorial,
 	parseEditorialJson,
 } from "../shared/pipeline-core";
+import { TASTE_MAX_CHARS, maybeDistillTaste, tastePromptBlock } from "../shared/taste";
 import type { SourceConfig, TrackerSourceRule } from "../shared/pipeline-core";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../shared/feedback";
 import { applyEventToNote } from "../shared/notes";
@@ -55,7 +58,7 @@ import {
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
 import { verifyUnsubToken } from "../shared/email";
-import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, offAxisEnabled } from "../shared/store";
+import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, QUOTA_LIMITS, offAxisEnabled } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
 import type { WizardContext, WizardResult } from "./wizard";
@@ -65,9 +68,10 @@ const PRODUCT_MOUNT = "/products/daily-brief/";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** 立即生成限额:10 次/人/日(docs/02 §8.3)。 */
-const GEN_LIMIT = 10;
-const GEN_LIMIT_MSG = `今日立即生成次数已用完(${GEN_LIMIT} 次/日)。明早定时生成照常;调参明天继续。`;
+// 每日额度的两句文案(上限值本身在 shared/store.ts 的 QUOTA_LIMITS)。
+// 两句都不带「失败」字样:这不是故障,是预期内的刹车(F7)。
+const GEN_LIMIT_MSG = `今日立即生成次数已用完(${QUOTA_LIMITS.gen} 次/日)。明早定时生成照常;调参明天继续。`;
+const AI_LIMIT_MSG = `今日编辑调用次数已用完(${QUOTA_LIMITS.ai} 次/日)。已经写好的定义照常生效,明早的简报不受影响。`;
 
 app.get("/api/health", async (c) => {
 	let provider = "invalid";
@@ -187,6 +191,21 @@ app.get("/api/dates", userGuard, async (c) => {
 	return c.json({ dates: await c.get("store").listBriefDates(c.get("email")) });
 });
 
+/**
+ * 今日额度读数(§8.3)。额度是产品的一部分,不是暗处的刹车——读者该在用完
+ * 之前就看见还剩多少,而不是点下去才被 429 拦住。走 userGuard 不走 userAiGuard:
+ * 看读数本身不花 token,AI 总闸关着时这一行也该照常显示。
+ */
+app.get("/api/usage", userGuard, async (c) => {
+	const date = briefDate(c.env.BRIEF_TZ ?? "America/New_York");
+	const used = await c.get("store").getQuota(c.get("email"), date);
+	return c.json({
+		date,
+		gen: { used: used.gen, limit: QUOTA_LIMITS.gen },
+		ai: { used: used.ai, limit: QUOTA_LIMITS.ai },
+	});
+});
+
 const FEEDBACK_KINDS: FeedbackKind[] = ["up", "down", "known", "more", "text", "want"];
 
 app.post("/api/feedback", userGuard, async (c) => {
@@ -274,6 +293,39 @@ app.put("/api/prefs", userGuard, async (c) => {
 app.get("/api/prefs", userGuard, async (c) => {
 	const config = await loadConfig(c.get("store"), c.get("email"));
 	return c.json({ prefs: config.prefs ?? {} });
+});
+
+// R9 · 口味画像:编辑对读者长期口味的书面理解,读者可查看、可改写——
+// 和追踪定义档案同一条信任链:选材依据必须是看得见、改得动的。
+app.get("/api/taste", userGuard, async (c) => {
+	const config = await loadConfig(c.get("store"), c.get("email"));
+	return c.json({ taste: config.taste ?? null });
+});
+
+app.put("/api/taste", userGuard, async (c) => {
+	let body: { summary?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	if (typeof body.summary !== "string") return c.json({ error: "summary must be a string" }, 400);
+	const summary = body.summary.trim().slice(0, TASTE_MAX_CHARS);
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	// 清空 = 删掉画像,编辑从零重新攒;改过的画像带 edited 标记,重蒸馏时
+	// 其中的明确偏好按纪律保留(shared/taste.ts)。
+	const taste = summary
+		? {
+				summary,
+				updatedAt: new Date().toISOString(),
+				distilledFrom: config.taste?.distilledFrom ?? 0,
+				edited: true,
+			}
+		: undefined;
+	await store.putConfig(email, { ...config, taste, updatedAt: new Date().toISOString() });
+	return c.json({ ok: true, taste: taste ?? null });
 });
 
 // E1 · 一键退订(docs/04)。免登录:邮件可能在手机上被点开,那里没有会话。
@@ -774,7 +826,15 @@ async function runWizard(c: Context<Guarded>, fn: WizardHandler) {
 	} catch {
 		return c.json({ error: "Body must be JSON." }, 400);
 	}
-	const ctx: WizardContext = { store: c.get("store"), email: c.get("email"), ai: aiConfig(c.env) };
+	const store = c.get("store");
+	const email = c.get("email");
+	// 额度先占位再调模型(§8.3)。四个编辑端点共用一个日计数器,按请求粗粒度
+	// 计——wizard/sources 偶尔会重试第二次调用,不额外计一笔:这道闸防的是
+	// 失控脚本,不是正常人的手速。占位放在解析 body 之后:格式错的请求不该扣额度。
+	// 模型报错也不退还——token 已经花了,退还等于给「失败就疯狂重试」放行。
+	const quota = await store.reserveQuota(email, briefDate(c.env.BRIEF_TZ ?? "America/New_York"), "ai");
+	if (!quota.ok) return c.json({ error: AI_LIMIT_MSG }, 429);
+	const ctx: WizardContext = { store, email, ai: aiConfig(c.env) };
 	try {
 		const result = await fn(ctx, body);
 		return c.json(result.body, result.status);
@@ -815,11 +875,12 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	const email = c.get("email");
 	const today = briefDate(env.BRIEF_TZ ?? "America/New_York");
 
-	// 限额先查(§8.3):Lambda 里 putBrief 原子自增,这里读到的是已用次数
-	const current = await store.getBrief(email, today);
-	if ((current?.genCount ?? 0) >= GEN_LIMIT) {
-		return c.json({ error: GEN_LIMIT_MSG }, 429);
-	}
+	// 限额:**先占位后干活**(§8.3)。原子自增 + 判上限在同一个 DynamoDB 条件
+	// 写里。旧版是「读计数 → 转调 Lambda 等 30–60 秒 → Lambda 结束时才自增」,
+	// 那期间并发打进来的请求会全部读到同一个旧计数、全部通过检查,10 次/日的
+	// 闸门在一次并发爆发面前形同虚设——而这是全站最贵的端点。
+	const quota = await store.reserveQuota(email, today, "gen");
+	if (!quota.ok) return c.json({ error: GEN_LIMIT_MSG }, 429);
 
 	// 生产路径:转调 Lambda,同步等结果(30-60 秒;Worker 等子请求不计 CPU)
 	if (env.GENERATE_URL && awsConfigured(env)) {
@@ -828,15 +889,24 @@ app.post("/api/generate", userAiGuard, async (c) => {
 			res = await invokeGenerate(env, { email });
 		} catch (err) {
 			console.error("generate: lambda invoke failed", err);
+			// 根本没调通 = 一个 token 都没花,把刚占的额度退回去。Lambda 返回 502
+			// 的那条路不退:它跑过了,钱可能已经花在半截的管线上。
+			await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
 			return c.json({ error: "生成服务暂时不可用,请稍后重试。" }, 502);
 		}
 		const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
 		if (!res.ok || !body) {
 			console.error("generate: lambda returned", res.status, JSON.stringify(body)?.slice(0, 500));
+			// 422 是「没有生效的追踪器 / 今天没抓到候选」——Lambda 在这三种情况下
+			// 都是**调模型之前**就返回的,零 token,退还。其余状态码一律不退。
+			if (res.status === 422) {
+				await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
+			}
 			const error = typeof body?.error === "string" ? body.error : "生成失败,请稍后重试。";
 			return c.json({ error }, 502);
 		}
-		return c.json(body);
+		// 额度是 Worker 这一侧占的,Lambda 不知道;读数由这里补上
+		return c.json({ ...body, genUsed: quota.used });
 	}
 
 	// dev / fork 回落:无 AWS 时在 Worker 里直跑(通常 mock 模式)。生成逻辑
@@ -845,10 +915,13 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	// 和 Lambda 的 generateOne 一样先挡一道:草稿追踪器(带 stage)不参与生成,
 	// 只有草稿时直接说清楚,别产出一份空简报让人以为是选材失败
 	if (activeTrackers(config.trackers).length === 0) {
+		// 同 Lambda 路径:还没调过模型,额度退还
+		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
 		return c.json({ error: "没有生效的追踪器——向导走完三步、点「完成」之后才会参与生成。" }, 422);
 	}
 	const fetched = await fetchAllSources(config.sources, DEFAULT_FILTERS, (m) => console.log(m));
 	if (fetched.candidates.length === 0) {
+		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
 		return c.json(
 			{ error: "没有抓到任何时间窗内的候选内容", sourceErrors: fetched.sourceErrors },
 			422,
@@ -878,16 +951,31 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		if (block) threadsByTracker.set(t.key, block);
 	}
 
+	// R9 · 口味画像(和 Lambda 同一套):攒够新反馈就重蒸馏,失败沿用旧的
+	let taste = config.taste;
+	if (provider !== "mock") {
+		const fresh = await maybeDistillTaste(store, email, config, {
+			call: (system, user) =>
+				complete({ ...cfg, maxOutputTokens: "2048" }, { prompt: user, system, json: true }).then((r) => r.text),
+			log: (m) => console.log(m),
+		});
+		if (fresh) taste = fresh;
+	}
+
+	// 同事件归簇(和 Lambda 同一套):主报道进提示词,其余选中后并回 merged
+	const { primaries, mergedByPrimary } = clusterSameStory(fetched.candidates);
+
 	let editorial;
 	if (provider === "mock") {
-		editorial = mockEditorial(fetched.candidates, config.trackers);
+		editorial = mockEditorial(primaries, config.trackers);
 	} else {
 		const { system, user } = buildEditorialPrompt(
-			fetched.candidates,
+			primaries,
 			config.trackers,
 			feedbackPromptBlock(digest),
 			offAxisEnabled(config),
 			threadsByTracker,
+			tastePromptBlock(taste),
 		);
 		// The editorial JSON needs room; never let the default 1024 cap truncate it.
 		const cap = Number.parseInt(env.AI_MAX_OUTPUT_TOKENS ?? "", 10);
@@ -902,6 +990,7 @@ app.post("/api/generate", userAiGuard, async (c) => {
 			return c.json({ error: "上游 AI 错误,请稍后重试。" }, 502);
 		}
 	}
+	applySameStoryMerges(editorial, mergedByPrimary);
 
 	const brief = await assembleBrief(editorial, fetched, {
 		date: today,
@@ -927,13 +1016,19 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	const echo = buildFeedbackEcho(digest, brief);
 	if (echo) brief.feedbackEcho = echo;
 
-	// H1 · 源健康回写:本地跑一次也该看得见哪个 feed 挂了
+	// H1 + R9 · 源健康与口味画像一并写回:整存整取的配置分两次写会互相覆盖
 	const healed = applyHealth(config.sources, new Map(fetched.sourceStatus.map((st) => [st.key, st])));
-	if (JSON.stringify(healed) !== JSON.stringify(config.sources)) {
-		await store.putConfig(email, { ...config, sources: healed, updatedAt: new Date().toISOString() });
+	const tasteChanged = JSON.stringify(taste ?? null) !== JSON.stringify(config.taste ?? null);
+	if (tasteChanged || JSON.stringify(healed) !== JSON.stringify(config.sources)) {
+		await store.putConfig(email, {
+			...config,
+			sources: healed,
+			...(taste ? { taste } : {}),
+			updatedAt: new Date().toISOString(),
+		});
 	}
 
-	const genCount = await store.putBrief(email, brief, true);
+	await store.putBrief(email, brief);
 
 	const picked = brief.sections.reduce((n, s) => n + s.items.length, 0);
 	return c.json({
@@ -943,7 +1038,7 @@ app.post("/api/generate", userAiGuard, async (c) => {
 		picked,
 		scanned: fetched.scanned,
 		sourceErrors: fetched.sourceErrors,
-		genCount,
+		genUsed: quota.used,
 	});
 });
 

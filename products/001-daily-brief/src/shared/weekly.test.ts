@@ -144,6 +144,39 @@ test("makeProposals:每条提案都必须带依据,且不超过每周上限", ()
 	}
 });
 
+test("makeProposals · H6:连续抓取失败的源直接生成停用提案,不等 14 期零入选", () => {
+	const cfg = config({
+		sources: [
+			{
+				key: "s1",
+				name: "某源",
+				url: "https://a.example/feed",
+				category: "blog",
+				health: { consecutiveFailures: 4, lastError: "HTTP 404" },
+			},
+		],
+	});
+	// 只有 1 期简报——零入选那条越线(要 14 期)必然不响,响的只能是健康越线
+	const metrics = computeWeeklyMetrics({
+		config: cfg,
+		briefs: [brief("2026-08-18", [])],
+		events: [],
+		now: NOW,
+	});
+	const proposals = makeProposals({
+		config: cfg,
+		metrics,
+		noHitStreak: new Map(),
+		wantedTitles: [],
+		now: NOW,
+		idSeed: () => "x",
+	});
+	assert.equal(proposals.length, 1);
+	assert.deepEqual(proposals[0].patch, { type: "source-disable", sourceKey: "s1" });
+	assert.ok(proposals[0].evidence.includes("连续 4 次抓取失败"));
+	assert.ok(proposals[0].evidence.includes("HTTP 404"));
+});
+
 test("makeProposals:什么都正常时不生成提案(没有依据就不许开口)", () => {
 	const cfg = config();
 	const metrics = computeWeeklyMetrics({

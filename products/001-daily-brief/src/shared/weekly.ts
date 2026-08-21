@@ -13,7 +13,7 @@
 
 import type { Brief, FeedbackEvent } from "./types";
 import type { SourceCategory, Tracker } from "./pipeline-core";
-import { fnv1a, isQueryFeedUrl } from "./pipeline-core.ts";
+import { fnv1a, isQueryFeedUrl, isUnhealthy } from "./pipeline-core.ts";
 import type { ClickEvent, UserConfig } from "./store";
 import { isFeedbackEvent } from "./store.ts";
 
@@ -252,6 +252,24 @@ export function makeProposals(ctx: ProposalContext): Proposal[] {
 		if (out.length >= MAX_PROPOSALS_PER_WEEK) break;
 		const source = config.sources.find((s) => s.key === stat.key);
 		if (!source || source.enabled === false) continue;
+		// 越线一之前的快道 · H6:源在连续抓取失败。每日生成已经不抓它了
+		// (fetchAllSources 跳过),周自评又刚真实试抓过一轮(runWeeklyForUser)
+		// ——还挂着的就该正式停用,别让红标无限期挂在来源库里。零入选那条
+		// 越线要等 14 期才响,死源不用等:抓都抓不到,谈不上入选。
+		if (isUnhealthy(source)) {
+			const h = source.health!;
+			out.push({
+				...base,
+				id: `p-${ctx.idSeed()}`,
+				targetName: source.name,
+				summary: `停用来源「${source.name}」`,
+				evidence: `它已连续 ${h.consecutiveFailures} 次抓取失败(${
+					h.lastOkAt ? `最近一次抓通是 ${h.lastOkAt.slice(0, 10)}` : "从未抓通过"
+				}${h.lastError ? `,最近错误:${h.lastError.slice(0, 80)}` : ""}),每日生成已暂停抓它。`,
+				patch: { type: "source-disable", sourceKey: source.key },
+			});
+			continue;
+		}
 		const idle = stat.lastSelected ? dayDiff(`${stat.lastSelected}T00:00:00Z`, now.toISOString()) : null;
 		const neverSelected = stat.selected === 0 && metrics.window.briefs >= 14;
 		if (!neverSelected && (idle === null || idle < 21)) continue;

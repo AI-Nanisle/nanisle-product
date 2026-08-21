@@ -42,6 +42,20 @@ export interface UserPrefs {
 export const DISCOVERY_WINDOW_DAYS = 30;
 export const DISCOVERY_MIN_CLICKS = 4;
 
+/**
+ * R9 · 口味画像:过往反馈的长期蒸馏(shared/taste.ts),每天进选材提示词。
+ * 反馈事件 90 天就过期,不蒸馏,长期口味会跟着 TTL 一起蒸发。
+ */
+export interface TasteProfile {
+	summary: string;
+	/** 上次蒸馏(或读者手改)的时间;下次蒸馏只看这之后的新反馈。 */
+	updatedAt: string;
+	/** 上次蒸馏消化了多少条反馈,配置页展示用。 */
+	distilledFrom: number;
+	/** 读者亲手改过:重蒸馏时其中的明确偏好必须逐条保留(用户的原话是宪法)。 */
+	edited?: boolean;
+}
+
 /** 一个用户的全部配置,整存整取(§4「追踪器仍整存整取」)。 */
 export interface UserConfig {
 	trackers: Tracker[];
@@ -49,6 +63,8 @@ export interface UserConfig {
 	/** 缺省 = 还没有任何候选展示过(老配置无此字段)。 */
 	metrics?: SourceFunnelMetrics;
 	prefs?: UserPrefs;
+	/** R9 · 缺省 = 反馈还没攒够一次蒸馏(老配置无此字段)。 */
+	taste?: TasteProfile;
 	updatedAt: string;
 }
 
@@ -57,12 +73,35 @@ export function offAxisEnabled(config: Pick<UserConfig, "prefs">): boolean {
 	return config.prefs?.offAxis !== false;
 }
 
-/** 存起来的一期简报;genCount 承载立即生成限额(10 次/人/日)。 */
+/** 存起来的一期简报。当日生成次数不记在这里,见下面的额度条目。 */
 export interface StoredBrief {
 	brief: Brief;
 	generatedAt: string;
-	genCount: number;
 }
+
+// ---------- 每日额度(docs/02 §8.3) ----------
+
+/**
+ * 两种花钱的动作,各记一个日计数器:
+ *   gen  立即生成 —— 一次 = 一条完整管线(选材 + 成稿两次大输入调用),最贵
+ *   ai   编辑侧的单次调用 —— 向导三步 + 「对编辑说一句」,按请求粗粒度计
+ *
+ * 粗到按请求而不是按 token,是因为这道闸防的是失控脚本,不是正常人的手速;
+ * 真要按钱计量得先让 ai.ts 把 usage 带回来,那是开放注册那一档的事。
+ */
+export type QuotaKind = "gen" | "ai";
+
+/** 当日已用次数。没有当天的条目 = 全 0。 */
+export interface QuotaUsed {
+	gen: number;
+	ai: number;
+}
+
+/** 每人每日上限。两个实现都从这里读,别在调用点另写一份。 */
+export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
+
+/** 额度条目留 7 天:够回看这一周,又不用另写清理任务(DynamoDB 原生 TTL)。 */
+export const QUOTA_TTL_S = 7 * 24 * 3600;
 
 /** /go 埋点的点击事件(和 FeedbackEvent 的区别:没有 kind)。 */
 export interface ClickEvent {
@@ -101,8 +140,22 @@ export interface Store {
 	putConfig(email: string, config: UserConfig): Promise<void>;
 	/** 无 date = 最新一期(SK 前缀倒序取 1,日期字符串字典序即时间序)。 */
 	getBrief(email: string, date?: string): Promise<StoredBrief | null>;
-	/** 覆盖写当日简报;bumpGenCount 时原子自增,返回今日已生成次数。 */
-	putBrief(email: string, brief: Brief, bumpGenCount: boolean): Promise<number>;
+	/** 覆盖写当日简报。生成次数不在这里记(见 reserveQuota)。 */
+	putBrief(email: string, brief: Brief): Promise<void>;
+	/**
+	 * 占一次额度:**先占位,后干活**(§8.3)。自增与判上限必须落在同一个原子
+	 * 写里——旧版是「读计数 → 花 30–60 秒干活 → 结束时才自增」,并发请求会
+	 * 全部通过前置检查,限额形同虚设。ok=false 时调用方必须直接拒绝请求。
+	 */
+	reserveQuota(email: string, date: string, kind: QuotaKind): Promise<{ ok: boolean; used: number }>;
+	/**
+	 * 退还一次额度。只用在**确定一个 token 都没花**的失败路径上(例如根本没
+	 * 调通 Lambda)。模型报错不退:它跑过了,钱可能已经花掉,退还等于纵容
+	 * 「失败就疯狂重试」这条真实的烧钱路径。
+	 */
+	refundQuota(email: string, date: string, kind: QuotaKind): Promise<void>;
+	/** 当日两个计数器的已用量,给前端的额度读数(GET /api/usage)。 */
+	getQuota(email: string, date: string): Promise<QuotaUsed>;
 	/** 反馈/点击事件,一事件一条,TTL 90 天。有 kind 字段的是反馈。 */
 	appendEvent(email: string, ev: FeedbackEvent | ClickEvent): Promise<void>;
 	/**

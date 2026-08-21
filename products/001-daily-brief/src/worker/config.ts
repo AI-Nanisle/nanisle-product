@@ -5,10 +5,10 @@
 import {
 	MAX_CHANGELOG,
 	MAX_INTENT_SEGMENTS,
-	MAX_TRACKER_QUOTA,
 	SOURCE_CATEGORIES,
 	fnv1a,
 	joinSegments,
+	normalizeQuota,
 } from "../shared/pipeline-core.ts";
 import { MAX_EXCLUDE, MAX_RULES_PER_SOURCE } from "../shared/weekly.ts";
 import type {
@@ -157,8 +157,7 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 		let key = typeof t.key === "string" && t.key.trim() ? t.key.trim().slice(0, 64) : fnv1a(`tracker:${name}:${i}`);
 		if (seen.has(key)) key = fnv1a(`${key}:${i}`);
 		seen.add(key);
-		const quotaRaw = typeof t.quota === "number" ? Math.floor(t.quota) : 2;
-		const quota = Math.min(Math.max(quotaRaw, 1), MAX_TRACKER_QUOTA);
+		const quota = normalizeQuota(typeof t.quota === "number" ? Math.floor(t.quota) : undefined);
 		const question = typeof t.question === "string" ? t.question.trim().slice(0, 500) : undefined;
 		const askedAt = typeof t.askedAt === "string" ? t.askedAt.trim().slice(0, 40) : undefined;
 		const purpose = typeof t.purpose === "string" ? t.purpose.trim().slice(0, 200) : undefined;

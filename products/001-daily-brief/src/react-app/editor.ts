@@ -1,4 +1,4 @@
-import { apiPath } from "./paths";
+import { USAGE_CHANGED, apiPath } from "./paths";
 import type { Tracker } from "../shared/pipeline-core";
 
 // 「编辑」在配置侧的通道(F2):三步向导的三个端点 + 档案页的「对编辑说一句」。
@@ -53,6 +53,10 @@ async function post<T>(path: string, body: unknown, headers: Record<string, stri
 	} catch {
 		throw new Error("网络错误,请重试");
 	}
+	// 这里的四个端点每次都动当日编辑额度,通知页眉重取读数。成功失败都要发:
+	// 模型报错也计一笔(token 已经花了),读数照样得往前走。429 更要发——
+	// 那正是读数该跳到「已用完」的时刻。
+	window.dispatchEvent(new Event(USAGE_CHANGED));
 	const data = (await res.json().catch(() => ({}))) as T & { error?: string };
 	if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 	return data;

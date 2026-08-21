@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { SourceCategory, SourceConfig } from "../shared/pipeline-core";
 import { isUnhealthy } from "../shared/pipeline-core";
+import { TASTE_MAX_CHARS } from "../shared/taste";
+import type { TasteProfile } from "../shared/store";
 import type { TestResult } from "./editor";
 import CatalogPicker from "./CatalogPicker";
 import { apiPath } from "./paths";
@@ -87,6 +89,11 @@ export default function SourceLibrary({
 	// H3/H5 · 自愈结果(按源 key)与反向发现的候选站
 	const [heal, setHeal] = useState<Record<string, HealResult | "healing">>({});
 	const [discovered, setDiscovered] = useState<DiscoveredHost[]>([]);
+	// R9 · 口味画像:null = 还没读到或没有;编辑态是一份本地草稿
+	const [taste, setTaste] = useState<TasteProfile | null>(null);
+	const [tasteLoaded, setTasteLoaded] = useState(false);
+	const [tasteDraft, setTasteDraft] = useState<string | null>(null);
+	const [tasteBusy, setTasteBusy] = useState(false);
 
 	const enabledCount = sources.filter((s) => s.enabled !== false).length;
 
@@ -117,8 +124,34 @@ export default function SourceLibrary({
 			} catch {
 				// 同上
 			}
+			try {
+				const res = await fetch(apiPath("taste"));
+				if (res.ok) {
+					setTaste(((await res.json()) as { taste: TasteProfile | null }).taste);
+					setTasteLoaded(true);
+				}
+			} catch {
+				// 同上
+			}
 		})();
 	}, []);
+
+	const saveTaste = async (summary: string) => {
+		setTasteBusy(true);
+		try {
+			const res = await fetch(apiPath("taste"), {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ summary }),
+			});
+			if (res.ok) {
+				setTaste(((await res.json()) as { taste: TasteProfile | null }).taste);
+				setTasteDraft(null);
+			}
+		} finally {
+			setTasteBusy(false);
+		}
+	};
 
 	const toggleOffAxis = async () => {
 		const next = !(offAxis ?? true);
@@ -354,7 +387,7 @@ export default function SourceLibrary({
 							{isUnhealthy(s) && (
 								<div className="mt-1 pl-4">
 									<span className="font-mono-sc text-[11px] text-[var(--accent)]">
-										⚠ 连续抓取失败 {s.health?.consecutiveFailures} 次
+										⚠ 连续抓取失败 {s.health?.consecutiveFailures} 次,已暂停每日抓取(每周自动复检一次)
 										{s.health?.lastOkAt ? ` · 最近一次成功 ${s.health.lastOkAt.slice(5, 10)}` : " · 从未成功过"}
 									</span>
 									<button
@@ -559,6 +592,77 @@ export default function SourceLibrary({
 						每天早刊生成后发一封极简邮件:今日三句话 + 一个回到简报的按钮,没有任何条目链接——阅读和反馈都在网页上。
 						邮件页脚也有一键退订,和这个开关是同一回事。
 					</p>
+				</div>
+			)}
+
+			{/* R9 · 口味画像:选材依据必须看得见、改得动(和追踪定义档案同一条
+			    信任链)。反馈攒够 10 条,编辑会把它们蒸馏成这段备忘并注入每天的
+			    选材;读者改过的字句在下次蒸馏时保留。 */}
+			{tasteLoaded && (
+				<div className="mt-6 border-t border-[var(--line)] pt-4">
+					<div className="flex items-baseline gap-3">
+						<p className="font-mono-sc m-0 text-[10px] uppercase tracking-[0.08em] text-[var(--ink-3)]">
+							编辑记下的口味
+							{taste && (
+								<span className="ml-2 normal-case tracking-normal opacity-80">
+									{taste.updatedAt.slice(0, 10)}
+									{taste.edited ? " · 你改过" : ` · 蒸馏自 ${taste.distilledFrom} 条反馈`}
+								</span>
+							)}
+						</p>
+						{tasteDraft === null && (
+							<button
+								type="button"
+								onClick={() => setTasteDraft(taste?.summary ?? "")}
+								className="font-mono-sc ml-auto cursor-pointer text-[11px] text-[var(--ink-3)] transition-colors hover:text-[var(--ink)]"
+							>
+								{taste ? "改写" : "自己写一段"}
+							</button>
+						)}
+					</div>
+					{tasteDraft !== null ? (
+						<div className="mt-2">
+							<textarea
+								value={tasteDraft}
+								onChange={(e) => setTasteDraft(e.target.value.slice(0, TASTE_MAX_CHARS))}
+								rows={5}
+								placeholder="写给编辑:你要更多什么、不要什么、口味最近怎么变了"
+								className="w-full rounded-md border border-[var(--line)] bg-[var(--card)] px-2.5 py-1.5 text-[13px] leading-relaxed outline-none focus:border-[var(--line-strong)]"
+							/>
+							<div className="mt-1.5 flex items-center gap-3">
+								<button
+									type="button"
+									disabled={tasteBusy}
+									onClick={() => void saveTaste(tasteDraft)}
+									className="font-mono-sc cursor-pointer rounded border border-[var(--line-strong)] px-2.5 py-0.5 text-[11px] transition-colors hover:bg-[var(--ink)] hover:text-[var(--paper)] disabled:cursor-default disabled:opacity-50"
+								>
+									{tasteBusy ? "保存中…" : "保存"}
+								</button>
+								<button
+									type="button"
+									onClick={() => setTasteDraft(null)}
+									className="font-mono-sc cursor-pointer text-[11px] text-[var(--ink-3)] hover:text-[var(--ink)]"
+								>
+									算了
+								</button>
+								<span className="font-mono-sc ml-auto text-[10px] text-[var(--ink-3)] opacity-70">
+									{tasteDraft.length}/{TASTE_MAX_CHARS} · 清空保存 = 删掉画像
+								</span>
+							</div>
+						</div>
+					) : taste ? (
+						<p className="m-0 mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--ink-2)]">{taste.summary}</p>
+					) : (
+						<p className="m-0 mt-1.5 text-[12px] leading-relaxed text-[var(--ink-3)]">
+							还没有。你在简报里的反馈(有用/没用/已知道/多找这种)攒够 10 条后,编辑会把它们蒸馏成一段长期口味备忘,
+							每天选材前重读——写在这里,你随时能看、能改。
+						</p>
+					)}
+					{taste && tasteDraft === null && (
+						<p className="font-mono-sc m-0 mt-1.5 text-[10px] text-[var(--ink-3)] opacity-80">
+							每天选材前编辑都会重读这段话;和追踪定义或近几天的反馈冲突时,以后者为准。你改过的说法在下次蒸馏时保留。
+						</p>
+					)}
 				</div>
 			)}
 
