@@ -36,6 +36,24 @@ export interface AiConfig {
 	gatewayKey?: string;
 }
 
+/**
+ * 轻任务档配置(docs/05 §D)。选材/成稿这类质量敏感的调用留在基础档
+ * (deepseek-v4-pro,带 thinking);向导、改稿、口味蒸馏这类交互敏感或
+ * 模板化的调用走这档——deepseek 模式下默认换 deepseek-v4-flash(快、省),
+ * 其他 provider(anthropic/gateway/mock)不强塞 deepseek 型号,跟随基础档。
+ * overrides 来自 FAST_AI_PROVIDER / FAST_AI_MODEL,显式配了就以配置为准。
+ */
+export function fastVariant(base: AiConfig, overrides?: { provider?: string; model?: string }): AiConfig {
+	if (overrides?.provider || overrides?.model) {
+		return {
+			...base,
+			...(overrides.provider ? { provider: overrides.provider } : {}),
+			...(overrides.model ? { model: overrides.model } : {}),
+		};
+	}
+	return resolveProvider(base) === "deepseek" ? { ...base, model: "deepseek-v4-flash" } : base;
+}
+
 export function resolveProvider(cfg: AiConfig): AiProvider {
 	const p = (cfg.provider ?? "deepseek").toLowerCase();
 	if (p === "deepseek") {

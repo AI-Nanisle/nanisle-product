@@ -364,9 +364,9 @@ function IssueGap({ date }: { date: string }) {
 
 // ---------- app ----------
 
-// locked = 401 没登录(引导去南屿登录);denied = 403 登录有效但不在内测
-// 名单(说明页)。两种态的文案不能串(F8)。
-type LoadState = "loading" | "ready" | "locked" | "denied" | "error";
+// locked = 401 没登录(引导去南屿登录)。旧的 denied(403 内测名单拦截)已随
+// 白名单退役删除(docs/05):登录即可用。
+type LoadState = "loading" | "ready" | "locked" | "error";
 type View = ProductView;
 
 /**
@@ -389,8 +389,6 @@ function ProductPage() {
 	const [state, setState] = useState<LoadState>("loading");
 	// 401 响应里带的主站登录地址,锁屏主按钮指向它
 	const [lockLoginUrl, setLockLoginUrl] = useState("");
-	// 403 响应里的准入说明(服务端文案为准)
-	const [denyMsg, setDenyMsg] = useState("");
 	const [view, setViewState] = useState<View>(() => viewFromPathname(window.location.pathname));
 	const setView = (v: View) => {
 		setViewState(v);
@@ -413,12 +411,6 @@ function ProductPage() {
 				const body = (await res.json().catch(() => ({}))) as { loginUrl?: string };
 				setLockLoginUrl(body.loginUrl ?? "");
 				setState("locked");
-				return;
-			}
-			if (res.status === 403) {
-				const body = (await res.json().catch(() => ({}))) as { error?: string };
-				setDenyMsg(body.error ?? "产品内测中,你的账号还不在名单里。");
-				setState("denied");
 				return;
 			}
 			if (res.status === 404 && !date) {
@@ -607,24 +599,6 @@ function ProductPage() {
 							登录入口暂不可用——请从 nanisle.com 的产品页重新打开。
 						</p>
 					)}
-				</div>
-			</div>
-		);
-	}
-
-	if (state === "denied") {
-		// F8:登录有效但不在内测名单(403)。文案与 401 的「去登录」严格分开。
-		return (
-			<div className="center-pane px-6">
-				<div className="w-full max-w-sm">
-					<h1 className="font-black text-3xl mb-1">产品内测中</h1>
-					<p className="text-sm text-[var(--ink-2)] mb-6">{denyMsg}</p>
-					<a
-						href="https://nanisle.com"
-						className="font-mono-sc text-[12px] text-[var(--ink-3)] hover:text-[var(--ink)]"
-					>
-						← 回南屿
-					</a>
 				</div>
 			</div>
 		);

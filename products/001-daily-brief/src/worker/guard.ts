@@ -1,13 +1,14 @@
-// B4 · 门禁(docs/02-技术方案.md §5.2):从单用户时代的三道门改成两道。
+// B4 · 门禁(docs/02-技术方案.md §5.2、docs/05 开放使用):两道门。
 //
-//   userGuard   一切个人数据端点:有效会话 + 邮箱在白名单。会话未配置时
-//               (本地 dev / fork)回落为固定用户 dev@local——零配置规矩保留。
-//               白名单在 /auth/sso 之外每个请求再查一次:被移出名单的人,
-//               30 天会话没过期时也要立即失效。
+//   userGuard   一切个人数据端点:有效会话即可。会话未配置时(本地 dev /
+//               fork)回落为固定用户 dev@local——零配置规矩保留。
 //   userAiGuard 花 token 的端点变体:AI_DISABLED 总闸 + userGuard。
-//   adminGuard  站长凭证(x-access-code):手动触发全量生成。白名单增删
-//               走主仓 infra/ 的脚本,不开 API。
+//               按 IP 的日额度不在这里——它只该拦花 token 的动作,落在
+//               index.ts 的额度占位处(与按账号额度同点检查)。
+//   adminGuard  站长凭证(x-access-code):手动触发全量生成。
 //
+// 2026-08-24 白名单准入退役(docs/05):注册全开放,准入闸撤掉;原 WHITELIST
+// 集合改当定时刊的订阅名单用,由 putConfig 自动维护(store-dynamo.ts)。
 // 旧的 accessGuard / ownerGuard / aiGuard 已退役:配置不再是站长的,
 // 是每个用户自己的,userGuard 按会话邮箱天然隔离。
 
@@ -71,8 +72,8 @@ export function appUrl(env: AppEnv, path = ""): string {
  */
 export async function sessionEmail(env: AppEnv, cookie: string | undefined): Promise<string | null> {
 	// 没有登录闸口的实例(本地 dev / fork):默认 dev@local,DEV_EMAIL 可覆盖成
-	// 自己的邮箱——本地连线上 DynamoDB 调真数据时用。白名单照查(下面的
-	// userGuard 只对 dev@local 放行),所以冒充别人没用。
+	// 自己的邮箱——本地连线上 DynamoDB 调真数据时用。这条回落只在
+	// NANISLE_SSO_SECRET 未配置时生效,托管实例身份只认会话 cookie。
 	if (!env.NANISLE_SSO_SECRET) return env.DEV_EMAIL?.trim() || DEV_USER;
 	if (!cookie) return null;
 	const payload = await verifyToken(env.NANISLE_SSO_SECRET, cookie);
@@ -92,10 +93,6 @@ function makeUserGuard(requireAiEnabled: boolean) {
 		const email = await sessionEmail(env, getCookie(c, SESSION_COOKIE));
 		if (!email) {
 			return c.json({ error: "请先登录南屿账号。", loginUrl: loginUrl(env) }, 401);
-		}
-		if (email !== DEV_USER && !(await store.isWhitelisted(email))) {
-			// 403(不是 401):登录是有效的,拦下的是准入——前端两种态的文案不同
-			return c.json({ error: "产品内测中,你的账号还不在名单里。想试用请联系站长开通。" }, 403);
 		}
 		c.set("email", email);
 		await next();

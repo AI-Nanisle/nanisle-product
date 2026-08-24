@@ -3,6 +3,7 @@
 // `wrangler secret put` (deployed) or .dev.vars (local, gitignored).
 // 密钥清单与轮换 runbook:主仓 infra/README.md。
 
+import { fastVariant } from "../shared/ai";
 import type { AiConfig } from "../shared/ai";
 
 export interface AppEnv {
@@ -14,6 +15,10 @@ export interface AppEnv {
 	AI_PROVIDER?: string;
 	/** Model ID sent on every request (deepseek-chat / claude-* …). */
 	AI_MODEL?: string;
+	/** 轻任务档(向导/改稿/口味蒸馏)覆盖,见 shared/ai.ts fastVariant。 */
+	FAST_AI_PROVIDER?: string;
+	/** 同上;都没配时 deepseek 模式默认 deepseek-v4-flash。 */
+	FAST_AI_MODEL?: string;
 	/** Hard per-request output-token cap — cost guard for hosted instances. */
 	AI_MAX_OUTPUT_TOKENS?: string;
 	/** "1" turns all AI endpoints off (kill switch, docs/02 §8.3). */
@@ -78,6 +83,14 @@ export function aiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConfig {
 		anthropicAuthToken: env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: env.AI_GATEWAY_URL,
 		gatewayKey: env.AI_GATEWAY_KEY,
+		...overrides,
+	};
+}
+
+/** 轻任务档的 AiConfig(docs/05 §D):向导、对编辑说一句、口味蒸馏用。 */
+export function fastAiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConfig {
+	return {
+		...fastVariant(aiConfig(env), { provider: env.FAST_AI_PROVIDER, model: env.FAST_AI_MODEL }),
 		...overrides,
 	};
 }

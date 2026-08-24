@@ -18,7 +18,7 @@ import {
 } from "./guard";
 import type { Guarded } from "./guard";
 import { signToken, verifyToken } from "./sso";
-import { aiConfig } from "./env";
+import { aiConfig, fastAiConfig } from "./env";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
 import { ISSUE_ITEM_ID } from "../shared/types";
@@ -58,7 +58,15 @@ import {
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
 import { verifyUnsubToken } from "../shared/email";
-import { DISCOVERY_MIN_CLICKS, DISCOVERY_WINDOW_DAYS, QUOTA_LIMITS, genStepWriter, offAxisEnabled } from "../shared/store";
+import {
+	DISCOVERY_MIN_CLICKS,
+	DISCOVERY_WINDOW_DAYS,
+	IP_QUOTA_LIMITS,
+	QUOTA_LIMITS,
+	genStepWriter,
+	ipQuotaSubject,
+	offAxisEnabled,
+} from "../shared/store";
 import type { GenRun, Store } from "../shared/store";
 import { probeFeed } from "./feeds";
 import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
@@ -73,6 +81,18 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // 两句都不带「失败」字样:这不是故障,是预期内的刹车(F7)。
 const GEN_LIMIT_MSG = `今日立即生成次数已用完(${QUOTA_LIMITS.gen} 次/日)。明早定时生成照常;调参明天继续。`;
 const AI_LIMIT_MSG = `今日编辑调用次数已用完(${QUOTA_LIMITS.ai} 次/日)。已经写好的定义照常生效,明早的简报不受影响。`;
+// 按 IP 的第二道闸(docs/05 §B2):同一出口 IP 下所有账号合计。正常单人到不了
+// 这里(账号额度先满);文案如实说原因,误伤的多人共用 IP 场景好排查。
+const IP_LIMIT_MSG = "同一网络今日的调用配额已用完(多账号合计)。明天自动恢复;误伤请联系站长。";
+
+/**
+ * 客户端出口 IP。cf-connecting-ip 由 Cloudflare 边缘写入,经主站 Service
+ * Binding 转调时原始请求头原样传递,用户伪造不了。取不到时(理论上只有
+ * 本地 dev)归入 "unknown" 桶——本地没有并发对手,共享一个桶无妨。
+ */
+function clientIp(c: Context<Guarded>): string {
+	return c.req.header("cf-connecting-ip")?.trim() || "unknown";
+}
 
 app.get("/api/health", async (c) => {
 	let provider = "invalid";
@@ -131,19 +151,7 @@ app.get("/auth/sso", async (c) => {
 			401,
 		);
 	}
-	// 白名单准入:不在名单就停在说明页,不发会话(§5.1)。
-	const { store } = makeStore(c.env);
-	if (!(await store.isWhitelisted(payload.email))) {
-		return c.html(
-			`<!doctype html><meta charset="utf-8"><title>内测中 · 每日简报</title>` +
-				`<body style="font-family:sans-serif;max-width:28em;margin:15vh auto;line-height:1.9">` +
-				`<h1 style="font-size:1.2em">产品内测中</h1>` +
-				`<p>每日简报目前按邀请开放。你已成功登录南屿账号(${payload.email}),但还不在内测名单里。</p>` +
-				`<p>想试用请联系站长开通;开通后重新打开本页即可。</p>` +
-				`<p><a href="${(c.env.NANISLE_URL ?? "https://nanisle.com").replace(/\/+$/, "")}">← 回南屿</a></p></body>`,
-			403,
-		);
-	}
+	// 白名单准入已退役(docs/05 开放使用):登录有效就发会话,人人可用。
 	const session = await signToken(secret, {
 		email: payload.email,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
@@ -833,9 +841,15 @@ async function runWizard(c: Context<Guarded>, fn: WizardHandler) {
 	// 计——wizard/sources 偶尔会重试第二次调用,不额外计一笔:这道闸防的是
 	// 失控脚本,不是正常人的手速。占位放在解析 body 之后:格式错的请求不该扣额度。
 	// 模型报错也不退还——token 已经花了,退还等于给「失败就疯狂重试」放行。
-	const quota = await store.reserveQuota(email, briefDate(c.env.BRIEF_TZ ?? "America/New_York"), "ai");
+	const today = briefDate(c.env.BRIEF_TZ ?? "America/New_York");
+	const quota = await store.reserveQuota(email, today, "ai");
 	if (!quota.ok) return c.json({ error: AI_LIMIT_MSG }, 429);
-	const ctx: WizardContext = { store, email, ai: aiConfig(c.env) };
+	// 第二道:按 IP 合计(docs/05 §B2,防开小号)。和账号额度一样不退还——
+	// 这是滥用闸不是记账,失败路径上少一次配额比多一条退还逻辑便宜。
+	const ipQuota = await store.reserveQuota(ipQuotaSubject(clientIp(c)), today, "ai", IP_QUOTA_LIMITS.ai);
+	if (!ipQuota.ok) return c.json({ error: IP_LIMIT_MSG }, 429);
+	// 向导/改稿/蒸馏走轻任务档(docs/05 §D):交互端点延迟敏感,flash 快且省。
+	const ctx: WizardContext = { store, email, ai: fastAiConfig(c.env) };
 	try {
 		const result = await fn(ctx, body);
 		return c.json(result.body, result.status);
@@ -1015,6 +1029,14 @@ app.post("/api/generate", userAiGuard, async (c) => {
 	const quota = await store.reserveQuota(email, today, "gen");
 	if (!quota.ok) return c.json({ error: GEN_LIMIT_MSG }, 429);
 
+	// 第二道:按 IP 合计(docs/05 §B2,防开小号)。IP 闸拦下时账号额度退还:
+	// 这一步确定一个 token 都没花,不该占掉用户明天还想用的次数。
+	const ipQuota = await store.reserveQuota(ipQuotaSubject(clientIp(c)), today, "gen", IP_QUOTA_LIMITS.gen);
+	if (!ipQuota.ok) {
+		await store.refundQuota(email, today, "gen").catch((e) => console.error("generate: refund failed", e));
+		return c.json({ error: IP_LIMIT_MSG }, 429);
+	}
+
 	// 立即 202,活儿转后台(和下面 generate-all 同一个道理:一趟要几分钟,
 	// 同步等待会先撞上边缘 ~100s 超时,响应没人收得到,还诱导重试翻倍计费)。
 	// 进度先落库:刷新页面的人靠 GET /api/generate/status 把进度接回去,
@@ -1099,8 +1121,11 @@ async function generateInline(
 	let taste = config.taste;
 	if (provider !== "mock") {
 		const fresh = await maybeDistillTaste(store, email, config, {
+			// 蒸馏走轻任务档(docs/05 §D):结构化摘要,不需要 pro 的深思考
 			call: (system, user) =>
-				complete({ ...cfg, maxOutputTokens: "2048" }, { prompt: user, system, json: true }).then((r) => r.text),
+				complete(fastAiConfig(env, { maxOutputTokens: "2048" }), { prompt: user, system, json: true }).then(
+					(r) => r.text,
+				),
 			log: (m) => console.log(m),
 		});
 		if (fresh) taste = fresh;

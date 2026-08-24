@@ -53,12 +53,6 @@ export function kvStore(kv: KVNamespace): Store {
 	}
 
 	return {
-		// KV 模式没有白名单:它只在本地 dev / fork 里出现,准入交给 userGuard
-		// 的零配置回落(所有人都是 dev@local 或持有效会话的自己)。
-		async isWhitelisted() {
-			return true;
-		},
-
 		async listWhitelist() {
 			// 定时全量只在 Lambda(必有 DynamoDB)里跑,这里只为接口完整
 			return [];
@@ -93,9 +87,9 @@ export function kvStore(kv: KVNamespace): Store {
 
 		// 额度三件套。读改写不是原子的——KV 只在本地 dev / fork 出现,那里没有
 		// 并发对手;生产的原子性由 store-dynamo.ts 的条件写保证(§8.3)。
-		async reserveQuota(email, date, kind) {
+		async reserveQuota(email, date, kind, limit = QUOTA_LIMITS[kind]) {
 			const used = await readQuota(email, date);
-			if (used[kind] >= QUOTA_LIMITS[kind]) return { ok: false, used: used[kind] };
+			if (used[kind] >= limit) return { ok: false, used: used[kind] };
 			const next = { ...used, [kind]: used[kind] + 1 };
 			await writeQuota(email, date, next);
 			return { ok: true, used: next[kind] };

@@ -32,7 +32,7 @@ import {
 } from "../src/shared/pipeline-core";
 import type { Candidate, FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../src/shared/default-sources";
-import { AiError, complete, resolveProvider } from "../src/shared/ai";
+import { AiError, complete, fastVariant, resolveProvider } from "../src/shared/ai";
 import type { AiConfig } from "../src/shared/ai";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
 import type { FeedbackDigest } from "../src/shared/feedback";
@@ -126,6 +126,18 @@ function envEnrichAiConfig(base: AiConfig): AiConfig {
 		...(model ? { model } : {}),
 		...(process.env.ENRICH_AI_MAX_OUTPUT_TOKENS ? { maxOutputTokens: process.env.ENRICH_AI_MAX_OUTPUT_TOKENS } : {}),
 	};
+}
+
+/**
+ * 轻任务档(docs/05 §D):目前只有口味画像蒸馏走这档——结构化摘要不需要
+ * pro 的深思考。默认逻辑在 shared/ai.ts 的 fastVariant(deepseek 模式换
+ * deepseek-v4-flash,其他 provider 跟随基础档);FAST_AI_* 可显式覆盖。
+ */
+function envFastAiConfig(base: AiConfig): AiConfig {
+	return fastVariant(base, {
+		provider: process.env.FAST_AI_PROVIDER,
+		model: process.env.FAST_AI_MODEL,
+	});
 }
 
 function envStore(): Store {
@@ -249,11 +261,12 @@ async function produceBrief(
 		if (block) threadsByTracker.set(t.key, block);
 	}
 
-	// R9 · 口味画像:攒够新反馈就重蒸馏(一次小调用),没攒够沿用存着的旧画像
+	// R9 · 口味画像:攒够新反馈就重蒸馏(一次小调用),没攒够沿用存着的旧画像。
+	// 蒸馏走轻任务档(docs/05 §D):结构化摘要,不需要 pro 的深思考。
 	let taste = run.config.taste;
 	if (resolveProvider(cfg) !== "mock") {
 		const fresh = await maybeDistillTaste(store, run.email, run.config, {
-			call: (system, user) => complete(cfg, { prompt: user, system, json: true }).then((r) => r.text),
+			call: (system, user) => complete(envFastAiConfig(cfg), { prompt: user, system, json: true }).then((r) => r.text),
 			log: (m) => console.log(`[${run.email}] ${m}`),
 		});
 		if (fresh) taste = fresh;

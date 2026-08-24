@@ -21,6 +21,7 @@ import { AwsClient } from "aws4fetch";
 import type { Brief, FeedbackEvent, FeedbackKind, ItemNote, Thread } from "./types";
 import type { ClickEvent, GenRun, Store, StoredBrief, StoredEvent } from "./store";
 import {
+	DEV_USER,
 	EVENT_TTL_S,
 	GEN_RUN_TTL_S,
 	MAX_EVENTS_READ,
@@ -125,19 +126,14 @@ export function dynamoStore(opts: DynamoOptions): Store {
 	}
 
 	return {
-		async isWhitelisted(email) {
-			// 白名单键按小写存储(主仓 infra/scripts/whitelist-add.ps1 写入时归一)。
-			// 读侧同样归一:上游(better-auth)目前恰好会小写化邮箱,但不依赖它。
-			const out = await call<{ Item?: Item }>("GetItem", {
-				Key: { PK: { S: "WHITELIST" }, SK: { S: email.trim().toLowerCase() } },
-			});
-			return Boolean(out.Item);
-		},
-
+		// PK "WHITELIST" 的历史与现状(docs/05):这组条目原是站长手工维护的准入
+		// 白名单;2026-08-24 准入退役后语义变成**定时刊的订阅名单**——putConfig
+		// 自动把用户写进来,generateAll 遍历它扇出。键不改名:零迁移,存量成员
+		// 天然还在名单里。
 		async listWhitelist() {
 			const emails: string[] = [];
 			let startKey: unknown;
-			// 白名单是几十人的量级,分页循环只是防御性的
+			// 订阅名单是几十人的量级,分页循环只是防御性的
 			do {
 				const out = await call<{ Items?: Item[]; LastEvaluatedKey?: unknown }>("Query", {
 					KeyConditionExpression: "PK = :pk",
@@ -183,6 +179,14 @@ export function dynamoStore(opts: DynamoOptions): Store {
 					updatedAt: { S: config.updatedAt },
 				},
 			});
+			// 订阅名单自动维护(docs/05 §A):有配置的人就该收定时刊。幂等覆盖写。
+			// dev@local 除外:本地 dev 连线上库又没配 DEV_EMAIL 时会以它存配置,
+			// 进了名单就等于每天白烧一份没人看的定时刊。
+			if (email !== DEV_USER) {
+				await call("PutItem", {
+					Item: { PK: { S: "WHITELIST" }, SK: { S: email.trim().toLowerCase() } },
+				});
+			}
 		},
 
 		async getBrief(email, date) {
@@ -228,8 +232,7 @@ export function dynamoStore(opts: DynamoOptions): Store {
 			});
 		},
 
-		async reserveQuota(email, date, kind) {
-			const limit = QUOTA_LIMITS[kind];
+		async reserveQuota(email, date, kind, limit = QUOTA_LIMITS[kind]) {
 			try {
 				const out = await call<{ Attributes?: Item }>("UpdateItem", {
 					Key: usageKey(email, date),

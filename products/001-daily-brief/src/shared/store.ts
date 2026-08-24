@@ -100,6 +100,17 @@ export interface QuotaUsed {
 /** 每人每日上限。两个实现都从这里读,别在调用点另写一份。 */
 export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
 
+/**
+ * 每个出口 IP 每日上限(docs/05 §B2)。注册是开放的 magic link,按账号的
+ * 额度挡不住开小号;这一层把同一 IP 下所有账号合计封顶。取账号上限的 2 倍:
+ * 家庭/办公室共用出口 IP 的两个真人不受影响,开 10 个小号在第 2 个就撞墙。
+ * 计数主体写成 `ip#<地址>`,复用同一套额度条目(键形状、TTL 全一致)。
+ */
+export const IP_QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 20, ai: 120 };
+
+/** 按 IP 计数的额度主体。IP 地址里没有 @,和邮箱主体天然不冲突。 */
+export const ipQuotaSubject = (ip: string) => `ip#${ip}`;
+
 /** 额度条目留 7 天:够回看这一周,又不用另写清理任务(DynamoDB 原生 TTL)。 */
 export const QUOTA_TTL_S = 7 * 24 * 3600;
 
@@ -211,7 +222,7 @@ export const MAX_EVENTS_READ = 500;
  * 这个接口。方法全部是主键点查或前缀 Query,别往里加扫描类操作。
  */
 export interface Store {
-	isWhitelisted(email: string): Promise<boolean>;
+	/** 定时刊的订阅名单(原准入白名单,docs/05 后由 putConfig 自动维护)。 */
 	listWhitelist(): Promise<string[]>;
 	getConfig(email: string): Promise<UserConfig | null>;
 	putConfig(email: string, config: UserConfig): Promise<void>;
@@ -223,8 +234,10 @@ export interface Store {
 	 * 占一次额度:**先占位,后干活**(§8.3)。自增与判上限必须落在同一个原子
 	 * 写里——旧版是「读计数 → 花 30–60 秒干活 → 结束时才自增」,并发请求会
 	 * 全部通过前置检查,限额形同虚设。ok=false 时调用方必须直接拒绝请求。
+	 * subject 通常是邮箱;按 IP 计数时传 ipQuotaSubject(ip) 并显式给 limit
+	 * (缺省 = QUOTA_LIMITS[kind],即按账号的上限)。
 	 */
-	reserveQuota(email: string, date: string, kind: QuotaKind): Promise<{ ok: boolean; used: number }>;
+	reserveQuota(subject: string, date: string, kind: QuotaKind, limit?: number): Promise<{ ok: boolean; used: number }>;
 	/**
 	 * 退还一次额度。只用在**确定一个 token 都没花**的失败路径上(例如根本没
 	 * 调通 Lambda)。模型报错不退:它跑过了,钱可能已经花掉,退还等于纵容
