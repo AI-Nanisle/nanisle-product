@@ -108,3 +108,56 @@ test("buildEditorialPrompt:口味画像段进用户消息,并带对应的系统�
 	const bare = buildEditorialPrompt([cand({ id: "a", title: "t" })], [{ key: "t1", name: "定义一", quota: 2 }]);
 	assert.ok(!bare.system.includes("长期口味画像"));
 });
+
+// ---------- 成稿重试(docs/05 后日谈:2026-08-24 断流事故) ----------
+
+import { enrichBrief } from "./pipeline-core.ts";
+import type { Brief } from "./types";
+import type { FetchResult } from "./pipeline-core";
+
+function enrichFixture() {
+	// excerpt 超过 TEASER_THRESHOLD(1500):不走原文抓取,测试不出网
+	const brief = {
+		date: "2026-08-24",
+		generatedAt: "2026-08-24T11:00:00Z",
+		tldr: [],
+		sections: [
+			{
+				key: "t1",
+				title: "追踪一",
+				items: [{ id: "a1", title: "标题", whyClick: "路由一句", url: "https://a.example/a1", source: "某源" }],
+			},
+		],
+	} as unknown as Brief;
+	const fetched = {
+		candidates: [cand({ id: "a1", title: "标题", excerpt: "字".repeat(1600) })],
+	} as unknown as FetchResult;
+	return { brief, fetched };
+}
+
+test("enrichBrief:首次调用断流,重试成功后散文照常写回", async () => {
+	const { brief, fetched } = enrichFixture();
+	let calls = 0;
+	const n = await enrichBrief(brief, fetched, [], async () => {
+		calls += 1;
+		// 2026-08-24 定时刊真实炸法:undici 流中途断,fetch 抛 TypeError: terminated
+		if (calls === 1) throw new TypeError("terminated");
+		return JSON.stringify({ items: { a1: { substance: "实质一百五十字的替身", take: "判断" } } });
+	});
+	assert.equal(calls, 2);
+	assert.equal(n, 1);
+	assert.equal(brief.sections[0].items[0].substance, "实质一百五十字的替身");
+	assert.equal(brief.sections[0].items[0].take, "判断");
+});
+
+test("enrichBrief:连炸两次才认输,保住路由版不抛错", async () => {
+	const { brief, fetched } = enrichFixture();
+	let calls = 0;
+	const n = await enrichBrief(brief, fetched, [], async () => {
+		calls += 1;
+		throw new TypeError("terminated");
+	});
+	assert.equal(calls, 2);
+	assert.equal(n, 0);
+	assert.equal(brief.sections[0].items[0].substance, undefined);
+});

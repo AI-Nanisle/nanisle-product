@@ -1372,7 +1372,18 @@ export async function enrichBrief(
 			return 0;
 		}
 		const { system, user } = buildEnrichPrompt(usable);
-		const n = applyEnrichment(brief, parseEnrichJson(await call(system, user)));
+		// 一次性故障重试一次再认输:成稿是整期一把梭,断流(2026-08-24 真实发生:
+		// TypeError: terminated,整期只剩路由文案)或返回坏 JSON 都会废掉全部散文。
+		// 空结果的重试在 ai.ts 里已有,这里补「调用炸掉/解析不了」这条路;连炸两次
+		// 才走外层兜底,代价只是极少数坏日子里多一次调用。
+		let parsed: ReturnType<typeof parseEnrichJson>;
+		try {
+			parsed = parseEnrichJson(await call(system, user));
+		} catch (err) {
+			log(`[enrich] 首次调用未成,重试一次:${err}`);
+			parsed = parseEnrichJson(await call(system, user));
+		}
+		const n = applyEnrichment(brief, parsed);
 		log(`[enrich] ${n}/${usable.length} 条写出了实质与判断${skipped ? `,${skipped} 条因正文不足跳过` : ""}`);
 		return n;
 	} catch (err) {
