@@ -98,7 +98,7 @@ export interface QuotaUsed {
 }
 
 /** 每人每日上限。两个实现都从这里读,别在调用点另写一份。 */
-export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
+export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 5, ai: 30 };
 
 /**
  * 每个出口 IP 每日上限(docs/05 §B2)。注册是开放的 magic link,按账号的
@@ -106,7 +106,7 @@ export const QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
  * 家庭/办公室共用出口 IP 的两个真人不受影响,开 10 个小号在第 2 个就撞墙。
  * 计数主体写成 `ip#<地址>`,复用同一套额度条目(键形状、TTL 全一致)。
  */
-export const IP_QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 20, ai: 120 };
+export const IP_QUOTA_LIMITS: Record<QuotaKind, number> = { gen: 10, ai: 60 };
 
 /** 按 IP 计数的额度主体。IP 地址里没有 @,和邮箱主体天然不冲突。 */
 export const ipQuotaSubject = (ip: string) => `ip#${ip}`;
