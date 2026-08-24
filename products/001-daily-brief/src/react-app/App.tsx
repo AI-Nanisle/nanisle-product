@@ -39,6 +39,22 @@ function fmtElapsed(s: number): string {
 	return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒`;
 }
 
+/**
+ * 额度在美东次日 0 点重置,换算成读者本地钟点(北京时间 12:00 或 13:00,随
+ * 美东夏令时浮动)。夏令时切换当天可能差一小时——这只是一句提示,可以容忍。
+ */
+function quotaResetLocalTime(): string {
+	const now = new Date();
+	const gmt =
+		new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" })
+			.formatToParts(now)
+			.find((p) => p.type === "timeZoneName")?.value ?? "GMT-5";
+	const offH = Number(/GMT([+-]\d+)/.exec(gmt)?.[1] ?? "-5");
+	const etDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
+	const resetMs = Date.parse(`${etDate}T00:00:00Z`) - offH * 3600_000 + 24 * 3600_000;
+	return new Date(resetMs).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
 // 请求不带 x-access-code:userGuard 只认会话 cookie(F6)。访问码已降级为
 // 站长凭证,不再是阅读凭证——前端没有它的位置。
 async function postFeedback(date: string, itemId: string, kind: FeedbackKind, text?: string) {
@@ -564,6 +580,7 @@ function ProductPage() {
 	// 额度用完就把按钮停掉:与其让人点下去再吃一个 429,不如按钮自己说清楚。
 	const genLeft = usage ? Math.max(0, usage.gen.limit - usage.gen.used) : null;
 	const genExhausted = genLeft === 0;
+	const quotaReset = useMemo(quotaResetLocalTime, []);
 
 	const totalItems = useMemo(
 		() => brief?.sections.reduce((n, s) => n + s.items.length, 0) ?? 0,
@@ -719,15 +736,24 @@ function ProductPage() {
 							</span>
 							<span className="ml-auto flex shrink-0 items-center gap-3">
 								{/* 今日额度读数(§8.3):额度是产品的一部分,不该等到点下去被拦住
-								    才知道。简报页只显示生成额度;配置页的编辑调用花另一份,
-								    所以那里两个都摆出来。 */}
-								{usage && (
+								    才知道。写「还剩几次」不写「用了几比几」:读者关心的是前者。
+								    平时是一枚安静的描边小签;剩 2 次以内转 accent 提醒省着用;
+								    用完把重置钟点写在明面上——悬停提示手机上看不见,不能只靠它。
+								    简报页只显示生成额度;配置页的编辑调用花另一份,所以那里
+								    两个都摆出来。 */}
+								{usage && genLeft !== null && (
 									<span
-										className={`font-mono-sc text-[11px] ${genExhausted ? "text-[var(--accent)]" : "text-[var(--ink-3)]"}`}
-										title={`今日额度按美东日期计,每天 0 点重置。立即生成 ${usage.gen.used}/${usage.gen.limit} 次,编辑调用(向导与「对编辑说一句」)${usage.ai.used}/${usage.ai.limit} 次。`}
+										className={`font-mono-sc whitespace-nowrap rounded-full border px-2.5 py-[3px] text-[12px] ${
+											genExhausted
+												? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]"
+												: genLeft <= 2
+													? "border-[var(--accent)] text-[var(--accent)]"
+													: "border-[var(--line-strong)] text-[var(--ink-2)]"
+										}`}
+										title={`今日额度按美东日期计,每天美东 0 点(你的时间 ${quotaReset})重置。立即生成已用 ${usage.gen.used}/${usage.gen.limit} 次,编辑调用(向导与「对编辑说一句」)已用 ${usage.ai.used}/${usage.ai.limit} 次。`}
 									>
-										今日 {usage.gen.used}/{usage.gen.limit}
-										{view === "config" && ` · 编辑 ${usage.ai.used}/${usage.ai.limit}`}
+										{genExhausted ? `生成已用完 · ${quotaReset} 重置` : `今日还可生成 ${genLeft} 次`}
+										{view === "config" && ` · 编辑余 ${Math.max(0, usage.ai.limit - usage.ai.used)}`}
 									</span>
 								)}
 								{view === "brief" && brief && dates.length > 0 && (
