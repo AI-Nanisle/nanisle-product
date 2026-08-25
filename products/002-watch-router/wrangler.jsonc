@@ -1,0 +1,58 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "nanisle-002-watch-router",
+	"main": "./src/worker/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"assets": {
+		"directory": "./dist/client",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		// SPA fallback swallows *navigation* requests before the Worker runs —
+		// these routes must hit the Worker: /auth/sso sets the session cookie,
+		// /api/* is plain JSON.
+		"run_worker_first": [
+			"/api/*",
+			"/auth/*",
+			"/products/watch-router/*"
+		]
+	},
+	// KV 只放内容缓存(content:<platform>:<id>,docs/02 T6);有主的状态在
+	// DynamoDB(nanisle-watch-router 表,主仓 infra 的 NanisleWatchRouter stack)。
+	// Before your first real deploy: `wrangler kv namespace create WATCH`
+	// and paste the returned id below. Local dev uses an in-memory KV.
+	"kv_namespaces": [
+		{ "binding": "WATCH", "id": "TBD_RUN_wrangler_kv_namespace_create_WATCH" }
+	],
+	// Non-secret configuration. Secrets are NEVER written here or in any file —
+	// set them with `wrangler secret put <NAME>` (prod) or in .dev.vars (local, gitignored):
+	//   NANISLE_SSO_SECRET     shared with the nanisle main site (SSO handoff, src/worker/sso.ts)
+	//   ACCESS_CODE            admin credential (x-access-code)
+	//   CONSUMER_TOKEN         auth for the slow-lane consumer's /api/queue/* callbacks
+	//   JINA_KEY               r.jina.ai extraction fallback (fast lane, docs/02 T2)
+	//   AWS_ACCESS_KEY_ID      minimal-permission IAM user `nanisle-watch-router-worker`:
+	//   AWS_SECRET_ACCESS_KEY    DynamoDB table access + SQS SendMessage
+	//   DEEPSEEK_API_KEY       only for AI_PROVIDER=deepseek (the production default)
+	"vars": {
+		// 生产默认 deepseek;没配 DEEPSEEK_API_KEY 时代码自动落回 mock(fork
+		// 零配置照样跑通,误配的实例在 /api/health 里看得见)
+		"AI_PROVIDER": "deepseek",
+		// V4 Pro 默认开 thinking;整篇转写一次调用(docs/02 T3),质量优先
+		"AI_MODEL": "deepseek-v4-pro",
+		// 轻任务档:用户级高亮小调用(docs/02 T4 第二次调用)
+		"FAST_AI_MODEL": "deepseek-v4-flash",
+		"AI_MAX_OUTPUT_TOKENS": "8192",
+		"APP_URL": "https://nanisle.com/products/watch-router",
+		"NANISLE_URL": "https://nanisle.com",
+		// AWS side (NanisleWatchRouter stack in the main repo's infra/):
+		// unset AWS credentials => in-memory fallback store (dev/fork).
+		"DDB_TABLE": "nanisle-watch-router",
+		"AWS_REGION": "us-east-1",
+		// The tasks queue (the QueueUrl output of `cdk deploy NanisleWatchRouter`)
+		"QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/494347858613/nanisle-watch-router-tasks"
+	}
+}

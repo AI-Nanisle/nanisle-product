@@ -1,0 +1,23 @@
+# Local development secrets — copy to .dev.vars (gitignored) and fill in.
+# Everything is optional: with nothing set, the app runs in mock mode with an
+# in-memory store as user dev@local (fork 零配置跑通,docs/02 T5).
+
+# AI seam (shared/ai.ts). Production default is deepseek; leave unset for mock.
+# DEEPSEEK_API_KEY=sk-...
+# AI_PROVIDER=deepseek
+
+# SSO handoff from the main site. Unset locally = no login gate (dev@local).
+# NANISLE_SSO_SECRET=...
+# 本地连线上数据调试时冒充的身份(仅 NANISLE_SSO_SECRET 未设时生效):
+# DEV_EMAIL=you@example.com
+
+# AWS side — set all three to use the real DynamoDB table (else in-memory store).
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+# DDB_TABLE=nanisle-watch-router
+
+# Slow-lane consumer callback auth (/api/queue/*, docs/02 T1).
+# CONSUMER_TOKEN=...
+
+# r.jina.ai extraction fallback key (fast lane, docs/02 T2).
+# JINA_KEY=...
