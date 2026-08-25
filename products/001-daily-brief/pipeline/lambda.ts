@@ -405,7 +405,15 @@ async function generateOne(
 	const config = await store.getConfig(email);
 	if (!config) return response(422, { error: "该用户还没有配置。先在配置页建一个追踪器。" });
 	if (activeTrackers(config.trackers).length === 0) {
-		return response(422, { error: "没有生效的追踪器,先在配置页建一个。" });
+		// 分两种话说(yiren 反馈 #4):他配置页上明明有一份定义、却被告知「先建
+		// 一个」,是因为那份还是向导草稿(带 stage)——不点破这一层,用户对着
+		// 完好的档案页只会觉得产品在胡说。
+		const hasDraft = config.trackers.some((t) => t.stage);
+		return response(422, {
+			error: hasDraft
+				? "追踪器还在向导里,没有生效——回配置页把三步走完、点「完成,开始追踪」,再来生成。"
+				: "没有生效的追踪器,先在配置页建一个。",
+		});
 	}
 	await onStep(1); // 抓取信息源
 	const fetched = await fetchAllSources(config.sources, DEFAULT_FILTERS, (m) => console.log(`[${email}] ${m}`));

@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { MAX_INTENT_SEGMENTS, PURPOSE_QUESTION, joinSegments, purposeOptions, trackerSegments } from "../shared/pipeline-core";
-import type { IntentSegment, SourceConfig, Tracker } from "../shared/pipeline-core";
-import { wizardSources, wizardTags, wizardUnderstand } from "./editor";
+import type { IntentSegment, SourceCategory, SourceConfig, Tracker } from "../shared/pipeline-core";
+import { wizardSources, wizardSuggest, wizardTags, wizardUnderstand } from "./editor";
 import type { ProposalItem } from "./editor";
-import { ChipRow, InlineInput } from "./Dossier";
+import { ChipRow, InlineInput, IntentHistory } from "./Dossier";
+import { CATEGORIES, CATEGORY_LABELS } from "./SourceLibrary";
 import CandidateCard from "./CandidateCard";
 
 // F1 · 三步向导(docs/02 §7):理解 → 标签 → 信源,每步一次结构化调用,
 // 用户确认才前进。步骤状态就是草稿 tracker 的 stage 字段——草稿存在服务端
-// 的用户配置里,刷新、关页、换设备都能从当前步续上。
+// 的用户配置里,刷新、关页、换设备都能从当前步续上(对话原文也在草稿上,
+// 见 wizardMessages)。
 // 步骤 1 的逐句圈改复用档案页同款交互(红标 = edited:true,服务端重生成时
 // 按位置强制保留);步骤 2 复用 ChipRow;步骤 3 复用「编辑建议」候选卡。
-
-const SUGGESTIONS = ["盯住 Agent 框架的重大版本与迁移成本", "利率和通胀数据对我持仓的影响"];
 
 const monoLabel = "font-mono-sc text-[10px] uppercase tracking-[0.08em]";
 const primaryBtn =
@@ -39,19 +39,43 @@ export interface WizardProps {
 	onAdopt: (trackerKey: string, item: ProposalItem) => Promise<void>;
 	/** 一键采纳整轮候选;返回没加成的那几个(本页负责放回列表)和一句交代。 */
 	onAdoptAll: (trackerKey: string, items: ProposalItem[]) => Promise<{ failed: ProposalItem[]; note: string }>;
+	/**
+	 * 手动输入一个源(siyang 反馈 #4):服务端做 feed 发现 + 真实试抓,失败时
+	 * noted=true 表示这条需求已实时递给开发者。
+	 */
+	onManualAdd: (
+		trackerKey: string,
+		url: string,
+		category: SourceCategory,
+	) => Promise<{ ok: boolean; error?: string; noted?: boolean }>;
 	/** 「完成」:调用方负责删 stage(草稿转生效)并切回档案页。 */
-	onFinish: (key: string) => void;
+	/** 「完成」:调用方请求服务端把草稿转生效,**成功后**才切档案页;失败要抛出来,人留在向导里。 */
+	onFinish: (key: string) => void | Promise<void>;
 	/** 放弃:key 为 null 表示还没起草。 */
 	onDiscard: (key: string | null) => void;
 }
 
-export default function Wizard({ draft, sources, headers, onTrackers, onPatch, onAdopt, onAdoptAll, onFinish, onDiscard }: WizardProps) {
+export default function Wizard({
+	draft,
+	sources,
+	headers,
+	onTrackers,
+	onPatch,
+	onAdopt,
+	onAdoptAll,
+	onManualAdd,
+	onFinish,
+	onDiscard,
+}: WizardProps) {
 	const step = stepOf(draft);
 	const [busy, setBusy] = useState(false);
 	const [note, setNote] = useState("");
 	const [question, setQuestion] = useState("");
+	// F8 · 帮我想(冷启动):一句处境 → 编辑出的候选题。处境在选题开始时还会
+	// 作为 purpose 写进定义(是用户亲口说的,R8 的「不许猜」不拦它)。
+	const [suggestContext, setSuggestContext] = useState("");
+	const [suggestions, setSuggestions] = useState<string[]>([]);
 	const [followUp, setFollowUp] = useState("");
-	const [followUps, setFollowUps] = useState<string[]>([]);
 	// R8 · 服务端出的追问。**显示与否只看草稿有没有 purpose**,不看这个状态——
 	// 它只是本次响应带回来的问法。挂在瞬时状态上的话,刷新一次追问就永远消失了,
 	// 而 purpose 还是空的(线上实测踩到过)。
@@ -60,9 +84,18 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 	const [candidates, setCandidates] = useState<ProposalItem[]>([]);
 	const [editKey, setEditKey] = useState<string | null>(null);
 	const [chipOpen, setChipOpen] = useState<string | null>(null);
+	// 手动加源(第三步):URL + 类目,回车或按钮触发试抓
+	const [manualUrl, setManualUrl] = useState("");
+	const [manualCat, setManualCat] = useState<SourceCategory>("blog");
 	// 第三步的候选只活在本页(反捏造:它们还没进任何配置);进入该步且没有
 	// 候选时自动找一轮——刷新续跑也走这里,别让用户面对一个空屏。
 	const autoFetched = useRef(false);
+
+	// V2 · 向导对话的全文以草稿上的 wizardMessages 为准(服务端持久化)——
+	// 刷新/换设备后继续对话,编辑仍看得到之前聊过的每一轮。挂本地状态的旧实现
+	// 刷新即失忆,理解会按「只有第一句」重写(siyang 反馈 #2 的诱因之一)。
+	const talkedSoFar = (): string[] =>
+		draft?.wizardMessages?.length ? draft.wizardMessages : [draft?.question ?? draft?.name ?? ""];
 
 	const segments = draft ? trackerSegments(draft) : [];
 	/** 试抓通过的候选数——只有 2 个以上才值得给「全部加入」。 */
@@ -86,11 +119,26 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 
 	// ---------- 步骤动作 ----------
 
+	/** F8 · 帮我想:一句处境换 4 个候选题。不建草稿,纯出题。 */
+	const suggest = () =>
+		run(async () => {
+			const ctx = suggestContext.trim();
+			if (!ctx) return;
+			const res = await wizardSuggest(ctx, headers());
+			setSuggestions(res.suggestions ?? []);
+			if (res.note) setNote(res.note);
+		});
+
 	const start = () =>
 		run(async () => {
 			const q = question.trim();
 			if (!q) return;
-			const res = await wizardUnderstand([q], undefined, headers());
+			// 选了编辑出的题(原样或没改)时,那句处境就是 purpose——用户亲口
+			// 说的,直接写进定义,第 1 步的「你在忙什么」追问随之免掉。
+			// 自己另写了题就不带:处境未必还贴着新题,宁可让追问去问。
+			const ctx = suggestContext.trim();
+			const purpose = ctx && suggestions.includes(q) ? ctx : undefined;
+			const res = await wizardUnderstand([q], undefined, headers(), purpose);
 			if (res.trackers && res.tracker) onTrackers(res.trackers, res.tracker.key);
 			setAsk(res.ask ?? null);
 			if (res.note) setNote(res.note);
@@ -101,11 +149,12 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 			if (!draft) return;
 			const msg = followUp.trim();
 			if (!msg) return;
-			const msgs = [draft.question ?? draft.name, ...followUps, msg];
+			// 服务端上限 8 轮:超了保第一句(原话是理解的锚)+ 最近 7 句
+			const all = [...talkedSoFar(), msg];
+			const msgs = all.length > 8 ? [all[0], ...all.slice(-7)] : all;
 			const res = await wizardUnderstand(msgs, draft.key, headers());
 			if (res.trackers) onTrackers(res.trackers);
 			setAsk(res.ask ?? null);
-			setFollowUps((f) => [...f, msg]);
 			setFollowUp("");
 			if (res.note) setNote(res.note);
 		});
@@ -114,8 +163,7 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 	const answerPurpose = (purpose: string) =>
 		run(async () => {
 			if (!draft || !purpose.trim()) return;
-			const msgs = [draft.question ?? draft.name, ...followUps];
-			const res = await wizardUnderstand(msgs, draft.key, headers(), purpose.trim());
+			const res = await wizardUnderstand(talkedSoFar(), draft.key, headers(), purpose.trim());
 			if (res.trackers) onTrackers(res.trackers);
 			setAsk(res.ask ?? null);
 			setOtherPurpose("");
@@ -128,6 +176,33 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 			const res = await wizardTags(draft.key, headers());
 			if (res.trackers) onTrackers(res.trackers);
 			if (res.note) setNote(res.note);
+		});
+
+	/** R10 · 「再给几个」:已有标签一个不动,让编辑换角度补(服务端合并)。 */
+	const moreTags = () =>
+		run(async () => {
+			if (!draft) return;
+			const res = await wizardTags(draft.key, headers(), true);
+			if (res.trackers) onTrackers(res.trackers);
+			if (res.note) setNote(res.note);
+		});
+
+	/** 手动加源:试抓通过即入定义;失败时如实交代,需求已递给开发者就说一声。 */
+	const manualAdd = () =>
+		run(async () => {
+			if (!draft) return;
+			const url = manualUrl.trim();
+			if (!url) return;
+			const res = await onManualAdd(draft.key, url, manualCat);
+			if (res.ok) {
+				setManualUrl("");
+				return;
+			}
+			setNote(
+				`这个源没加成:${res.error ?? "试抓失败"}${
+					res.noted ? " · 已把这条需求记给开发者,评估支持后会进精选目录" : ""
+				}`,
+			);
 		});
 
 	const fetchCandidates = (exclude: string[]) =>
@@ -244,11 +319,31 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 		</div>
 	);
 
-	const noteLine = note && (
-		<p className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--paper-deep)] px-3.5 py-2 text-[12px] leading-relaxed text-[var(--ink-2)]">
-			{note}
-		</p>
-	);
+	// 失败必须比一行灰字更响(yiren 反馈 #2「毫无反馈地停止了」):朱红面板 +
+	// 明确的下一步。找信源步直接给重试按钮,别让人自己琢磨该点哪里。
+	const isErrorNote = /^(出错了|加入失败)/.test(note);
+	const noteLine =
+		note &&
+		(isErrorNote ? (
+			<div className="mt-3 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3.5 py-2.5">
+				<p className="m-0 text-[13px] font-medium text-[var(--accent)]">这一步没成功</p>
+				<p className="m-0 mt-0.5 text-[12px] leading-relaxed text-[var(--ink-2)]">{note}</p>
+				{step === "sources" && (
+					<button
+						type="button"
+						onClick={() => fetchCandidates(candidates.map((c) => c.url))}
+						disabled={busy}
+						className="font-mono-sc mt-2 cursor-pointer rounded border border-[var(--accent)] px-2.5 py-1 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--paper)] disabled:opacity-40"
+					>
+						再试一次
+					</button>
+				)}
+			</div>
+		) : (
+			<p className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--paper-deep)] px-3.5 py-2 text-[12px] leading-relaxed text-[var(--ink-2)]">
+				{note}
+			</p>
+		));
 
 	const busyLine = busy && (
 		<p className="font-mono-sc mt-3 text-[11px] text-[var(--ink-3)]">
@@ -273,17 +368,51 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 						placeholder="比如:盯住 Agent 框架的重大版本与迁移成本"
 						className="mt-4 w-full resize-y rounded-lg border border-[var(--line-strong)] bg-[var(--paper)] px-3.5 py-3 text-[15px] leading-relaxed outline-none focus:border-[var(--ink)]"
 					/>
-					<div className="mt-2.5 flex flex-wrap gap-1.5">
-						{SUGGESTIONS.map((s) => (
+					{/* F8 · 帮我想(冷启动):想不出来问什么的人,让他先说处境——把处境
+					    翻译成长期问题正是编辑的本行,凭空印几个例题帮不了任何具体的人。
+					    出的题点一下填进输入框,改不改都行。 */}
+					<div className="mt-3 rounded-lg border border-dashed border-[var(--line-strong)] px-3.5 py-2.5">
+						<div className="flex flex-wrap items-center gap-2">
+							<span className="font-mono-sc shrink-0 text-[10px] uppercase tracking-[0.08em] text-[var(--ink-3)]">
+								一时想不出来?说说你在忙什么,编辑帮你出题
+							</span>
+							<input
+								value={suggestContext}
+								onChange={(e) => setSuggestContext(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter" && !e.nativeEvent.isComposing) suggest();
+								}}
+								disabled={busy}
+								placeholder="比如:在做跨境电商独立站 / 刚开始定投美股 / 在转行做 AI 产品"
+								className="min-w-52 flex-1 rounded border border-[var(--line)] bg-[var(--paper)] px-2.5 py-1 text-[13px] outline-none focus:border-[var(--accent)] disabled:opacity-50"
+							/>
 							<button
-								key={s}
 								type="button"
-								onClick={() => setQuestion(s)}
-								className="cursor-pointer rounded border border-dashed border-[var(--line-strong)] px-2.5 py-1 text-[12px] text-[var(--ink-2)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+								onClick={suggest}
+								disabled={busy || !suggestContext.trim()}
+								className="font-mono-sc cursor-pointer rounded border border-[var(--line-strong)] px-2.5 py-1 text-[11px] transition-colors hover:bg-[var(--ink)] hover:text-[var(--paper)] disabled:cursor-default disabled:opacity-40"
 							>
-								{s}
+								{busy ? "编辑在想…" : "帮我想几个"}
 							</button>
-						))}
+						</div>
+						{suggestions.length > 0 && (
+							<div className="mt-2 flex flex-wrap gap-1.5">
+								{suggestions.map((s) => (
+									<button
+										key={s}
+										type="button"
+										onClick={() => setQuestion(s)}
+										className={`cursor-pointer rounded border border-dashed px-2.5 py-1 text-[12px] transition-colors ${
+											question.trim() === s
+												? "border-[var(--accent)] text-[var(--accent)]"
+												: "border-[var(--line-strong)] text-[var(--ink-2)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+										}`}
+									>
+										{s}
+									</button>
+								))}
+							</div>
+						)}
 					</div>
 					<div className="mt-4.5 flex items-center gap-3">
 						<button type="button" onClick={start} disabled={busy || !question.trim()} className={primaryBtn}>
@@ -413,6 +542,8 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 						<p className="font-mono-sc m-0 mt-1 text-[10px] text-[var(--ink-3)]">
 							虚线处点击可改,回车保存 · 红色是你圈改过的,编辑重写理解时也会原样保留
 						</p>
+						{/* V1 · 编辑重写前的旧版理解都在这里,改坏了随时回去 */}
+						<IntentHistory tracker={draft} onPatch={(patch, log) => onPatch(draft.key, patch, log)} />
 					</section>
 					{/* 继续对话:每轮基于全部原话重新产出完整理解(§7.2 防越聊越漂) */}
 					<div className="mt-4 flex items-center gap-2 rounded-lg bg-[var(--paper-deep)] px-3.5 py-2">
@@ -470,6 +601,7 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 									}
 									bucket="include"
 									onDropChip={(chip) => moveTag("include", chip.text)}
+									onToggleChip={(chip) => moveTag("exclude", chip.text)}
 								/>
 							</div>
 							<div>
@@ -489,11 +621,21 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 									}
 									bucket="exclude"
 									onDropChip={(chip) => moveTag("exclude", chip.text)}
+									onToggleChip={(chip) => moveTag("include", chip.text)}
 								/>
 							</div>
 						</div>
+						{/* R10 · 不知道加什么标签时,让编辑换角度再想几个(已有的一个不动) */}
+						<button
+							type="button"
+							onClick={moreTags}
+							disabled={busy}
+							className="mt-2.5 cursor-pointer rounded border border-dashed border-[var(--line-strong)] px-2.5 py-1 text-[12px] text-[var(--ink-2)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+						>
+							{busy ? "编辑在想…" : "+ 让编辑再给几个"}
+						</button>
 						<p className="font-mono-sc m-0 mt-2 text-[10px] text-[var(--ink-3)]">
-							标签是选材的硬性信号,不是必填——留空也能进下一步 · 判错了直接把标签拖到另一栏
+							标签是选材的硬性信号,不是必填——留空也能进下一步 · 判错了点一下标签,它会挪到另一栏
 						</p>
 					</section>
 					{busyLine}
@@ -571,13 +713,54 @@ export default function Wizard({ draft, sources, headers, onTrackers, onPatch, o
 								{busy ? "编辑在找…" : "+ 再找几个"}
 							</button>
 						</div>
+						{/* 手动输入:你自己知道的源直接贴进来,服务端自动发现 feed 并真实试抓;
+						    抓不通的会连同原因实时递给开发者(N1),不让需求消失在报错里 */}
+						<div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-md bg-[var(--paper-deep)] px-3 py-2">
+							<span className="font-mono-sc shrink-0 text-[10px] text-[var(--ink-3)]">自己有想加的源?</span>
+							<input
+								value={manualUrl}
+								onChange={(e) => setManualUrl(e.target.value)}
+								onKeyDown={(e) => {
+									if (e.key === "Enter" && !e.nativeEvent.isComposing) manualAdd();
+								}}
+								disabled={busy}
+								placeholder="feed 或网站地址,会自动发现 feed"
+								className="font-mono-sc min-w-44 flex-1 rounded border border-[var(--line)] bg-[var(--card)] px-2.5 py-1 text-[12px] outline-none focus:border-[var(--accent)] disabled:opacity-50"
+							/>
+							<select
+								value={manualCat}
+								onChange={(e) => setManualCat(e.target.value as SourceCategory)}
+								disabled={busy}
+								className="cursor-pointer rounded border border-[var(--line)] bg-[var(--card)] px-1.5 py-1 text-[12px] outline-none disabled:opacity-50"
+							>
+								{CATEGORIES.map((cat) => (
+									<option key={cat} value={cat}>
+										{CATEGORY_LABELS[cat]}
+									</option>
+								))}
+							</select>
+							<button
+								type="button"
+								onClick={manualAdd}
+								disabled={busy || !manualUrl.trim()}
+								className="font-mono-sc cursor-pointer rounded border border-[var(--line-strong)] px-2.5 py-1 text-[11px] transition-colors hover:bg-[var(--ink)] hover:text-[var(--paper)] disabled:cursor-default disabled:opacity-40"
+							>
+								{busy ? "验证中…" : "验证并加入"}
+							</button>
+						</div>
 					</section>
 					{busyLine}
 					{noteLine}
 					<div className="mt-5 flex items-center gap-3">
 						<button
 							type="button"
-							onClick={() => onFinish(draft.key)}
+							onClick={() =>
+								// run() 的 busy/报错兜住这次服务端确认:失败显示在错误面板里,
+								// 视图不切换——绝不能出现「界面完成了、服务端没保存」的裂脑
+								run(async () => {
+									await onFinish(draft.key);
+								})
+							}
 							disabled={busy || adoptedSources.length === 0}
 							title={adoptedSources.length === 0 ? "至少加入一个信源,追踪器才不会空转" : undefined}
 							className={primaryBtn}

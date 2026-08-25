@@ -53,6 +53,10 @@
 		"APP_URL": "https://nanisle.com/products/daily-brief",
 		// Where the lock screen sends readers to sign in (the main site's launch gate)
 		"NANISLE_URL": "https://nanisle.com",
+		// N1 · 用户手动加源试抓失败时,实时把这条需求(谁/什么源/为什么失败)
+		// 发给开发者。发件走 SES(worker IAM 需 ses:SendEmail,主仓 infra)。
+		"EMAIL_FROM": "brief@nanisle.com",
+		"DEV_NOTIFY_EMAIL": "panghd0811@gmail.com",
 		// AWS side (cdk stack in the main repo's infra/): DynamoDB via aws4fetch, and the
 		// generate Lambda's Function URL. Unset AWS credentials => KV fallback store (dev/fork).
 		"DDB_TABLE": "nanisle-daily-brief",

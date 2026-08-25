@@ -401,6 +401,9 @@ function ProductPage() {
 	const [genProgress, setGenProgress] = useState<GenStatus["progress"] | null>(null);
 	const [genElapsedS, setGenElapsedS] = useState(0);
 	const [genMsg, setGenMsg] = useState("");
+	// 失败单独占一块横幅(yiren 反馈 #4),不跟状态行的常态读数挤一行小字;
+	// 429 限额例外,仍走 genMsg——那是预期内的刹车,不该长着故障的脸。
+	const [genError, setGenError] = useState<string | null>(null);
 	const [usage, setUsage] = useState<Usage | null>(null);
 
 	const load = useCallback(async (date?: string) => {
@@ -463,6 +466,7 @@ function ProductPage() {
 	const generate = async () => {
 		setGenerating(true);
 		setGenMsg("");
+		setGenError(null);
 		setGenProgress(null);
 		try {
 			const res = await fetch(apiPath("generate"), { method: "POST" });
@@ -480,13 +484,17 @@ function ProductPage() {
 			if (!res.ok || !data.ok) {
 				// 429 = 今日限额打满:服务端文案已含「明早定时生成照常」,原样展示,
 				// 不加「失败」前缀——这不是故障,是预期内的刹车(F7)
-				setGenMsg(res.status === 429 && data.error ? data.error : `生成失败:${data.error ?? `HTTP ${res.status}`}`);
+				if (res.status === 429 && data.error) {
+					setGenMsg(data.error);
+				} else {
+					setGenError(data.error ?? `服务端返回 HTTP ${res.status},请稍后重试。`);
+				}
 				setGenerating(false);
 				return;
 			}
 			setGenStartedAt(data.startedAt ?? new Date().toISOString());
 		} catch {
-			setGenMsg("生成失败:网络错误");
+			setGenError("网络错误,请求没有发出去——检查网络后再点一次。");
 			setGenerating(false);
 		} finally {
 			// 点火即扣一次,429 也要刷(读数正好该跳到「已用完」)
@@ -528,7 +536,7 @@ function ProductPage() {
 				setView("brief");
 				await load();
 			} else if (st.state === "failed") {
-				setGenMsg(`生成失败:${st.error ?? "未知原因,请稍后重试"}`);
+				setGenError(st.error ?? "未知原因,请稍后重试。");
 			}
 			void loadUsage();
 		};
@@ -774,10 +782,34 @@ function ProductPage() {
 						</>
 					)}
 				</div>
+				{/* 生成失败横幅(yiren 反馈 #4):进度行一收、界面弹回原样,只剩状态行
+				    一行小字的话,人根本对不上「我刚点的那下怎么了」。失败要占一块
+				    看得见的版面,说清原因和下一步,由用户自己关掉。429 不走这里——
+				    限额是预期内的刹车,不是故障。 */}
+				{genError && (
+					<div className="mt-3 rounded-[10px] border border-[var(--accent)] bg-[var(--accent-soft)] px-5 py-3.5">
+						<p className="m-0 text-[14px] font-bold text-[var(--accent)]">这次生成没有成功</p>
+						<p className="m-0 mt-1 text-[13px] leading-relaxed text-[var(--ink-2)]">{genError}</p>
+						<button
+							type="button"
+							onClick={() => setGenError(null)}
+							className="font-mono-sc mt-2 cursor-pointer rounded border border-[var(--line-strong)] px-2.5 py-1 text-[11px] text-[var(--ink-2)] transition-colors hover:border-[var(--ink)] hover:text-[var(--ink)]"
+						>
+							知道了
+						</button>
+					</div>
+				)}
 			</header>
 
 			{view === "config" ? (
-				<Config />
+				<Config
+					// F9 · 一期都还没有(dates 空)且没在生成:档案页顶部给「生成第一期」引导
+					firstIssuePending={dates.length === 0 && !brief && !generating}
+					onGenerateFirst={() => void generate()}
+					// 档案末尾的「试生成一期」(yiren 反馈 #3):同一个 generate
+					onGenerate={() => void generate()}
+					generating={generating}
+				/>
 			) : view === "notes" ? (
 				<Notes />
 			) : !brief ? (

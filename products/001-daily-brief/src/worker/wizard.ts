@@ -16,7 +16,7 @@
 // value import 一律带 .ts 扩展名:wizard.test.ts 经 node --experimental-strip-types
 // 直接加载本模块,node 不做扩展名搜索(type-only import 会被擦掉,不受此限)。
 import { AiError, complete, resolveProvider } from "../shared/ai.ts";
-import type { AiConfig } from "../shared/ai";
+import type { AiConfig, CompleteInput, CompleteResult } from "../shared/ai";
 import type { Store } from "../shared/store";
 import {
 	MAX_CHANGELOG,
@@ -25,6 +25,7 @@ import {
 	SOURCE_CATEGORIES,
 	joinSegments,
 	purposeOptions,
+	pushIntentVersion,
 	trackerSegments,
 } from "../shared/pipeline-core.ts";
 import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
@@ -152,6 +153,86 @@ function bad(error: string): WizardResult {
 	return { status: 400, body: { error } };
 }
 
+/**
+ * 向导侧的模型调用统一走这里:60 秒超时 + 失败重试一次(yiren 反馈 #2)。
+ * flash 档正常几秒到二十秒就回,60 秒已经是事故——与其吊死在边缘 ~100 秒
+ * 强制断连上(用户只看到转圈停了,什么解释都没有),不如砍掉这次重打一发。
+ * 重试不另计额度(runWizard 按请求粗粒度计,防的是脚本不是模型抖动)。
+ */
+const WIZARD_AI_TIMEOUT_MS = 60_000;
+
+async function completeWizard(cfg: AiConfig, input: CompleteInput): Promise<CompleteResult> {
+	const timed = { ...input, timeoutMs: WIZARD_AI_TIMEOUT_MS };
+	try {
+		return await complete(cfg, timed);
+	} catch (err) {
+		console.error("wizard: ai call failed, retrying once", err);
+		return complete(cfg, timed);
+	}
+}
+
+/**
+ * 「完成」:草稿转生效(yiren 反馈 #4 的根因修复)。纯函数,路由层负责读写库。
+ * 此前这一步是前端 fire-and-forget 的全量 PUT——请求一丢,界面已经显示生效、
+ * 服务端还是草稿,试生成永远报「没有生效的追踪器」,且没人知道哪里错了。
+ * 删 stage 的同时把 wizardMessages 一并丢掉(向导对话只在草稿期间有意义,
+ * 与 cleanTrackers 的口径一致)。已生效的定义重复调用是幂等成功,不重复记账。
+ */
+export function finishDraft(
+	trackers: Tracker[],
+	trackerKey: string,
+): { trackers: Tracker[]; tracker: Tracker; changed: boolean } | null {
+	const tracker = trackers.find((t) => t.key === trackerKey);
+	if (!tracker) return null;
+	if (!tracker.stage) return { trackers, tracker, changed: false };
+	const { stage: _stage, wizardMessages: _msgs, ...rest } = tracker;
+	const updated = prependLog(rest, "向导完成,这份定义开始生效");
+	return {
+		trackers: trackers.map((t) => (t.key === trackerKey ? updated : t)),
+		tracker: updated,
+		changed: true,
+	};
+}
+
+// ---------- 步骤 0:帮我想(冷启动,siyang 反馈 #1) ----------
+
+/**
+ * F8 · 「不知道该问什么」的人缺的不是兴趣,是把处境翻译成一句长期问题的能力
+ * ——而这正是编辑的本行。凭空生成例题没有意义(对新用户一无所知,只会输出
+ * 通用废话),所以交互是:用户先用一句话说自己在忙什么,编辑据此出题。
+ * 这句处境后面还有第二次用场:用户选中候选题开始向导时,它直接作为 purpose
+ * 写进定义(R7)——是用户亲口说的,不违反「一个字都不许猜」,还省掉追问。
+ */
+const SUGGEST_SYSTEM = `你是「每日简报」的编辑。用户会说一句自己的处境(在做什么、在操心什么),你据此替他起草 4 个值得长期追踪的问题,他挑一个(或改一改)作为简报的追踪定义。
+
+只输出一个 JSON 对象:
+{"suggestions": ["问题1", "问题2", "问题3", "问题4"]}
+
+要求:
+- 每个 ≤30 字,简体中文,专有名词保留原文;
+- 每个问题都要写到他处境里的具体对象(他提到的行业、品类、平台、公司、标的),不许写「我这行」「大盘」「风吹草动」这类谁都能用的空话;
+- 问题要经得起长期追踪:未来几个月每天都可能有新进展的那种,不是一次性疑问;
+- 4 个角度不同:直接利害、同行动向、上游或平台的变化、新机会或风险;
+- 口吻像他自己会说的话;只用他说过的事实,不编造细节。`;
+
+export async function wizardSuggest(ctx: WizardContext, bodyRaw: unknown): Promise<WizardResult> {
+	const body = (bodyRaw ?? {}) as { context?: unknown };
+	const context = typeof body.context === "string" ? body.context.trim().slice(0, 200) : "";
+	if (!context) return bad("context required:用一句话说说你在忙什么");
+	if (resolveProvider(ctx.ai) === "mock") {
+		return { status: 200, body: { suggestions: [], note: MOCK_NOTE } };
+	}
+	// 2048 同 understand:flash 档开 thinking 时思考也占输出预算,1024 会被截断(实测)
+	const result = await completeWizard(withTokenFloor(ctx.ai, 2048), {
+		prompt: `用户的处境:「${context}」\n\n据此输出 4 个候选问题的 JSON。`,
+		system: SUGGEST_SYSTEM,
+		json: true,
+	});
+	const suggestions = cleanStringList(parseJsonBlock(result.text).suggestions, 4, 60);
+	if (suggestions.length === 0) throw new AiError("编辑这轮没想出合适的题,换个说法再试。", 502);
+	return { status: 200, body: { suggestions } };
+}
+
 // ---------- 步骤 1:理解 ----------
 
 const UNDERSTAND_SYSTEM = `你是「每日简报」的编辑。用户会用自己的话描述一个想长期追踪的问题,你要把它整理成一份「编辑的理解」——一组独立短句,用户会逐句圈改,然后这份理解会长期指导每天的选材。
@@ -240,7 +321,7 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 		note = "AI 未接入(mock 模式),先按你的原话搭了理解骨架——每句都可以直接圈改。";
 	} else {
 		const { system, prompt } = understandPrompts(messages, locked, purpose);
-		const result = await complete(withTokenFloor(ctx.ai, 2048), { prompt, system, json: true });
+		const result = await completeWizard(withTokenFloor(ctx.ai, 2048), { prompt, system, json: true });
 		const parsed = parseJsonBlock(result.text);
 		name = typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 60) : question.slice(0, 16);
 		segments = cleanStringList(parsed.segments, MAX_INTENT_SEGMENTS, 200).map((text) => ({ text }));
@@ -259,6 +340,12 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 	const now = new Date().toISOString();
 	let draft: Tracker;
 	if (existing) {
+		// V1 · 覆盖前把上一版理解存进历史:重写后用户仍能查看/回滚上一版
+		const intentVersions = pushIntentVersion(
+			existing,
+			chosenPurpose ? "答「在忙什么」重写前" : "你补充后编辑重写前",
+			now,
+		);
 		draft = prependLog(
 			{
 				...existing,
@@ -269,6 +356,9 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 				purposeOptions: purpose ? undefined : generatedOptions,
 				intentSegments: segments,
 				intent: joinSegments(segments),
+				...(intentVersions.length ? { intentVersions } : {}),
+				// V2 · 对话全文落在草稿上:刷新/换设备后「继续对话」不丢前几轮
+				wizardMessages: messages,
 				stage: "understanding",
 			},
 			chosenPurpose
@@ -285,6 +375,7 @@ export async function wizardUnderstand(ctx: WizardContext, bodyRaw: unknown): Pr
 			askedAt: now,
 			intentSegments: segments,
 			intent: joinSegments(segments),
+			wizardMessages: messages,
 			sourceMode: "selected",
 			sourceKeys: [],
 			quota: 3,
@@ -312,9 +403,17 @@ const TAGS_SYSTEM = `你是「每日简报」的编辑。根据用户的长期�
 - exclude 2-5 个:这个主题下最常见的噪音,要具体到这个主题(比如追产品动态就排除「融资传闻」,不要泛泛写「广告」);
 - 每个 ≤12 字,名词或短语;简体中文为主,专有名词保留原文。`;
 
+/** 合并「再给几个」的增量标签:并集去重,超出上限时新标签让位(老的都是用户看过留下的)。 */
+export function mergeTagLists(current: string[] | undefined, more: string[], max = 12): string[] {
+	return [...new Set([...(current ?? []), ...more])].slice(0, max);
+}
+
 export async function wizardTags(ctx: WizardContext, bodyRaw: unknown): Promise<WizardResult> {
-	const body = (bodyRaw ?? {}) as { trackerKey?: unknown };
+	const body = (bodyRaw ?? {}) as { trackerKey?: unknown; more?: unknown };
 	const trackerKey = typeof body.trackerKey === "string" ? body.trackerKey.trim() : "";
+	// R10 · more=true:「不知道加什么标签」时让编辑在已有之外再想几个(siyang 反馈 #3)。
+	// 增量模式是合并而不是覆盖:已有标签是用户看过、留下的,一个都不许动。
+	const wantMore = body.more === true;
 	if (!trackerKey) return bad("trackerKey required");
 	const config = await loadConfig(ctx.store, ctx.email);
 	const draft = config.trackers.find((t) => t.key === trackerKey);
@@ -329,15 +428,30 @@ export async function wizardTags(ctx: WizardContext, bodyRaw: unknown): Promise<
 		exclude = draft.exclude ?? [];
 		note = MOCK_NOTE;
 	} else {
+		const existingBlock =
+			wantMore && ((draft.include?.length ?? 0) > 0 || (draft.exclude?.length ?? 0) > 0)
+				? `\n已有标签(全部不许重复,换新的角度想):收 ${(draft.include ?? []).join("、") || "(无)"};不收 ${(draft.exclude ?? []).join("、") || "(无)"}\n`
+				: "";
 		const prompt =
 			`长期问题(用户原话):「${draft.question ?? draft.name}」\n` +
-			`编辑的理解(用户已确认):${joinSegments(trackerSegments(draft)) || "(空)"}\n\n` +
-			"据此输出收/不收标签 JSON。";
-		const result = await complete(withTokenFloor(ctx.ai, 1024), { prompt, system: TAGS_SYSTEM, json: true });
+			`编辑的理解(用户已确认):${joinSegments(trackerSegments(draft)) || "(空)"}\n` +
+			existingBlock +
+			(wantMore
+				? "\n用户想要更多标签建议:在已有之外,include 再想 2-4 个、exclude 再想 1-3 个,据此输出 JSON。"
+				: "\n据此输出收/不收标签 JSON。");
+		const result = await completeWizard(withTokenFloor(ctx.ai, 1024), { prompt, system: TAGS_SYSTEM, json: true });
 		const parsed = parseJsonBlock(result.text);
 		include = cleanStringList(parsed.include, 12, 40);
 		exclude = cleanStringList(parsed.exclude, 12, 40);
-		if (include.length === 0 && exclude.length === 0) {
+		if (wantMore) {
+			const mergedInc = mergeTagLists(draft.include, include);
+			const mergedExc = mergeTagLists(draft.exclude, exclude);
+			const added =
+				mergedInc.length - (draft.include?.length ?? 0) + (mergedExc.length - (draft.exclude?.length ?? 0));
+			if (added === 0) note = "编辑没想出新的标签——现有这些已经把主要角度盖住了,直接下一步也行。";
+			include = mergedInc;
+			exclude = mergedExc;
+		} else if (include.length === 0 && exclude.length === 0) {
 			note = "编辑这轮没给出标签建议——可以手动添加,或直接下一步(标签不是必填)。";
 		}
 	}
@@ -349,7 +463,7 @@ export async function wizardTags(ctx: WizardContext, bodyRaw: unknown): Promise<
 			...(exclude.length ? { exclude } : {}),
 			stage: "tags",
 		},
-		"向导:编辑起草了收/不收标签,等你修剪",
+		wantMore ? "向导:你让编辑又补了几个标签建议" : "向导:编辑起草了收/不收标签,等你修剪",
 	);
 	const trackers = config.trackers.map((t) => (t.key === trackerKey ? updated : t));
 	await saveTrackers(ctx.store, ctx.email, trackers);
@@ -485,9 +599,15 @@ export async function wizardSources(ctx: WizardContext, bodyRaw: unknown): Promi
 	const rejected = tracker.rejectedSourceUrls ?? [];
 	const banned = new Set([...adopted, ...rejected, ...excludeUrls]);
 
+	// stage 推进要在调模型**之前**落库(yiren 反馈 #4 的并发教训):这个端点
+	// 一趟要跑几十秒,写库放在末尾的话,一个慢请求会在用户后续操作(圈改、
+	// 采纳、完成)之后才带着开局读到的过期快照整个写回——last-writer-wins,
+	// 把中间发生的一切静默吞掉。推进本身不依赖模型结果,没有理由等。
+	const advanced = await advanceDraft();
+
 	const cfg = withTokenFloor(ctx.ai, 2048);
 	const system = sourcesSystem();
-	const first = await complete(cfg, { prompt: sourcesPrompt(tracker, adopted, rejected, excludeUrls), system, json: true });
+	const first = await completeWizard(cfg, { prompt: sourcesPrompt(tracker, adopted, rejected, excludeUrls), system, json: true });
 	const cands = cleanCandidates(parseJsonBlock(first.text).candidates);
 	const { alive, failed } = await probeCandidates(cands, banned);
 
@@ -500,7 +620,7 @@ export async function wizardSources(ctx: WizardContext, bodyRaw: unknown): Promi
 			`\n\n上一轮以下候选试抓失败:\n${failed.map((f) => `- ${f.url}(${f.error})`).join("\n") || "(无)"}` +
 			`\n请换别的再提议最多 ${MAX_RETRY_CANDIDATES} 个,优先用查询源模板(它们必然抓得通),别重复上面任何 URL。`;
 		try {
-			const second = await complete(cfg, { prompt: retryPrompt, system, json: true });
+			const second = await completeWizard(cfg, { prompt: retryPrompt, system, json: true });
 			const retryCands = cleanCandidates(parseJsonBlock(second.text).candidates, MAX_RETRY_CANDIDATES);
 			const more = await probeCandidates(retryCands, banned);
 			alive.push(...more.alive);
@@ -510,7 +630,6 @@ export async function wizardSources(ctx: WizardContext, bodyRaw: unknown): Promi
 		}
 	}
 
-	const advanced = await advanceDraft();
 	// 仪表:展示数只算真实出现在 UI 的候选(试抓通过的);采纳数在 /api/sources/add 记
 	if (alive.length > 0) await bumpSourceMetrics(ctx.store, ctx.email, { shown: alive.length });
 	const note =
@@ -573,7 +692,7 @@ export async function wizardRefine(ctx: WizardContext, bodyRaw: unknown): Promis
 		`- 当前来源:\n${sourceLines.length ? sourceLines.join("\n") : "(无)"}\n\n` +
 		`用户说:「${text}」\n\n据此输出修改 JSON。`;
 
-	const result = await complete(withTokenFloor(ctx.ai, 1024), { prompt, system: REFINE_SYSTEM, json: true });
+	const result = await completeWizard(withTokenFloor(ctx.ai, 1024), { prompt, system: REFINE_SYSTEM, json: true });
 	const parsed = parseJsonBlock(result.text);
 	const patch = cleanRefinePatch(parsed, new Set(trackerSources.map((s) => s.key)));
 	const note =

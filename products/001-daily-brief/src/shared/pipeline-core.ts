@@ -101,6 +101,20 @@ export interface TrackerLogEntry {
 }
 
 /**
+ * V1 · 「编辑的理解」的一份历史快照。变更记录只留一句话日志,重写后旧理解的
+ * 全文就没了——用户想「回到上一版」时无从回起(siyang 反馈 #2)。每次整体
+ * 重写(向导继续对话、答用途、「对编辑说一句」改 intent、回滚本身)前,把
+ * 当前的 segments 原样存一份,新在前,capped MAX_INTENT_VERSIONS。
+ */
+export interface IntentVersion {
+	/** ISO timestamp of when this version was *replaced*(即快照时刻). */
+	at: string;
+	/** 一句话:这版是在什么动作之前存下的。 */
+	note?: string;
+	segments: IntentSegment[];
+}
+
+/**
  * A tracker is one long-term question the brief keeps watching — the unit the
  * whole product revolves around (万物追踪-style). The definition fields below
  * are the *visible, correctable* version of "what the editor thinks you
@@ -137,6 +151,15 @@ export interface Tracker {
 	intentSegments?: IntentSegment[];
 	/** Newest-first audit trail of definition edits — the dossier's 变更记录. */
 	changelog?: TrackerLogEntry[];
+	/** V1 · 理解被整体重写前的历史快照(新在前),档案/向导里可查看、可回滚。 */
+	intentVersions?: IntentVersion[];
+	/**
+	 * V2 · 向导里用户说过的话(第一句 = 原话,含后续所有补充),服务端持久化。
+	 * 以前只存在前端内存里:刷新后再「继续对话」,编辑只看得到第一句,之前
+	 * 聊过的几轮全忘了(siyang 反馈 #2 的另一半)。只在向导期间有意义,
+	 * 草稿生效(stage 删除)时由 cleanTrackers 一并丢弃。
+	 */
+	wizardMessages?: string[];
 	/** Legacy/global positive criteria. New UI prefers per-source rules. */
 	include?: string[];
 	/** Legacy/global negative criteria. New UI prefers per-source rules. */
@@ -212,6 +235,8 @@ export const MAX_ITEMS_PER_SOURCE = 3;
 export const MAX_CHANGELOG = 20;
 /** How many clauses the editor's understanding may hold. */
 export const MAX_INTENT_SEGMENTS = 8;
+/** V1 · 理解的历史快照留几份——回滚是近期后悔药,不是无限档案。 */
+export const MAX_INTENT_VERSIONS = 10;
 
 /**
  * Clauses of the editor's understanding. Falls back to splitting a legacy
@@ -226,6 +251,21 @@ export function trackerSegments(t: Tracker): IntentSegment[] {
 		.filter(Boolean)
 		.slice(0, MAX_INTENT_SEGMENTS)
 		.map((text) => ({ text }));
+}
+
+/**
+ * V1 · 重写理解前把当前版本压进历史,返回新的 intentVersions(不改原对象)。
+ * 服务端(向导重写)和客户端(refine 落库、回滚)共用同一套规则:
+ * 当前理解为空不记(没东西可回);与最近一份快照逐字相同也不记(防止
+ * 反复重写把 10 个名额刷成同一版)。
+ */
+export function pushIntentVersion(t: Tracker, note: string, at = new Date().toISOString()): IntentVersion[] {
+	const current = trackerSegments(t);
+	const prev = t.intentVersions ?? [];
+	if (current.length === 0) return prev;
+	const latest = prev[0];
+	if (latest && JSON.stringify(latest.segments) === JSON.stringify(current)) return prev;
+	return [{ at, note, segments: current }, ...prev].slice(0, MAX_INTENT_VERSIONS);
 }
 
 /** The single-line form the editorial prompt consumes. */

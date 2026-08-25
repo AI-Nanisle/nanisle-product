@@ -63,6 +63,17 @@ async function post<T>(path: string, body: unknown, headers: Record<string, stri
 }
 
 /**
+ * 步骤 0 · 帮我想(F8 冷启动):用户一句处境 → 编辑起草 4 个候选长期问题。
+ * 不建草稿、不落库,纯出题;mock 模式返回空列表 + note。
+ */
+export function wizardSuggest(
+	context: string,
+	headers: Record<string, string>,
+): Promise<{ suggestions?: string[]; note?: string }> {
+	return post("wizard/suggest", { context }, headers);
+}
+
+/**
  * 步骤 1 · 理解:messages 是本次向导里用户说过的话(第一句 = 原话)。
  * purpose 是用户对 `ask` 追问的回答(选项文本或自填);带上它这一轮就不再追问。
  */
@@ -79,9 +90,12 @@ export function wizardUnderstand(
 	);
 }
 
-/** 步骤 2 · 标签:基于已确认的理解起草收/不收建议。 */
-export function wizardTags(trackerKey: string, headers: Record<string, string>): Promise<WizardResponse> {
-	return post("wizard/tags", { trackerKey }, headers);
+/**
+ * 步骤 2 · 标签:基于已确认的理解起草收/不收建议。
+ * more=true 是「再给几个」:已有标签一个不动,只在其外补新的(服务端合并)。
+ */
+export function wizardTags(trackerKey: string, headers: Record<string, string>, more = false): Promise<WizardResponse> {
+	return post("wizard/tags", { trackerKey, ...(more ? { more: true } : {}) }, headers);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MAX_CHANGELOG } from "../shared/pipeline-core";
-import type { SourceConfig, Tracker } from "../shared/pipeline-core";
+import { MAX_CHANGELOG, pushIntentVersion } from "../shared/pipeline-core";
+import type { SourceCategory, SourceConfig, Tracker } from "../shared/pipeline-core";
 import Dossier from "./Dossier";
 import SourceLibrary from "./SourceLibrary";
 import Wizard from "./Wizard";
@@ -36,7 +36,17 @@ function withLog(t: Tracker, text?: string): Tracker {
 	return { ...t, changelog: [{ at: new Date().toISOString(), text }, ...(t.changelog ?? [])].slice(0, MAX_CHANGELOG) };
 }
 
-export default function Config() {
+export interface ConfigProps {
+	/** F9 · 还没有第一期(App 的 dates 为空且没在生成):档案页顶部给「生成第一期」引导。 */
+	firstIssuePending?: boolean;
+	/** F9 · 引导按钮点火(App 的 generate,同一趟额度与进度跟踪)。 */
+	onGenerateFirst?: () => void;
+	/** 档案末尾的「试生成一期」(yiren 反馈 #3):同一个 generate,按阅读顺序在底部再给一次。 */
+	onGenerate?: () => void;
+	generating?: boolean;
+}
+
+export default function Config({ firstIssuePending, onGenerateFirst, onGenerate, generating }: ConfigProps) {
 	const [sources, setSources] = useState<SourceConfig[] | null>(null);
 	const [trackers, setTrackers] = useState<Tracker[]>([]);
 	const [selected, setSelected] = useState<string>("");
@@ -132,8 +142,8 @@ export default function Config() {
 			items: { name: string; url: string; category: string }[],
 			trackerKey?: string,
 			rules?: { url: string; include?: string[]; exclude?: string[] }[],
-			/** "candidate" = 采纳 AI 候选卡,服务端据此记采纳率仪表。 */
-			origin?: "candidate",
+			/** "candidate" = 采纳 AI 候选卡(记采纳率仪表);"manual" = 用户手动输入(失败时通知开发者)。 */
+			origin?: "candidate" | "manual",
 		) => {
 			const res = await fetch(apiPath("sources/add"), {
 				method: "POST",
@@ -151,7 +161,7 @@ export default function Config() {
 			}
 			const data = (await res.json()) as {
 				adopted: SourceConfig[];
-				failed: { name: string; url: string; error: string }[];
+				failed: { name: string; url: string; error: string; noted?: boolean }[];
 				sources: SourceConfig[];
 				trackers: Tracker[];
 			};
@@ -204,10 +214,16 @@ export default function Config() {
 			try {
 				const { patch, note } = await refineTracker(t.key, text, headers());
 				if (Object.keys(patch).length > 0) {
-					// intent 被改写时旧的分句作废,档案会从新 intent 重新拆句
+					// intent 被改写时旧的分句作废,档案会从新 intent 重新拆句;
+					// V1 · 覆盖前先把当前理解压进历史,改坏了能回滚
 					patchTracker(
 						t.key,
-						{ ...patch, ...(patch.intent ? { intentSegments: undefined } : {}) },
+						{
+							...patch,
+							...(patch.intent
+								? { intentSegments: undefined, intentVersions: pushIntentVersion(t, "「对编辑说一句」改写前") }
+								: {}),
+						},
 						`你说「${text}」→ ${note ?? "编辑更新了定义"}`,
 					);
 				}
@@ -382,8 +398,8 @@ export default function Config() {
 			{/* 正文列与简报正文同宽(672),两个视图的阅读测量宽保持一致 */}
 			<div className="min-w-0 max-w-[672px]">
 				{view === "library" && (
-					<SourceLibrary sources={sources} tests={tests} onTest={(url) => void testSource(url)} onSources={putSources} onAdd={async (items) => {
-						const data = await addSources(items);
+					<SourceLibrary sources={sources} tests={tests} onTest={(url) => void testSource(url)} onSources={putSources} onAdd={async (items, origin) => {
+						const data = await addSources(items, undefined, undefined, origin);
 						return { addedUrls: data.adopted.map((a) => a.url), failed: data.failed };
 					}} />
 				)}
@@ -408,8 +424,33 @@ export default function Config() {
 							if (!t) return { failed: items, note: "这份草稿不见了,刷新再试" };
 							return adoptCandidates(t, items);
 						}}
-						onFinish={(key) => {
-							patchTracker(key, { stage: undefined }, "向导完成,这份定义开始生效");
+						onManualAdd={async (trackerKey, url, category: SourceCategory) => {
+							// 名称留空:服务端用 feed 自报标题兜底,用户不必替源起名
+							const data = await addSources([{ name: "", url, category }], trackerKey, undefined, "manual");
+							if (data.adopted.length > 0) {
+								const src = data.adopted[0];
+								putTrackers(
+									data.trackers.map((x) => (x.key === trackerKey ? withLog(x, `你手动加入了来源「${src.name}」`) : x)),
+								);
+								return { ok: true };
+							}
+							const f = data.failed[0];
+							return { ok: false, error: f?.error ?? "添加失败", noted: f?.noted };
+						}}
+						onFinish={async (key) => {
+							// 草稿转生效必须由服务端确认(yiren bug:此前 fire-and-forget 的
+							// PUT 丢了,界面切到档案页、服务端还是草稿,试生成永远 422)。
+							// 失败就抛给 Wizard 的 run() 报错,人留在向导里,别装作完成了。
+							const res = await fetch(apiPath("wizard/finish"), {
+								method: "POST",
+								headers: headers(),
+								body: JSON.stringify({ trackerKey: key }),
+							});
+							const data = (await res.json().catch(() => ({}))) as { trackers?: Tracker[]; error?: string };
+							if (!res.ok || !data.trackers) {
+								throw new Error(data.error ?? `完成没有保存成功(HTTP ${res.status}),再点一次`);
+							}
+							applyTrackers(data.trackers);
 							setSelected(key);
 							setView("doc");
 						}}
@@ -427,6 +468,27 @@ export default function Config() {
 							}
 						}}
 					/>
+				)}
+
+				{/* F9 · 「第一期」引导(siyang 反馈 #5):向导完成后落回档案页的人,
+				    下一步该干什么必须写在明面上——右上角那枚「试生成一期」章对新用户
+				    是个没有上下文的词。有第一期之后这块永久消失,老用户不受打扰。 */}
+				{view === "doc" && firstIssuePending && current && !current.stage && (
+					<div className="mb-4 rounded-[10px] border border-[var(--accent)] bg-[var(--accent-soft)] px-6 py-4">
+						<p className="m-0 text-[15px] font-bold text-[var(--accent)]">定义已生效,下一步:生成你的第一期</p>
+						<p className="m-0 mt-1.5 text-[13px] leading-relaxed text-[var(--ink-2)]">
+							编辑会按这份定义抓取信源、编选出今天的简报,一趟约四五分钟,跑完自动跳到简报页。
+							以后每天早上都会自动出一期,不用再手动点。
+						</p>
+						{onGenerateFirst && (
+							<button type="button" onClick={onGenerateFirst} className="btn-stamp mt-3">
+								<span className="mark" aria-hidden="true">
+									▸
+								</span>
+								生成我的第一期简报
+							</button>
+						)}
+					</div>
 				)}
 
 				{view === "doc" &&
@@ -469,6 +531,8 @@ export default function Config() {
 							onRejectCandidate={(item) => rejectCandidate(current, item)}
 							onAddCatalog={(entry) => addFromCatalog(current, entry)}
 							onSay={(text) => say(current, text)}
+							onGenerate={onGenerate}
+							generating={generating}
 						/>
 					) : (
 						<div className="rounded-[10px] border border-dashed border-[var(--line-strong)] px-8 py-10 text-center">

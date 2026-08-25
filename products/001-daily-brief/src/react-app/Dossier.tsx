@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
-import { MAX_INTENT_SEGMENTS, QUOTA_OPTIONS, joinSegments, normalizeQuota, trackerSegments } from "../shared/pipeline-core";
-import type { IntentSegment, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
+import {
+	MAX_INTENT_SEGMENTS,
+	QUOTA_OPTIONS,
+	joinSegments,
+	normalizeQuota,
+	pushIntentVersion,
+	trackerSegments,
+} from "../shared/pipeline-core";
+import type { IntentSegment, IntentVersion, SourceConfig, Tracker, TrackerSourceRule } from "../shared/pipeline-core";
 import type { CatalogEntry } from "../shared/catalog";
 import type { ProposalItem, TestResult } from "./editor";
 import { CATEGORY_LABELS } from "./SourceLibrary";
@@ -104,6 +111,7 @@ export function ChipRow({
 	onRemove,
 	bucket,
 	onDropChip,
+	onToggleChip,
 }: {
 	chips: Chip[];
 	accent?: boolean;
@@ -116,6 +124,12 @@ export function ChipRow({
 	bucket?: string;
 	/** 另一行的标签被拖进来了(同一行内的拖拽会被忽略)。 */
 	onDropChip?: (chip: Chip, fromBucket: string) => void;
+	/**
+	 * 点一下标签改判到另一栏(yiren 反馈 #1):拖拽没有任何可见的提示,
+	 * 全靠悬停 title 自证,大多数人不会发现。点击是能被发现的那条路,
+	 * 拖拽保留为顺手的快捷方式。
+	 */
+	onToggleChip?: (chip: Chip) => void;
 }) {
 	const [over, setOver] = useState(false);
 	const draggable = Boolean(bucket && onDropChip);
@@ -163,16 +177,27 @@ export function ChipRow({
 						dragPayload = null;
 						setOver(false);
 					}}
-					title={draggable ? "拖到另一栏可以改判收 / 不收" : undefined}
+					onClick={onToggleChip ? () => onToggleChip(c) : undefined}
+					title={
+						onToggleChip
+							? "点一下改判到另一栏(拖过去也行)"
+							: draggable
+								? "拖到另一栏可以改判收 / 不收"
+								: undefined
+					}
 					className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[12px] ${
-						draggable ? "cursor-grab select-none active:cursor-grabbing" : ""
+						onToggleChip ? "cursor-pointer select-none" : draggable ? "cursor-grab select-none active:cursor-grabbing" : ""
 					} ${accent ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "bg-[var(--paper-deep)] text-[var(--ink)]"}`}
 				>
 					{c.text}
 					{c.scope && <span className="font-mono-sc text-[10px] opacity-80">{c.scope}</span>}
 					<button
 						type="button"
-						onClick={() => onRemove(c)}
+						onClick={(e) => {
+							// 别让删除冒泡成「点标签改判」:× 是删,标签本体才是挪
+							e.stopPropagation();
+							onRemove(c);
+						}}
 						aria-label={`删除 ${c.text}`}
 						className="cursor-pointer opacity-50 transition-opacity hover:opacity-100"
 					>
@@ -208,6 +233,58 @@ export function ChipRow({
 	);
 }
 
+/**
+ * V1 · 理解的历史版本:每次整体重写(向导继续对话、答用途、对编辑说一句、
+ * 回滚本身)前自动存档的快照,可查看、可一键回到任意一版。回滚是「当前版
+ * 先入历史,再整体换成那一版」——所以回滚永远可再回滚,不存在丢内容的路径。
+ * 档案 02 节和向导第 1 步共用。
+ */
+export function IntentHistory({
+	tracker,
+	onPatch,
+}: {
+	tracker: Tracker;
+	onPatch: (patch: Partial<Tracker>, log?: string) => void;
+}) {
+	const versions = tracker.intentVersions ?? [];
+	if (versions.length === 0) return null;
+	const rollback = (v: IntentVersion) => {
+		onPatch(
+			{
+				intentSegments: v.segments,
+				intent: joinSegments(v.segments),
+				intentVersions: pushIntentVersion(tracker, "回滚前的版本"),
+			},
+			`你把编辑的理解回到了 ${mmdd(v.at)} 存档的版本`,
+		);
+	};
+	return (
+		<details className="mt-2">
+			<summary className="font-mono-sc cursor-pointer text-[10px] text-[var(--ink-3)] transition-colors hover:text-[var(--ink)]">
+				历史版本 {versions.length} 份 · 每次重写前自动存档,可回滚
+			</summary>
+			<div className="mt-1.5 space-y-2.5 border-l-2 border-[var(--line)] pl-3">
+				{versions.map((v, i) => (
+					<div key={`${v.at}:${i}`}>
+						<p className="font-mono-sc m-0 text-[10px] text-[var(--ink-3)]">
+							{mmdd(v.at)}
+							{v.note ? ` · ${v.note}` : ""}
+						</p>
+						<p className="m-0 text-[12px] leading-relaxed text-[var(--ink-2)]">{joinSegments(v.segments)}</p>
+						<button
+							type="button"
+							onClick={() => rollback(v)}
+							className="font-mono-sc mt-0.5 cursor-pointer rounded border border-dashed border-[var(--line-strong)] px-2 py-0.5 text-[10px] text-[var(--ink-3)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+						>
+							回到这版
+						</button>
+					</div>
+				))}
+			</div>
+		</details>
+	);
+}
+
 export interface DossierProps {
 	tracker: Tracker;
 	/** 展示用编号(按定义在列表里的位置),不是存储 key。 */
@@ -231,6 +308,13 @@ export interface DossierProps {
 	onAddCatalog: (entry: CatalogEntry) => Promise<void>;
 	/** 把一句话交给编辑(真 AI 时才走网络;mock 由本页就地起草提案)。 */
 	onSay: (text: string) => void;
+	/**
+	 * 档案末尾的「试生成一期」(yiren 反馈 #3):配置页从上读到下,读完信源
+	 * 顺理成章想看效果,而生成按钮却只在页首右上角——按阅读顺序在底部再给
+	 * 一个,动作与页首那枚完全同源(App 的 generate,同一趟额度与进度)。
+	 */
+	onGenerate?: () => void;
+	generating?: boolean;
 }
 
 /** T6 · 一条线索(GET /api/threads 的返回形状)。 */
@@ -302,6 +386,8 @@ export default function Dossier({
 	onRejectCandidate,
 	onAddCatalog,
 	onSay,
+	onGenerate,
+	generating,
 }: DossierProps) {
 	const [editKey, setEditKey] = useState<string | null>(null);
 	// T6 · 这份定义底下的线索台账;哪条展开着
@@ -779,11 +865,12 @@ export default function Dossier({
 						? "编辑还没写理解——你可以直接写,或让编辑起草"
 						: "虚线处点击可改,回车保存 · 红色是你圈改过的"}
 				</p>
+				<IntentHistory tracker={t} onPatch={onPatch} />
 			</section>
 
 			{/* 03 收什么 / 不收什么 */}
 			<section className="mt-6">
-				<p className={`${sectionLabel} mb-2`}>03 · 收什么 / 不收什么 · 标签可在两栏间拖动</p>
+				<p className={`${sectionLabel} mb-2`}>03 · 收什么 / 不收什么 · 判错了点一下标签换栏</p>
 				<div className="grid gap-3 sm:grid-cols-2">
 					<div>
 						<p className="m-0 mb-1.5 text-[12px] text-[var(--ink-3)]">收</p>
@@ -796,6 +883,7 @@ export default function Dossier({
 							onRemove={(chip) => removeChip("include", chip)}
 							bucket="include"
 							onDropChip={(chip) => moveChip("include", chip)}
+							onToggleChip={(chip) => moveChip("exclude", chip)}
 						/>
 					</div>
 					<div>
@@ -810,6 +898,7 @@ export default function Dossier({
 							onRemove={(chip) => removeChip("exclude", chip)}
 							bucket="exclude"
 							onDropChip={(chip) => moveChip("exclude", chip)}
+							onToggleChip={(chip) => moveChip("include", chip)}
 						/>
 					</div>
 				</div>
@@ -1032,6 +1121,21 @@ export default function Dossier({
 					</div>
 				)}
 			</section>
+
+			{/* 读完 01-04 的下一步(yiren 反馈 #3):改完定义当场试一期看效果 */}
+			{onGenerate && (
+				<div className="mt-6 flex flex-wrap items-center gap-3 border-t border-[var(--line)] pt-4">
+					<button type="button" onClick={onGenerate} disabled={generating} className="btn-stamp">
+						<span className="mark" aria-hidden="true">
+							▸
+						</span>
+						试生成一期
+					</button>
+					<span className="font-mono-sc text-[11px] text-[var(--ink-3)]">
+						{generating ? "已经在生成了,进度在页首状态行" : "按这份定义当场出一期看效果 · 约四五分钟,进度在页首状态行"}
+					</span>
+				</div>
+			)}
 
 			{/* 变更记录 */}
 			<section className="mt-6 border-t border-[var(--line)] pt-3.5">

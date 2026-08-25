@@ -70,9 +70,13 @@ export default function SourceLibrary({
 	onTest: (url: string) => void;
 	/** save=false 只改本地(输入过程中),blur 时再带 save 落库。 */
 	onSources: (next: SourceConfig[], save?: boolean) => void;
-	onAdd: (items: { name: string; url: string; category: string }[]) => Promise<{
+	onAdd: (
+		items: { name: string; url: string; category: string }[],
+		/** "manual" = 用户手动输入(失败时服务端会把需求实时递给开发者)。 */
+		origin?: "manual",
+	) => Promise<{
 		addedUrls: string[];
-		failed: { url: string; error: string }[];
+		failed: { url: string; error: string; noted?: boolean }[];
 	}>;
 }) {
 	const [adding, setAdding] = useState(false);
@@ -186,12 +190,12 @@ export default function SourceLibrary({
 		setMsg("");
 		setSuggestKw(null);
 		try {
-			const { addedUrls, failed } = await onAdd([draft]);
+			const { addedUrls, failed } = await onAdd([draft], "manual");
 			if (addedUrls.length > 0) {
 				setDraft({ name: "", url: "", category: draft.category });
 				setAdding(false);
 			} else {
-				const err = failed[0]?.error ?? "添加失败";
+				const err = `${failed[0]?.error ?? "添加失败"}${failed[0]?.noted ? "(需求已实时记给开发者)" : ""}`;
 				setMsg(err);
 				// 抓取类失败才给「转查询源」的退路;重复/上限/字段问题给了也没意义
 				if (!/已在配置里|上限|字段不完整/.test(err)) {

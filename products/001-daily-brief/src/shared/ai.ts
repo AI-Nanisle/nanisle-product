@@ -92,6 +92,12 @@ export interface CompleteInput {
 	system?: string;
 	/** 要求模型只输出 JSON(deepseek 映射为 response_format json_object)。 */
 	json?: boolean;
+	/**
+	 * 整次调用(含流式读体)的总时限,超时抛 AiError 而不是吊死到边缘断连。
+	 * 只给交互敏感的调用传(向导/refine 走 flash,60s 已是事故);选材/成稿
+	 * 这类 thinking 长调用**不要传**——V4 Pro 正常就要跑好几分钟。
+	 */
+	timeoutMs?: number;
 }
 
 export interface CompleteResult {
@@ -146,6 +152,14 @@ async function readSse(body: ReadableStream<Uint8Array>): Promise<{ text: string
 	return { text, finish };
 }
 
+/** 超时(TimeoutError/AbortError)换成能对用户明说的 AiError;其余原样上抛。 */
+function rethrowTimeout(err: unknown, timeoutMs: number | undefined): never {
+	if (timeoutMs && err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+		throw new AiError(`上游 AI 超过 ${Math.round(timeoutMs / 1000)} 秒没回完,请再试一次。`, 502);
+	}
+	throw err;
+}
+
 async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<CompleteResult> {
 	// deepseek-chat 已于 2026-07-24 彻底退役(调用直接报错)。V4 Pro 默认开
 	// thinking(effort=high),且 thinking 下不接受 temperature/top_p 等采样
@@ -154,23 +168,31 @@ async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<Co
 	// V4 的思考也占输出预算,预算太小时 content 会被吃成空串(finish=length);
 	// JSON 模式另有偶发空 content 的官方已知问题——所以空结果重试一次再报错。
 	for (let attempt = 0; ; attempt++) {
-		const res = await fetch("https://api.deepseek.com/chat/completions", {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				authorization: `Bearer ${cfg.deepseekApiKey}`,
-			},
-			body: JSON.stringify({
-				model,
-				max_tokens: maxTokens(cfg),
-				stream: true,
-				...(input.json ? { response_format: { type: "json_object" } } : {}),
-				messages: [
-					...(input.system ? [{ role: "system", content: input.system }] : []),
-					{ role: "user", content: input.prompt },
-				],
-			}),
-		});
+		// 每轮各自起表:空结果重试的第二发不该继承第一发已耗掉的时限
+		const signal = input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined;
+		let res: Response;
+		try {
+			res = await fetch("https://api.deepseek.com/chat/completions", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					authorization: `Bearer ${cfg.deepseekApiKey}`,
+				},
+				body: JSON.stringify({
+					model,
+					max_tokens: maxTokens(cfg),
+					stream: true,
+					...(input.json ? { response_format: { type: "json_object" } } : {}),
+					messages: [
+						...(input.system ? [{ role: "system", content: input.system }] : []),
+						{ role: "user", content: input.prompt },
+					],
+				}),
+				...(signal ? { signal } : {}),
+			});
+		} catch (err) {
+			rethrowTimeout(err, input.timeoutMs);
+		}
 		if (!res.ok) {
 			// 上游报文不透传给客户端(可能含 key 相关细节),进日志即可
 			console.error("deepseek error", res.status, (await res.text()).slice(0, 500));
@@ -179,7 +201,14 @@ async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<Co
 			throw new AiError("上游 AI 错误,请稍后重试。", 502);
 		}
 		if (!res.body) throw new AiError("上游 AI 错误,请稍后重试。", 502);
-		const { text, finish } = await readSse(res.body);
+		let text: string;
+		let finish: string;
+		try {
+			// signal 管的是整次调用:读流也在时限内(掐掉的是「连上了但吐字极慢」)
+			({ text, finish } = await readSse(res.body));
+		} catch (err) {
+			rethrowTimeout(err, input.timeoutMs);
+		}
 		if (text) return { text, provider: "deepseek", model };
 		console.error(`deepseek empty content, finish_reason=${finish}, max_tokens=${maxTokens(cfg)}, attempt=${attempt + 1}`);
 		if (finish === "length") {
@@ -210,12 +239,16 @@ export async function complete(cfg: AiConfig, input: CompleteInput): Promise<Com
 
 	const model = cfg.model ?? "claude-opus-5";
 	const client = makeClient(cfg, provider);
-	const message = await client.messages.create({
-		model,
-		max_tokens: maxTokens(cfg),
-		...(input.system ? { system: input.system } : {}),
-		messages: [{ role: "user", content: input.prompt }],
-	});
+	const message = await client.messages.create(
+		{
+			model,
+			max_tokens: maxTokens(cfg),
+			...(input.system ? { system: input.system } : {}),
+			messages: [{ role: "user", content: input.prompt }],
+		},
+		// SDK 自带按次超时;超时抛 APIConnectionTimeoutError,调用方按普通失败重试
+		input.timeoutMs ? { timeout: input.timeoutMs } : undefined,
+	);
 
 	// Safety classifiers can decline with HTTP 200 + stop_reason "refusal";
 	// content may be empty, so check before reading it.

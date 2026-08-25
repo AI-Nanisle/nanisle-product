@@ -57,7 +57,7 @@ import {
 	saveTrackers,
 } from "./config";
 import { awsConfigured, makeStore } from "./store-kv";
-import { verifyUnsubToken } from "../shared/email";
+import { sendNotifyEmail, verifyUnsubToken } from "../shared/email";
 import {
 	DISCOVERY_MIN_CLICKS,
 	DISCOVERY_WINDOW_DAYS,
@@ -69,7 +69,7 @@ import {
 } from "../shared/store";
 import type { GenRun, Store } from "../shared/store";
 import { probeFeed } from "./feeds";
-import { wizardRefine, wizardSources, wizardTags, wizardUnderstand } from "./wizard";
+import { finishDraft, wizardRefine, wizardSources, wizardSuggest, wizardTags, wizardUnderstand } from "./wizard";
 import type { WizardContext, WizardResult } from "./wizard";
 
 const app = new Hono<Guarded>();
@@ -449,6 +449,48 @@ app.put("/api/sources", userGuard, async (c) => {
 	return c.json({ ok: true, count: cleaned.sources.length });
 });
 
+/**
+ * N1 · 用户想要的源抓不通时,实时递一封需求邮件给开发者(siyang 反馈 #4)。
+ * 小红书/公众号这类根本没有 feed 的平台需求也从这里进来——用户贴的 URL 试抓
+ * 必然失败,失败清单原样带在邮件里。只挑真正的抓取类失败:重复/上限/字段
+ * 问题是用户侧误操作,不值得一封邮件。返回是否真的安排了发送(给前端提示用)。
+ */
+function notifySourceRequest(
+	c: Context<Guarded>,
+	userEmail: string,
+	tracker: { name: string; question?: string } | undefined,
+	fails: { name: string; url: string; error: string }[],
+): boolean {
+	const env = c.env;
+	const to = env.DEV_NOTIFY_EMAIL?.trim();
+	const from = env.EMAIL_FROM?.trim();
+	if (!to || !from || !env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) return false;
+	const lines = [
+		`用户 ${userEmail} 手动添加来源失败,可能是一条源需求:`,
+		"",
+		...fails.map((f) => `- ${f.name && f.name !== "?" ? `${f.name} · ` : ""}${f.url}\n  失败原因:${f.error}`),
+		"",
+		...(tracker ? [`所属追踪定义:「${tracker.name}」${tracker.question ? ` —— 原话:「${tracker.question}」` : ""}`] : []),
+		`时间:${new Date().toISOString()}`,
+		"",
+		"若是平台无 feed(小红书/公众号等),考虑列入抓取适配需求。",
+	];
+	c.executionCtx.waitUntil(
+		sendNotifyEmail(
+			{
+				region: env.AWS_REGION ?? "us-east-1",
+				accessKeyId: env.AWS_ACCESS_KEY_ID,
+				secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+				from,
+			},
+			to,
+			`[简报] 源需求:${fails[0]?.url.slice(0, 60) ?? "?"}${fails.length > 1 ? ` 等 ${fails.length} 条` : ""}`,
+			lines,
+		).catch((err) => console.error("notifySourceRequest: send failed", err)),
+	);
+	return true;
+}
+
 // Verified add: probe (with feed discovery) first, persist only what parsed.
 // Used by the config panel's manual add and the proposal cards' 添加 button.
 app.post("/api/sources/add", userGuard, async (c) => {
@@ -472,7 +514,7 @@ app.post("/api/sources/add", userGuard, async (c) => {
 	const rawRules = Array.isArray(body.rules) ? (body.rules as Record<string, unknown>[]) : [];
 	const added: SourceConfig[] = [];
 	const adopted: SourceConfig[] = [];
-	const failed: { name: string; url: string; error: string }[] = [];
+	const failed: { name: string; url: string; error: string; noted?: boolean }[] = [];
 	for (const s of body.sources as Record<string, unknown>[]) {
 		const givenName = typeof s.name === "string" ? s.name.trim().slice(0, 100) : "";
 		const url = typeof s.url === "string" ? s.url.trim() : "";
@@ -540,6 +582,14 @@ app.post("/api/sources/add", userGuard, async (c) => {
 	// 仪表:只有 AI 候选卡的「加入」带 origin=candidate;手动/目录添加不算采纳
 	if (body.origin === "candidate" && adopted.length > 0) {
 		await bumpSourceMetrics(store, email, { adopted: adopted.length });
+	}
+	// N1 · 手动添加(origin=manual)的抓取类失败 = 用户的源需求,实时递给开发者。
+	// 候选卡/目录的失败不发:那些 URL 不是用户自己想要的,失败是系统侧问题。
+	if (body.origin === "manual") {
+		const probeFails = failed.filter((f) => !/已在配置里|上限|字段不完整/.test(f.error));
+		if (probeFails.length > 0 && notifySourceRequest(c, email, tracker, probeFails)) {
+			for (const f of probeFails) f.noted = true;
+		}
 	}
 	return c.json({ ok: true, added, adopted, failed, sources: current, trackers });
 });
@@ -863,10 +913,33 @@ async function runWizard(c: Context<Guarded>, fn: WizardHandler) {
 	}
 }
 
+app.post("/api/wizard/suggest", userAiGuard, (c) => runWizard(c, wizardSuggest));
 app.post("/api/wizard/understand", userAiGuard, (c) => runWizard(c, wizardUnderstand));
 app.post("/api/wizard/tags", userAiGuard, (c) => runWizard(c, wizardTags));
 app.post("/api/wizard/sources", userAiGuard, (c) => runWizard(c, wizardSources));
 app.post("/api/refine", userAiGuard, (c) => runWizard(c, wizardRefine));
+
+// 「完成」:草稿转生效(yiren 反馈 #4)。不调模型所以不走 runWizard 的额度闸,
+// 但它是全向导最要紧的一次写——此前由前端 fire-and-forget 的全量 PUT 顺带完成,
+// 请求一丢就出「界面已生效、服务端还是草稿」的裂脑,试生成永远 422。现在由
+// 服务端只改这一个 tracker 并回传全量列表,前端拿到 200 才允许切档案页。
+app.post("/api/wizard/finish", userGuard, async (c) => {
+	let body: { trackerKey?: unknown };
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json({ error: "Body must be JSON." }, 400);
+	}
+	const trackerKey = typeof body.trackerKey === "string" ? body.trackerKey.trim() : "";
+	if (!trackerKey) return c.json({ error: "trackerKey required" }, 400);
+	const store = c.get("store");
+	const email = c.get("email");
+	const config = await loadConfig(store, email);
+	const finished = finishDraft(config.trackers, trackerKey);
+	if (!finished) return c.json({ error: "trackerKey 不存在" }, 404);
+	if (finished.changed) await saveTrackers(store, email, finished.trackers);
+	return c.json({ ok: true, tracker: finished.tracker, trackers: finished.trackers });
+});
 
 // ---------- 立即生成(B9,docs/02 §8.2 的调参回路) ----------
 

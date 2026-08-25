@@ -5,6 +5,7 @@
 import {
 	MAX_CHANGELOG,
 	MAX_INTENT_SEGMENTS,
+	MAX_INTENT_VERSIONS,
 	SOURCE_CATEGORIES,
 	fnv1a,
 	joinSegments,
@@ -13,6 +14,7 @@ import {
 import { MAX_EXCLUDE, MAX_RULES_PER_SOURCE } from "../shared/weekly.ts";
 import type {
 	IntentSegment,
+	IntentVersion,
 	SourceConfig,
 	Tracker,
 	TrackerLogEntry,
@@ -133,6 +135,19 @@ function cleanSegments(raw: unknown): IntentSegment[] | undefined {
 	return list.length > 0 ? list : undefined;
 }
 
+/** V1 · 理解的历史快照:形状校验 + 截长限量,和 changelog 一个信任级别。 */
+function cleanIntentVersions(raw: unknown): IntentVersion[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const list: IntentVersion[] = [];
+	for (const v of raw.slice(0, MAX_INTENT_VERSIONS) as Record<string, unknown>[]) {
+		const at = typeof v?.at === "string" ? v.at.trim().slice(0, 40) : "";
+		const note = typeof v?.note === "string" ? v.note.trim().slice(0, 80) : "";
+		const segments = cleanSegments(v?.segments);
+		if (at && segments) list.push({ at, ...(note ? { note } : {}), segments });
+	}
+	return list.length > 0 ? list : undefined;
+}
+
 /** Client-written history. Trusted enough to store, not enough to skip trimming. */
 function cleanChangelog(raw: unknown): TrackerLogEntry[] | undefined {
 	if (!Array.isArray(raw)) return undefined;
@@ -171,6 +186,18 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 						.slice(0, 3)
 				: undefined;
 		const intentSegments = cleanSegments(t.intentSegments);
+		const intentVersions = cleanIntentVersions(t.intentVersions);
+		const stage =
+			t.stage === "understanding" || t.stage === "tags" || t.stage === "sources" ? t.stage : undefined;
+		// V2 · 向导对话只在草稿期间有意义;stage 一删(草稿生效)就一并丢弃
+		const wizardMessages =
+			stage && Array.isArray(t.wizardMessages)
+				? (t.wizardMessages as unknown[])
+						.filter((m): m is string => typeof m === "string")
+						.map((m) => m.trim().slice(0, 1000))
+						.filter(Boolean)
+						.slice(0, 8)
+				: undefined;
 		// The chat agent only knows about `intent`; when it rewrites the line the
 		// stale clauses are gone and the dossier re-splits from the new text.
 		const intentRaw = typeof t.intent === "string" ? t.intent.trim().slice(0, 400) : undefined;
@@ -214,6 +241,7 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			...(askedAt ? { askedAt } : {}),
 			...(intent ? { intent } : {}),
 			...(intentSegments ? { intentSegments } : {}),
+			...(intentVersions ? { intentVersions } : {}),
 			...(changelog ? { changelog } : {}),
 			...(include ? { include } : {}),
 			...(exclude ? { exclude } : {}),
@@ -221,9 +249,8 @@ export function cleanTrackers(raw: unknown): { trackers: Tracker[] } | { error: 
 			...(sourceRules.length ? { sourceRules } : {}),
 			...(rejectedSourceUrls.length ? { rejectedSourceUrls } : {}),
 			...(t.enabled === false ? { enabled: false } : {}),
-			...(t.stage === "understanding" || t.stage === "tags" || t.stage === "sources"
-				? { stage: t.stage }
-				: {}),
+			...(stage ? { stage } : {}),
+			...(wizardMessages?.length ? { wizardMessages } : {}),
 		});
 	}
 	return { trackers: cleaned };

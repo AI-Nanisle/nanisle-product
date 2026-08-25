@@ -35,6 +35,14 @@ export interface AppEnv {
 	EMAIL_UNSUB_SECRET?: string;
 	/** Main-site origin used in login redirects (default https://nanisle.com). */
 	NANISLE_URL?: string;
+	/** N1 · SES 发件地址(与 Lambda 的 EMAIL_FROM 同值,brief@nanisle.com)。 */
+	EMAIL_FROM?: string;
+	/**
+	 * N1 · 开发者通知邮箱:用户手动加源试抓失败时实时发一封需求邮件到这里。
+	 * 不设 = 不通知(fork 零配置照常跑)。发送走 Worker 自己的 AWS 凭证,
+	 * IAM 用户需有 ses:SendEmail(主仓 infra 的 workerPolicy)。
+	 */
+	DEV_NOTIFY_EMAIL?: string;
 	/** Canonical public mount for this product (no trailing slash). */
 	APP_URL?: string;
 	/** Timezone that defines "today" (default America/New_York). */

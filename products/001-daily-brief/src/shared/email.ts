@@ -166,3 +166,42 @@ export async function sendBriefEmail(
 		throw new Error(`SES send failed (HTTP ${res.status})${detail.message ? ` — ${detail.message}` : ""}`);
 	}
 }
+
+/**
+ * N1 · 给开发者的运营通知(纯文本,无退订头——收件人就是站长自己)。
+ * 现在唯一的调用方:用户手动加源试抓失败时,把「谁、想要什么源、为什么
+ * 抓不通」实时递到站长邮箱(siyang 反馈 #4)——用户对源的需求是产品最值钱
+ * 的信号,不能只躺在 4xx 响应里。抛错交给调用方:通知失败绝不能连累加源本身。
+ */
+export async function sendNotifyEmail(
+	ses: SesOptions,
+	to: string,
+	subject: string,
+	lines: string[],
+): Promise<void> {
+	const aws = new AwsClient({
+		accessKeyId: ses.accessKeyId,
+		secretAccessKey: ses.secretAccessKey,
+		...(ses.sessionToken ? { sessionToken: ses.sessionToken } : {}),
+		region: ses.region,
+		service: "ses",
+	});
+	const res = await aws.fetch(`https://email.${ses.region}.amazonaws.com/v2/email/outbound-emails`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			FromEmailAddress: fromHeader(ses.from),
+			Destination: { ToAddresses: [to] },
+			Content: {
+				Simple: {
+					Subject: { Data: subject, Charset: "UTF-8" },
+					Body: { Text: { Data: lines.join("\n"), Charset: "UTF-8" } },
+				},
+			},
+		}),
+	});
+	if (!res.ok) {
+		const detail = (await res.json().catch(() => ({}))) as { message?: string };
+		throw new Error(`SES notify failed (HTTP ${res.status})${detail.message ? ` — ${detail.message}` : ""}`);
+	}
+}
