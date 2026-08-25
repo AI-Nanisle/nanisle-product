@@ -25,10 +25,12 @@ export async function sendTask(env: AppEnv, msg: TaskMessage): Promise<void> {
 	const res = await aws.fetch(env.QUEUE_URL, {
 		method: "POST",
 		headers: { "content-type": "application/x-www-form-urlencoded" },
+		// aws4fetch 的签名器只认 string/ArrayBuffer body——直接传 URLSearchParams
+		// 对象会在签名阶段抛异常(线上 500 实测),必须先 toString
 		body: new URLSearchParams({
 			Action: "SendMessage",
 			MessageBody: JSON.stringify(msg),
-		}),
+		}).toString(),
 	});
 	if (!res.ok) {
 		const text = await res.text();

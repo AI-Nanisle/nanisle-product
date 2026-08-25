@@ -26,7 +26,7 @@
 	// Before your first real deploy: `wrangler kv namespace create WATCH`
 	// and paste the returned id below. Local dev uses an in-memory KV.
 	"kv_namespaces": [
-		{ "binding": "WATCH", "id": "TBD_RUN_wrangler_kv_namespace_create_WATCH" }
+		{ "binding": "WATCH", "id": "f0573f4ff69f4a5098173d8a092459e4" }
 	],
 	// Non-secret configuration. Secrets are NEVER written here or in any file —
 	// set them with `wrangler secret put <NAME>` (prod) or in .dev.vars (local, gitignored):
