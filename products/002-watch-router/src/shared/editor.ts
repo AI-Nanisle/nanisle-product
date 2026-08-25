@@ -19,6 +19,8 @@ export interface EditInput {
 	title?: string;
 	paragraphs: string[];
 	path: ExtractPath;
+	/** 生成进度回调(透传给 ai.ts;快车道 SSE 用)。 */
+	onDelta?: (textDelta: string) => void;
 }
 
 const EDIT_SYSTEM = `你是「观影路由」的编辑:读者没时间看完这篇内容,你替他看完,产出判决、要点和分段地图。只输出一个 JSON 对象,不要输出任何其他文字。
@@ -68,7 +70,7 @@ export async function editContent(cfg: AiConfig, input: EditInput): Promise<Watc
 		(input.title ? `标题:${input.title}\n` : "") +
 		`正文共 ${paragraphs.length} 段,每段以 [P段号] 开头:\n\n${numbered}`;
 
-	const res = await complete(cfg, { system: EDIT_SYSTEM, prompt, json: true });
+	const res = await complete(cfg, { system: EDIT_SYSTEM, prompt, json: true, onDelta: input.onDelta });
 
 	let parsed: unknown;
 	try {

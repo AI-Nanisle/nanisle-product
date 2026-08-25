@@ -59,6 +59,8 @@ export interface Store {
 	isWhitelisted(email: string): Promise<boolean>;
 	/** 原子占位(001 Q1 同款):自增与判上限压在同一个条件写里,超限抛 QuotaExceededError。 */
 	reserveQuota(email: string, date: string): Promise<void>;
+	/** 当日已用额度(F7 页眉读数;只读不占位)。 */
+	getQuota(email: string, date: string): Promise<number>;
 	createTask(task: TaskRecord): Promise<void>;
 	getTask(id: string): Promise<TaskRecord | null>;
 	/** 进度/状态更新。只更新给到的字段,updatedAt 总是刷新。 */
@@ -141,6 +143,14 @@ export class DdbStore implements Store {
 			if (err instanceof ConditionalFailure) throw new QuotaExceededError();
 			throw err;
 		}
+	}
+
+	async getQuota(email: string, date: string): Promise<number> {
+		const out = await this.call<{ Item?: { submits?: { N?: string } } }>("GetItem", {
+			Key: { PK: { S: `USER#${email.toLowerCase()}` }, SK: { S: `USAGE#${date}` } },
+			ProjectionExpression: "submits",
+		});
+		return Number(out.Item?.submits?.N ?? 0);
 	}
 
 	async createTask(t: TaskRecord): Promise<void> {
@@ -242,6 +252,10 @@ export class MemoryStore implements Store {
 		this.quota.set(key, n + 1);
 	}
 
+	async getQuota(email: string, date: string): Promise<number> {
+		return this.quota.get(`${email}:${date}`) ?? 0;
+	}
+
 	async createTask(t: TaskRecord): Promise<void> {
 		this.tasks.set(t.id, { ...t });
 	}
@@ -276,4 +290,8 @@ export interface CachedContent {
 	result: WatchResult;
 	contentKey: string;
 	cachedAt: number;
+	/** 首次处理时的来源 URL(F4 跳转用;粘贴内容没有)。 */
+	url?: string;
+	/** 文章/粘贴的正文段落(F4 段落锚点跳转用;视频转写待 C 线)。 */
+	paragraphs?: string[];
 }

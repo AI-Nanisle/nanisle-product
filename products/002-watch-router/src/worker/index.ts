@@ -14,6 +14,7 @@ import type { ExtractPath } from "../shared/schema";
 import { extractArticle, textToParagraphs } from "./extract";
 import {
 	CONTENT_CACHE_TTL_S,
+	QUOTA_LIMITS,
 	QuotaExceededError,
 	TASK_TIMEOUT_MS,
 	contentCacheKey,
@@ -161,73 +162,138 @@ app.post("/api/submit", userAiGuard, async (c) => {
 			title: cached.result.meta.title,
 			at: Date.now(),
 		});
-		return c.json({ cached: true, lane: cid.lane, result: cached.result });
+		return c.json({
+			cached: true,
+			lane: cid.lane,
+			result: cached.result,
+			...(cached.url ? { url: cached.url } : {}),
+			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
+		});
 	}
-
-	// 先占位后干活(docs/02 T6):占位失败 429;模型报错不退还。
-	// 快车道把占位挪到抽取之后——抽取是免费的 fetch,失败不该烧额度;
-	// 占位仍在编辑调用(真正花钱处)之前,立场不变。
-	const reserve = async (): Promise<Response | null> => {
-		try {
-			await store.reserveQuota(email, quotaDate());
-			return null;
-		} catch (err) {
-			if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429);
-			throw err;
-		}
-	};
 
 	if (cid.lane === "fast") {
-		// W4:正文从哪来
-		let title: string | undefined;
-		let paragraphs: string[];
-		let path: "article" | "paste";
-		if (url) {
-			const ex = await extractArticle(url, c.env.JINA_KEY);
-			if (!ex.ok) return c.json({ error: ex.error, needPaste: true }, 422);
-			title = ex.value.title;
-			paragraphs = ex.value.paragraphs;
-			path = "article";
-		} else {
-			paragraphs = textToParagraphs(text);
-			path = "paste";
-			if (paragraphs.length === 0) return c.json({ error: "正文是空的。" }, 400);
-		}
+		// F2 · 快车道 SSE:编辑调用几十秒到两分钟,主站域名经 CF 代理,
+		// 100 秒无字节会被 524 掐断——必须边生成边推。事件序列:
+		// phase(extracting→editing)→ delta(已生成字符数,1s 节流)→ result/error;
+		// thinking 阶段没有 content 增量,10 秒一个 ping 兜底保活。
+		const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+		const writer = writable.getWriter();
+		const enc = new TextEncoder();
+		const send = (obj: unknown) => writer.write(enc.encode(`data: ${JSON.stringify(obj)}\n\n`)).catch(() => {});
+		const env = c.env;
+		const ai = aiConfig(env);
+		const isMock = resolveProvider(ai) === "mock";
 
-		const limited = await reserve();
-		if (limited) return limited;
+		c.executionCtx.waitUntil(
+			(async () => {
+				const ping = setInterval(() => void send({ type: "ping" }), 10_000);
+				try {
+					// W4:正文从哪来
+					let title: string | undefined;
+					let paragraphs: string[];
+					let path: "article" | "paste";
+					if (url) {
+						await send({ type: "phase", phase: "extracting" });
+						const ex = await extractArticle(url, env.JINA_KEY);
+						if (!ex.ok) {
+							await send({ type: "error", error: ex.error, needPaste: true });
+							return;
+						}
+						title = ex.value.title;
+						paragraphs = ex.value.paragraphs;
+						path = "article";
+					} else {
+						paragraphs = textToParagraphs(text);
+						path = "paste";
+						if (paragraphs.length === 0) {
+							await send({ type: "error", error: "正文是空的。" });
+							return;
+						}
+					}
 
-		// W5:一次编辑调用(mock 模式内部返回示例);W6:锚定校验
-		let result;
-		try {
-			result = await editContent(aiConfig(c.env), { title, paragraphs, path });
-		} catch (err) {
-			if (err instanceof EditError) {
-				return c.json({ error: `编辑没干好:${err.message}。可以重试(会占一次额度)。` }, 502);
-			}
-			throw err;
-		}
-		result = anchorKeyPoints(result, paragraphs.join("\n"));
+					// 先占位后干活(docs/02 T6):占位在编辑调用(花钱处)之前、
+					// 免费的抽取之后;占位失败即止,模型报错不退还
+					try {
+						await store.reserveQuota(email, quotaDate());
+					} catch (err) {
+						if (err instanceof QuotaExceededError) {
+							await send({ type: "error", error: err.message, quota: true });
+							return;
+						}
+						throw err;
+					}
 
-		// mock 结果不进缓存——占着 60 天的缓存位污染真结果
-		if (resolveProvider(aiConfig(c.env)) !== "mock") {
-			await c.env.WATCH.put(
-				contentCacheKey(cid.key),
-				JSON.stringify({ result, contentKey: cid.key, cachedAt: Date.now() } satisfies CachedContent),
-				{ expirationTtl: CONTENT_CACHE_TTL_S },
-			);
-		}
-		await store.putReadRecord(email, {
-			contentKey: cid.key,
-			url: url || "",
-			title: result.meta.title,
-			at: Date.now(),
+					// W5:一次编辑调用(mock 模式内部返回示例);W6:锚定校验
+					await send({ type: "phase", phase: "editing" });
+					let chars = 0;
+					let lastPush = 0;
+					let result;
+					try {
+						result = await editContent(ai, {
+							title,
+							paragraphs,
+							path,
+							onDelta: (d) => {
+								chars += d.length;
+								const now = Date.now();
+								if (now - lastPush > 1000) {
+									lastPush = now;
+									void send({ type: "delta", chars });
+								}
+							},
+						});
+					} catch (err) {
+						if (err instanceof EditError) {
+							await send({ type: "error", error: `编辑没干好:${err.message}。可以重试(会占一次额度)。` });
+							return;
+						}
+						throw err;
+					}
+					result = anchorKeyPoints(result, paragraphs.join("\n"));
+
+					// mock 结果不进缓存——占着 60 天的缓存位污染真结果
+					if (!isMock) {
+						await env.WATCH.put(
+							contentCacheKey(cid.key),
+							JSON.stringify({
+								result,
+								contentKey: cid.key,
+								cachedAt: Date.now(),
+								...(url ? { url } : {}),
+								paragraphs,
+							} satisfies CachedContent),
+							{ expirationTtl: CONTENT_CACHE_TTL_S },
+						);
+					}
+					await store.putReadRecord(email, {
+						contentKey: cid.key,
+						url: url || "",
+						title: result.meta.title,
+						at: Date.now(),
+					});
+					await send({ type: "result", cached: false, lane: "fast", result, paragraphs, ...(url ? { url } : {}) });
+				} catch (err) {
+					console.error("fast lane failed", err);
+					await send({ type: "error", error: "处理失败,请稍后重试。" });
+				} finally {
+					clearInterval(ping);
+					await writer.close().catch(() => {});
+				}
+			})(),
+		);
+
+		return new Response(readable, {
+			headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
 		});
-		return c.json({ cached: false, lane: "fast", result });
 	}
 
-	const limited = await reserve();
-	if (limited) return limited;
+	// 慢车道:先占位后干活
+	try {
+		await store.reserveQuota(email, quotaDate());
+	} catch (err) {
+		if (err instanceof QuotaExceededError) return c.json({ error: err.message }, 429);
+		throw err;
+	}
 
 	// 慢车道:任务先落库再投递——顺序不能反,消费者回程时任务必须已存在
 	const task: TaskRecord = {
@@ -265,6 +331,12 @@ app.post("/api/submit", userAiGuard, async (c) => {
 	return c.json({ cached: false, lane: "slow", taskId: task.id });
 });
 
+// F7 · 配额读数:只读不占位,页眉常驻显示;上限由服务端下发,前端不硬编码
+app.get("/api/usage", userGuard, async (c) => {
+	const used = await c.get("store").getQuota(c.get("email"), quotaDate());
+	return c.json({ used, limit: QUOTA_LIMITS.submit });
+});
+
 // ---------- 任务轮询(W11) ----------
 
 app.get("/api/task/:id", userGuard, async (c) => {
@@ -288,7 +360,14 @@ app.get("/api/task/:id", userGuard, async (c) => {
 			// 理论上到不了:complete 先写缓存再标 done。真到了就承认异常。
 			return c.json({ status: "failed", error: "结果丢失,请重新提交。" });
 		}
-		return c.json({ status: "done", step: "done", path: task.path, result: cached.result });
+		return c.json({
+			status: "done",
+			step: "done",
+			path: task.path,
+			url: task.url,
+			result: cached.result,
+			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
+		});
 	}
 	return c.json({ status: task.status, step: task.step, path: task.path, error: task.error });
 });
@@ -344,7 +423,12 @@ app.post("/api/queue/complete", async (c) => {
 	// 顺序不变量:先写内容缓存,再标 done——轮询看到 done 时结果一定已就位
 	await c.env.WATCH.put(
 		contentCacheKey(task.contentKey),
-		JSON.stringify({ result, contentKey: task.contentKey, cachedAt: Date.now() } satisfies CachedContent),
+		JSON.stringify({
+			result,
+			contentKey: task.contentKey,
+			cachedAt: Date.now(),
+			url: task.url,
+		} satisfies CachedContent),
 		{ expirationTtl: CONTENT_CACHE_TTL_S },
 	);
 	await store.putReadRecord(task.email, {

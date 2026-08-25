@@ -92,6 +92,12 @@ export interface CompleteInput {
 	system?: string;
 	/** 要求模型只输出 JSON(deepseek 映射为 response_format json_object)。 */
 	json?: boolean;
+	/**
+	 * 002 扩展(对 001 版的加法,不影响既有调用):每收到一段正文增量就回调,
+	 * 快车道用它把生成进度透传给浏览器(经 CF 代理 100 秒无字节会 524)。
+	 * 仅 deepseek 流式路径生效;thinking 阶段没有 content 增量,心跳由调用方自己打。
+	 */
+	onDelta?: (textDelta: string) => void;
 }
 
 export interface CompleteResult {
@@ -115,7 +121,10 @@ interface DeepseekStreamChunk {
  * 都不来,Node(undici)默认的 body 空闲超时直接把连接掐断——本地和 Lambda
  * 都会踩。流式下 thinking 阶段就持续有增量字节,空闲超时永远不会触发。
  */
-async function readSse(body: ReadableStream<Uint8Array>): Promise<{ text: string; finish: string }> {
+async function readSse(
+	body: ReadableStream<Uint8Array>,
+	onDelta?: (textDelta: string) => void,
+): Promise<{ text: string; finish: string }> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
@@ -134,7 +143,11 @@ async function readSse(body: ReadableStream<Uint8Array>): Promise<{ text: string
 				if (!payload || payload === "[DONE]") continue;
 				try {
 					const chunk = JSON.parse(payload) as DeepseekStreamChunk;
-					text += chunk.choices?.[0]?.delta?.content ?? "";
+					const delta = chunk.choices?.[0]?.delta?.content ?? "";
+					if (delta) {
+						text += delta;
+						onDelta?.(delta);
+					}
 					const f = chunk.choices?.[0]?.finish_reason;
 					if (f) finish = f;
 				} catch {
@@ -179,7 +192,7 @@ async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<Co
 			throw new AiError("上游 AI 错误,请稍后重试。", 502);
 		}
 		if (!res.body) throw new AiError("上游 AI 错误,请稍后重试。", 502);
-		const { text, finish } = await readSse(res.body);
+		const { text, finish } = await readSse(res.body, input.onDelta);
 		if (text) return { text, provider: "deepseek", model };
 		console.error(`deepseek empty content, finish_reason=${finish}, max_tokens=${maxTokens(cfg)}, attempt=${attempt + 1}`);
 		if (finish === "length") {
