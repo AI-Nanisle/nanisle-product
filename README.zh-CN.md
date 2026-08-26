@@ -9,7 +9,7 @@
 | # | 产品 | 一句话 | Demo | 源码 |
 |---|------|--------|------|------|
 | 001 | 每日简报 Daily Brief | 有限、有终点的每日简报,每条都是通往原文的路由器 | _即将上线_ | [products/001-daily-brief](products/001-daily-brief/) |
-| 002 | 观影路由 Watch Router | 一小时的视频 AI 先替你看完:判决、带原文实证的要点、能跳回原片的分段地图 | _开发中_ | [products/002-watch-router](products/002-watch-router/) |
+| 002 | 长视频总结 Watch Router | 一小时的视频 AI 先替你看完:判决、带原文实证的要点、能跳回原片的分段地图 | _开发中_ | [products/002-watch-router](products/002-watch-router/) |
 
 ## 三条原则
 

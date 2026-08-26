@@ -1,4 +1,4 @@
-# 观影路由 Watch Router
+# 长视频总结 Watch Router
 
 One sentence: paste a video / podcast / article link — AI watches it first, tells you whether it's worth your time, what it says, and exactly which minutes (or paragraphs) to jump back to.
 

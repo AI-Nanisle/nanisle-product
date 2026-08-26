@@ -23,7 +23,7 @@ export interface EditInput {
 	onDelta?: (textDelta: string) => void;
 }
 
-const EDIT_SYSTEM = `你是「观影路由」的编辑:读者没时间看完这篇内容,你替他看完,产出判决、要点和分段地图。只输出一个 JSON 对象,不要输出任何其他文字。
+const EDIT_SYSTEM = `你是「长视频总结」的编辑:读者没时间看完这篇内容,你替他看完,产出判决、要点和分段地图。只输出一个 JSON 对象,不要输出任何其他文字。
 
 输出 schema(字段名与类型必须完全一致):
 {
@@ -56,7 +56,7 @@ export interface TranscriptInput {
 	onDelta?: (textDelta: string) => void;
 }
 
-const TRANSCRIPT_SYSTEM = `你是「观影路由」的编辑:读者没时间看这条视频/播客,你替他看完,产出判决、要点和分段地图,方便他跳回原片只看值得看的部分。只输出一个 JSON 对象,不要输出任何其他文字。
+const TRANSCRIPT_SYSTEM = `你是「长视频总结」的编辑:读者没时间看这条视频/播客,你替他看完,产出判决、要点和分段地图,方便他跳回原片只看值得看的部分。只输出一个 JSON 对象,不要输出任何其他文字。
 
 输出 schema(字段名与类型必须完全一致,所有时间一律用秒的整数):
 {

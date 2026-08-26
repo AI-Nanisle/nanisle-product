@@ -97,7 +97,7 @@ app.get("/auth/sso", async (c) => {
 	if (!(await store.isWhitelisted(payload.email))) {
 		return c.html(
 			`<!doctype html><meta charset="utf-8"><body style="font-family:sans-serif;max-width:28em;margin:15vh auto;line-height:1.9">` +
-				`<p>002 观影路由还在内测中,你的账号(${payload.email})暂未开通。</p>` +
+				`<p>002 长视频总结还在内测中,你的账号(${payload.email})暂未开通。</p>` +
 				`<p>想试用可以联系站长;<a href="${siteUrl(c.env)}">回南屿首页 →</a></p></body>`,
 			403,
 		);

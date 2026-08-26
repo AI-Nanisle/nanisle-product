@@ -268,7 +268,7 @@ export default function App() {
 		<div className="min-h-screen bg-zinc-50 text-zinc-900">
 			<main className="mx-auto max-w-2xl px-6 py-14">
 				<div className="flex items-baseline justify-between">
-					<h1 className="text-2xl font-semibold tracking-tight">观影路由</h1>
+					<h1 className="text-2xl font-semibold tracking-tight">长视频总结</h1>
 					{usage && (
 						<span className="text-xs text-zinc-400">
 							今日额度 {usage.used}/{usage.limit}

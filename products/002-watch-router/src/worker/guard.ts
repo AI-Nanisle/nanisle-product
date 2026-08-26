@@ -24,7 +24,7 @@ export { safeEqual } from "./sso";
 export const SESSION_COOKIE = "nanisle_watch_session";
 
 /** 已登录但不在内测白名单时的统一文案(403)。 */
-export const BETA_MSG = "002 观影路由还在内测中,你的账号暂未开通。想试用可以联系站长。";
+export const BETA_MSG = "002 长视频总结还在内测中,你的账号暂未开通。想试用可以联系站长。";
 
 /** userGuard 通过后挂在请求上下文里的东西:当前用户 + 该请求用的 store。 */
 export type Guarded = {

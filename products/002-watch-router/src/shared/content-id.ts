@@ -36,6 +36,11 @@ async function sha256Hex(s: string): Promise<string> {
 /** URL → 平台 + 内容 ID + 车道。抛错 = 不是合法 http(s) URL(调用方给 400)。 */
 export async function identifyUrl(raw: string): Promise<ContentId> {
 	const url = new URL(raw);
+	// 协议白名单:后续两条车道都会拿这个 URL 去 fetch/喂 yt-dlp,
+	// 非 http(s) 一律在门口拒掉
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error("only http(s) URLs");
+	}
 	const host = url.hostname.toLowerCase().replace(/^www\./, "");
 
 	// YouTube:watch?v= / youtu.be/ / shorts/ / live/
