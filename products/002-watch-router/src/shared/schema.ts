@@ -10,6 +10,21 @@ export interface WatchVerdict {
 	reason: string;
 }
 
+/**
+ * 导读(2026-08-26 用户反馈新增):判决只有一句话太薄,开头要一段真正
+ * 「替你看完后讲给你听」的东西——整体在讲什么、哪里有意思、值得反着想
+ * 的地方。counter 是编辑的批判视角,但必须针对内容里的具体论点,不引入
+ * 外部事实(和引文锚定同一条纪律的软版本)。
+ */
+export interface WatchOverview {
+	/** 整条内容在讲什么:3~5 句连贯概述,读完等于听了一遍主线。 */
+	summary: string;
+	/** 最有意思/最出人意料的一两处,以及为什么值得停下来想。 */
+	interesting: string;
+	/** 反着想:哪个论点可能站不住、另一面的解读是什么。没有就诚实说没有。 */
+	counter: string;
+}
+
 export interface WatchKeyPoint {
 	/** 带具体数字/结论的要点,prompt 硬规则禁止空泛。 */
 	point: string;
@@ -42,6 +57,8 @@ export interface WatchMeta {
 
 export interface WatchResult {
 	verdict: WatchVerdict;
+	/** 老缓存没有这个字段,渲染端按可选处理。 */
+	overview?: WatchOverview;
 	keyPoints: WatchKeyPoint[];
 	chapters: WatchChapter[];
 	meta: WatchMeta;
@@ -85,8 +102,16 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 			...(typeof h.tracked === "string" ? { tracked: h.tracked } : {}),
 		});
 	}
+	// overview 可选(老结果没有);有就三个字段都得是字符串,坏了整个丢弃
+	let overview: WatchOverview | undefined;
+	const ov = o.overview as Record<string, unknown> | undefined;
+	if (ov && typeof ov.summary === "string" && typeof ov.interesting === "string" && typeof ov.counter === "string") {
+		overview = { summary: ov.summary, interesting: ov.interesting, counter: ov.counter };
+	}
+
 	return {
 		verdict: { worth: v.worth as WatchVerdict["worth"], reason: v.reason },
+		...(overview ? { overview } : {}),
 		keyPoints,
 		chapters,
 		meta: {
@@ -101,6 +126,11 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 export function mockWatchResult(path: ExtractPath = "article"): WatchResult {
 	return {
 		verdict: { worth: "partial", reason: "[mock] 前 20 分钟值得听,后半是重复案例。" },
+		overview: {
+			summary: "[mock] 这是一段示例导读:嘉宾先回顾了模型成本一年降十倍的背景,再展开讲应用层竞争从模型能力转向数据与分发的判断,最后用自家产品的两个案例收尾。",
+			interesting: "[mock] 最有意思的是抽样评测替代全量回归那段——用 20% 的样本换 5 倍的发布速度,反直觉但算得过账。",
+			counter: "[mock] 反着想:嘉宾的判断建立在成本持续下降的外推上,如果算力供给收紧,整个论证的前提就动摇了。",
+		},
 		keyPoints: [
 			{ point: "[mock] 示例要点:模型成本一年降了 10 倍,作者据此判断应用层竞争转向数据。", quote: "成本一年降了十倍", start: 312, anchored: true },
 			{ point: "[mock] 示例要点:嘉宾团队用 20% 的抽样评测替代全量回归,发布周期从两周缩到三天。", quote: "两周缩到三天", start: 1210, anchored: true },

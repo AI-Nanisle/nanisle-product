@@ -20,6 +20,15 @@ function polishResult(r: WatchResult): WatchResult {
 	return {
 		...r,
 		verdict: { ...r.verdict, reason: normalizeCnStyle(r.verdict.reason) },
+		...(r.overview
+			? {
+					overview: {
+						summary: normalizeCnStyle(r.overview.summary),
+						interesting: normalizeCnStyle(r.overview.interesting),
+						counter: normalizeCnStyle(r.overview.counter),
+					},
+				}
+			: {}),
 		keyPoints: r.keyPoints.map((kp) => ({ ...kp, point: normalizeCnStyle(kp.point) })),
 		chapters: r.chapters.map((ch) => ({ ...ch, gist: normalizeCnStyle(ch.gist) })),
 	};
@@ -43,16 +52,18 @@ const EDIT_SYSTEM = `你是「长视频总结」的编辑:读者没时间看完�
 输出 schema(字段名与类型必须完全一致):
 {
   "verdict": { "worth": "yes|no|partial", "reason": "值不值得花时间读,一句话,说出判断依据" },
+  "overview": { "summary": "整篇在讲什么,3~5 句连贯概述", "interesting": "最有意思的一两处及为什么", "counter": "反着想:哪个论点可能站不住,另一面怎么解读" },
   "keyPoints": [ { "point": "要点", "quote": "支撑该要点的原文摘录", "start": 段号 } ],
   "chapters": [ { "start": 段号, "end": 段号, "gist": "这一段在讲什么,一句话", "value": "core|context|low" } ]
 }
 
 硬规则:
-1. keyPoints 出 3~6 条。point 必须带具体的数字、名字、方法或结论——「讨论了 AI 的影响」这类说了跟没说一样的话禁止出现。
-2. quote 必须从正文逐字摘录,30 字以内,一字不改、不加省略号、不拼接两处原文;start 填它所在的段号(正文里 [P3] 就填 3)。
-3. chapters 按内容的自然转折切段:start/end 都是段号,首段从 1 开始、末段到最后一段,首尾相接、不重叠、无空洞。gist 一句话。广告、寒暄、重复啰嗦的车轱辘话标 "low";背景铺垫标 "context";核心内容标 "core"。
-4. 只依据给你的正文判断,禁止外推或补充你自己知道的信息。
-5. point/gist/reason 用简体中文;quote 保持原文语言不翻译。`;
+1. overview.summary 要连贯像一段话,读完等于听了一遍主线,不是要点罗列;interesting 指出最出人意料或最值得停下来想的地方;counter 是你的批判视角——针对正文里的**具体论点**指出可能站不住的地方或另一面的解读,必须落在正文说过的内容上,不引入外部事实;实在没有可质疑之处就写「这篇立论平实,没有明显可反驳处」之类的诚实判断,禁止硬凑。
+2. keyPoints 出 3~6 条。point 必须带具体的数字、名字、方法或结论——「讨论了 AI 的影响」这类说了跟没说一样的话禁止出现。
+3. quote 必须从正文逐字摘录,30 字以内,一字不改、不加省略号、不拼接两处原文;start 填它所在的段号(正文里 [P3] 就填 3)。
+4. chapters 按内容的自然转折切段:start/end 都是段号,首段从 1 开始、末段到最后一段,首尾相接、不重叠、无空洞。gist 一句话。广告、寒暄、重复啰嗦的车轱辘话标 "low";背景铺垫标 "context";核心内容标 "core"。
+5. 除引用外只依据给你的正文判断,禁止补充你自己知道的外部信息。
+6. point/gist/reason/overview 用简体中文;quote 保持原文语言不翻译。`;
 
 // ---------- 视频/播客转写变体(慢车道消费者用,docs/03 C 线) ----------
 
@@ -76,16 +87,18 @@ const TRANSCRIPT_SYSTEM = `你是「长视频总结」的编辑:读者没时间�
 输出 schema(字段名与类型必须完全一致,所有时间一律用秒的整数):
 {
   "verdict": { "worth": "yes|no|partial", "reason": "值不值得花时间看,一句话,说出判断依据" },
+  "overview": { "summary": "整条内容在讲什么,3~5 句连贯概述", "interesting": "最有意思的一两处及为什么", "counter": "反着想:哪个论点可能站不住,另一面怎么解读" },
   "keyPoints": [ { "point": "要点", "quote": "支撑该要点的转写原文摘录", "start": 秒 } ],
   "chapters": [ { "start": 秒, "end": 秒, "gist": "这一段在讲什么,一句话", "value": "core|context|low" } ]
 }
 
 硬规则:
-1. keyPoints 出 3~6 条。point 必须带具体的数字、名字、方法或结论——「讨论了 AI 的影响」这类说了跟没说一样的话禁止出现。
-2. quote 必须从转写文本逐字摘录,30 字以内,一字不改、不加省略号、不拼接两处;start 填它出现处的秒数(取所在 [t=秒] 标记)。
-3. chapters 按内容的自然转折切段,每段约 2~10 分钟:第一段 start=0,最后一段 end=总时长,首尾相接、不重叠、无空洞。gist 一句话。片头寒暄、广告、抽奖、重复啰嗦标 "low";背景铺垫标 "context";核心内容标 "core"。
-4. 只依据给你的转写判断,禁止外推或补充你自己知道的信息;转写可能有错字,引用时保持原样。
-5. point/gist/reason 用简体中文;quote 保持原文语言不翻译。`;
+1. overview.summary 要连贯像一段话,读完等于把主线听了一遍,不是要点罗列;interesting 指出最出人意料或最值得停下来想的地方;counter 是你的批判视角——针对内容里的**具体论点**指出可能站不住的地方或另一面的解读(例如嘉宾立场带来的偏向、论据的外推前提),必须落在说过的内容上,不引入外部事实;实在没有就诚实写没有,禁止硬凑。
+2. keyPoints 出 3~6 条。point 必须带具体的数字、名字、方法或结论——「讨论了 AI 的影响」这类说了跟没说一样的话禁止出现。
+3. quote 必须从转写文本逐字摘录,30 字以内,一字不改、不加省略号、不拼接两处;start 填它出现处的秒数(取所在 [t=秒] 标记)。
+4. chapters 按内容的自然转折切段,每段约 2~10 分钟:第一段 start=0,最后一段 end=总时长,首尾相接、不重叠、无空洞。gist 一句话。片头寒暄、广告、抽奖、重复啰嗦标 "low";背景铺垫标 "context";核心内容标 "core"。
+5. 除引用外只依据给你的转写判断,禁止补充你自己知道的外部信息;转写可能有错字,引用时保持原样。
+6. point/gist/reason/overview 用简体中文;quote 保持原文语言不翻译。`;
 
 /** 转写 → 一次编辑调用出 T4 schema。截断与 meta 规则同 editContent。 */
 export async function editTranscript(cfg: AiConfig, input: TranscriptInput): Promise<WatchResult> {

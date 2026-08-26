@@ -339,6 +339,20 @@ export default function App() {
 							<p className="verdict-reason">{result.verdict.reason}</p>
 						</div>
 
+						{result.overview && (
+							<div className="overview rise">
+								<p className="ov-summary">{result.overview.summary}</p>
+								<p className="ov-row">
+									<span className="ov-label">有意思的是</span>
+									{result.overview.interesting}
+								</p>
+								<p className="ov-row">
+									<span className="ov-label ov-counter">反着想</span>
+									{result.overview.counter}
+								</p>
+							</div>
+						)}
+
 						<div className="rise">
 							<h3 className="section-label">总体要点</h3>
 							<ul className="kp-list">

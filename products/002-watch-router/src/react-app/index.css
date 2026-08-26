@@ -519,6 +519,41 @@ textarea::placeholder {
 	margin: 0;
 }
 
+/* 导读:整卡衬线,像编辑替你写的一段短评;两个小标签是等宽读数 */
+.overview {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 16px 18px;
+}
+.ov-summary {
+	margin: 0;
+	font-family: var(--serif);
+	font-size: 15px;
+	line-height: 1.9;
+}
+.ov-row {
+	margin: 12px 0 0;
+	padding-top: 12px;
+	border-top: 1px solid var(--paper-deep);
+	font-family: var(--serif);
+	font-size: 14px;
+	line-height: 1.85;
+	color: var(--ink-2);
+}
+.ov-label {
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	color: var(--ok);
+	margin-right: 10px;
+	white-space: nowrap;
+}
+.ov-label.ov-counter {
+	color: var(--accent);
+}
+
 .section-label {
 	font-family: var(--mono);
 	font-size: 11.5px;

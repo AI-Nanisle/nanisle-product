@@ -314,9 +314,13 @@ export class MemoryStore implements Store {
 	}
 }
 
-/** 结果缓存的 KV 键(docs/02 T6:content:<platform>:<id>,60 天)。 */
+/**
+ * 结果缓存的 KV 键(docs/02 T6:content:<版本>:<platform>:<id>,60 天)。
+ * 版本号进键:schema 有破坏性升级(如 2026-08-26 新增导读)时 bump 一位,
+ * 老缓存自然被绕开并随 TTL 消亡——比迁移或运行时兼容分支都便宜。
+ */
 export function contentCacheKey(contentKey: string): string {
-	return `content:${contentKey}`;
+	return `content:v2:${contentKey}`;
 }
 
 export const CONTENT_CACHE_TTL_S = 60 * 24 * 3600;
