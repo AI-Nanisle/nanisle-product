@@ -11,10 +11,16 @@
 
 FROM public.ecr.aws/lambda/nodejs:22
 
-# yt-dlp(Python 程序;版本钉死,YouTube 反爬升级时改这里重新部署)
-RUN dnf install -y python3 python3-pip tar xz && \
-    pip3 install --no-cache-dir yt-dlp==2026.6.9 && \
-    dnf clean all
+# ffmpeg 解包要用的 tar/xz(Lambda 基础镜像是最小化 AL2023,没带)
+RUN dnf install -y tar xz && dnf clean all
+
+# yt-dlp 用官方单文件 Linux 二进制(自带 Python 运行时,x86_64)——
+# 不走 dnf python3 + pip:基础镜像里那套 python 缺 SSL 模块,pip 连不上
+# PyPI(构建实测)。版本钉死,YouTube 反爬升级时改这一行重新部署。
+RUN curl -sL https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp_linux \
+      -o /usr/local/bin/yt-dlp && \
+    chmod +x /usr/local/bin/yt-dlp && \
+    /usr/local/bin/yt-dlp --version
 
 # ffmpeg 静态编译版(johnvansickle amd64 build)
 RUN cd /tmp && \
