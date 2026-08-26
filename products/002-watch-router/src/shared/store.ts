@@ -54,6 +54,29 @@ export interface ReadRecord {
 	tracked?: Record<string, string>;
 }
 
+/**
+ * N 线 · 想法(2026-08-26 用户需求;设计哲学同 001 N1:结果是内容,想法是
+ * 读者的长期资产)。target 锚点:overview | kp:<序号> | ch:<序号> | general。
+ * 快照原则:title/url 建账时从处理记录抄一次,之后追加永不改——账记的是当时。
+ */
+export interface NoteEntry {
+	/** 写下的时刻(ms),也当条目 id 用(同内容同毫秒双写的概率可忽略)。 */
+	at: number;
+	target: string;
+	text: string;
+}
+
+export interface NoteRecord {
+	contentKey: string;
+	url?: string;
+	title?: string;
+	entries: NoteEntry[];
+	updatedAt: number;
+}
+
+/** 单条内容的想法上限(有界状态,001 MAX_NOTE_ENTRIES 同款纪律)。 */
+export const MAX_NOTE_ENTRIES = 50;
+
 export class QuotaExceededError extends Error {
 	constructor() {
 		super(`今日提交次数已用完(${QUOTA_LIMITS.submit} 次/日)。明天自动恢复。`);
@@ -78,6 +101,10 @@ export interface Store {
 	putReadRecord(email: string, rec: ReadRecord): Promise<void>;
 	/** 读处理记录(I3 高亮的用户级缓存靠它)。 */
 	getReadRecord(email: string, contentKey: string): Promise<ReadRecord | null>;
+	/** 历史列表(N 线):该用户全部处理记录,新的在前,封顶 200。 */
+	listReadRecords(email: string): Promise<ReadRecord[]>;
+	getNote(email: string, contentKey: string): Promise<NoteRecord | null>;
+	putNote(email: string, note: NoteRecord): Promise<void>;
 }
 
 export interface DdbConfig {
@@ -243,6 +270,10 @@ export class DdbStore implements Store {
 		});
 		const it = out.Item;
 		if (!it) return null;
+		return this.readRecordFromItem(contentKey, it);
+	}
+
+	private readRecordFromItem(contentKey: string, it: Record<string, { S?: string; N?: string }>): ReadRecord {
 		let tracked: Record<string, string> | undefined;
 		try {
 			tracked = it.tracked?.S ? (JSON.parse(it.tracked.S) as Record<string, string>) : undefined;
@@ -256,6 +287,56 @@ export class DdbStore implements Store {
 			at: Number(it.at?.N ?? 0),
 			...(tracked ? { tracked } : {}),
 		};
+	}
+
+	async listReadRecords(email: string): Promise<ReadRecord[]> {
+		// SK 是 READ#<contentKey>,不是时间序——全量拉(封顶 200)后按 at 排。
+		// 内测规模一个用户几十条,一次 Query 足够;将来量大再加 at 的 GSI。
+		const out = await this.call<{ Items?: Record<string, { S?: string; N?: string }>[] }>("Query", {
+			KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+			ExpressionAttributeValues: {
+				":pk": { S: `USER#${email.toLowerCase()}` },
+				":pre": { S: "READ#" },
+			},
+			Limit: 200,
+		});
+		return (out.Items ?? [])
+			.map((it) => this.readRecordFromItem((it.SK?.S ?? "").slice("READ#".length), it))
+			.sort((a, b) => b.at - a.at);
+	}
+
+	async getNote(email: string, contentKey: string): Promise<NoteRecord | null> {
+		const out = await this.call<{ Item?: Record<string, { S?: string; N?: string }> }>("GetItem", {
+			Key: { PK: { S: `USER#${email.toLowerCase()}` }, SK: { S: `NOTE#${contentKey}` } },
+		});
+		const it = out.Item;
+		if (!it) return null;
+		let entries: NoteEntry[] = [];
+		try {
+			entries = it.entries?.S ? (JSON.parse(it.entries.S) as NoteEntry[]) : [];
+		} catch {
+			entries = [];
+		}
+		return {
+			contentKey,
+			url: it.url?.S,
+			title: it.title?.S,
+			entries,
+			updatedAt: Number(it.updatedAt?.N ?? 0),
+		};
+	}
+
+	async putNote(email: string, note: NoteRecord): Promise<void> {
+		await this.call("PutItem", {
+			Item: {
+				PK: { S: `USER#${email.toLowerCase()}` },
+				SK: { S: `NOTE#${note.contentKey}` },
+				...(note.url ? { url: { S: note.url } } : {}),
+				...(note.title ? { title: { S: note.title } } : {}),
+				entries: { S: JSON.stringify(note.entries) },
+				updatedAt: { N: String(note.updatedAt) },
+			},
+		});
 	}
 }
 
@@ -311,6 +392,25 @@ export class MemoryStore implements Store {
 	async getReadRecord(email: string, contentKey: string): Promise<ReadRecord | null> {
 		const rec = this.reads.get(`${email}:${contentKey}`);
 		return rec ? { ...rec } : null;
+	}
+
+	async listReadRecords(email: string): Promise<ReadRecord[]> {
+		return [...this.reads.entries()]
+			.filter(([k]) => k.startsWith(`${email}:`))
+			.map(([, v]) => ({ ...v }))
+			.sort((a, b) => b.at - a.at)
+			.slice(0, 200);
+	}
+
+	private notes = new Map<string, NoteRecord>();
+
+	async getNote(email: string, contentKey: string): Promise<NoteRecord | null> {
+		const n = this.notes.get(`${email}:${contentKey}`);
+		return n ? { ...n, entries: [...n.entries] } : null;
+	}
+
+	async putNote(email: string, note: NoteRecord): Promise<void> {
+		this.notes.set(`${email}:${note.contentKey}`, { ...note, entries: [...note.entries] });
 	}
 }
 

@@ -14,6 +14,7 @@ import type { ExtractPath } from "../shared/schema";
 import { extractArticle, textToParagraphs } from "./extract";
 import {
 	CONTENT_CACHE_TTL_S,
+	MAX_NOTE_ENTRIES,
 	QUOTA_LIMITS,
 	QuotaExceededError,
 	TASK_TIMEOUT_MS,
@@ -195,6 +196,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 		return c.json({
 			cached: true,
 			lane: cid.lane,
+			contentKey: cid.key,
 			result: merged,
 			...(cached.url ? { url: cached.url } : {}),
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
@@ -297,7 +299,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					}
 					// I3:交付前做用户级高亮(withTracked 内部顺带落处理记录)
 					const merged = await withTracked(env, store, email, cid.key, url || "", result);
-					await send({ type: "result", cached: false, lane: "fast", result: merged, paragraphs, ...(url ? { url } : {}) });
+					await send({ type: "result", cached: false, lane: "fast", contentKey: cid.key, result: merged, paragraphs, ...(url ? { url } : {}) });
 				} catch (err) {
 					console.error("fast lane failed", err);
 					await send({ type: "error", error: "处理失败,请稍后重试。" });
@@ -363,6 +365,99 @@ app.get("/api/usage", userGuard, async (c) => {
 	return c.json({ used, limit: QUOTA_LIMITS.submit });
 });
 
+// ---------- N 线 · 记录与想法(2026-08-26 用户需求;哲学同 001 N 线) ----------
+
+app.get("/api/history", userGuard, async (c) => {
+	const items = await c.get("store").listReadRecords(c.get("email"));
+	return c.json({
+		items: items.map((r) => ({ contentKey: r.contentKey, url: r.url, title: r.title, at: r.at })),
+	});
+});
+
+// 重开历史结果:结果本体在 60 天内容缓存里,过期就带 expired 标记回去
+// (前端预填 URL 引导重新提交——比为「保存」把每份结果永久化便宜得多,
+// 且重提交时若别人算过 = 缓存命中零成本)。高亮从处理记录的用户级缓存合并,零调用。
+app.get("/api/result/:key", userGuard, async (c) => {
+	const key = c.req.param("key");
+	const store = c.get("store");
+	const email = c.get("email");
+	const rec = await store.getReadRecord(email, key);
+	if (!rec) return c.json({ error: "没有这条记录。" }, 404);
+	const note = await store.getNote(email, key);
+	const cached = await c.env.WATCH.get<CachedContent>(contentCacheKey(key), "json");
+	if (!cached) {
+		return c.json({
+			expired: true,
+			contentKey: key,
+			url: rec.url,
+			title: rec.title,
+			...(note ? { note } : {}),
+		});
+	}
+	const merged = rec.tracked ? mergeTracked(cached.result, rec.tracked) : cached.result;
+	return c.json({
+		contentKey: key,
+		result: merged,
+		url: cached.url ?? rec.url,
+		...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
+		...(note ? { note } : {}),
+	});
+});
+
+app.get("/api/note/:key", userGuard, async (c) => {
+	const note = await c.get("store").getNote(c.get("email"), c.req.param("key"));
+	return c.json({ note: note ?? null });
+});
+
+/** 想法锚点:导读 | 要点序号 | 分段序号 | 整体。 */
+const NOTE_TARGET_RE = /^(overview|general|kp:\d{1,3}|ch:\d{1,3})$/;
+
+app.post("/api/note", userGuard, async (c) => {
+	const body = await c.req.json<{ contentKey?: unknown; target?: unknown; text?: unknown }>().catch(() => null);
+	const key = typeof body?.contentKey === "string" ? body.contentKey : "";
+	const target = typeof body?.target === "string" ? body.target : "";
+	const text = typeof body?.text === "string" ? body.text.trim() : "";
+	if (!key || !NOTE_TARGET_RE.test(target) || !text) {
+		return c.json({ error: "need { contentKey, target, text }" }, 400);
+	}
+	if (text.length > 2000) return c.json({ error: "一条想法最多 2000 字。" }, 413);
+	const store = c.get("store");
+	const email = c.get("email");
+	const rec = await store.getReadRecord(email, key);
+	if (!rec) return c.json({ error: "先处理过这条内容,才能在上面记想法。" }, 404);
+	// 快照原则(001 N1):title/url 只在建账时抄一次,之后追加不动它
+	const note = (await store.getNote(email, key)) ?? {
+		contentKey: key,
+		...(rec.url ? { url: rec.url } : {}),
+		...(rec.title ? { title: rec.title } : {}),
+		entries: [],
+		updatedAt: 0,
+	};
+	if (note.entries.length >= MAX_NOTE_ENTRIES) {
+		return c.json({ error: `这条内容的想法已满 ${MAX_NOTE_ENTRIES} 条。` }, 409);
+	}
+	const entry = { at: Date.now(), target, text };
+	note.entries.push(entry);
+	note.updatedAt = entry.at;
+	await store.putNote(email, note);
+	return c.json({ ok: true, entry });
+});
+
+app.post("/api/note/delete", userGuard, async (c) => {
+	const body = await c.req.json<{ contentKey?: unknown; at?: unknown }>().catch(() => null);
+	const key = typeof body?.contentKey === "string" ? body.contentKey : "";
+	const at = Number(body?.at);
+	if (!key || !Number.isFinite(at)) return c.json({ error: "need { contentKey, at }" }, 400);
+	const store = c.get("store");
+	const email = c.get("email");
+	const note = await store.getNote(email, key);
+	if (!note) return c.json({ error: "没有这条记录。" }, 404);
+	const next = note.entries.filter((e) => e.at !== at);
+	if (next.length === note.entries.length) return c.json({ error: "没有这条想法。" }, 404);
+	await store.putNote(email, { ...note, entries: next, updatedAt: Date.now() });
+	return c.json({ ok: true });
+});
+
 // ---------- 任务轮询(W11) ----------
 
 app.get("/api/task/:id", userGuard, async (c) => {
@@ -393,6 +488,7 @@ app.get("/api/task/:id", userGuard, async (c) => {
 			step: "done",
 			path: task.path,
 			url: task.url,
+			contentKey: task.contentKey,
 			result: merged,
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		});
