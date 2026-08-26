@@ -392,6 +392,9 @@ app.post("/api/queue/progress", async (c) => {
 	const { store } = makeStore(c.env);
 	const task = await store.getTask(body.taskId);
 	if (!task) return c.json({ error: "unknown task" }, 404);
+	// 幂等:重投的旧消息对应的任务可能已完成——告诉消费者放弃,别把
+	// done 打回 running(消费者据 done:true 直接跳过整条管线,不重复花钱)
+	if (task.status === "done") return c.json({ ok: false, done: true });
 	await store.updateTask(body.taskId, {
 		status: "running",
 		step: body.step as TaskStep,
@@ -403,7 +406,7 @@ app.post("/api/queue/progress", async (c) => {
 app.post("/api/queue/complete", async (c) => {
 	if (!(await consumerAuthed(c))) return c.json({ error: "unauthorized" }, 401);
 	const body = await c.req
-		.json<{ taskId?: string; result?: unknown; error?: string; path?: string }>()
+		.json<{ taskId?: string; result?: unknown; error?: string; path?: string; paragraphs?: unknown }>()
 		.catch(() => null);
 	if (!body?.taskId) return c.json({ error: "need { taskId, result | error }" }, 400);
 	const { store } = makeStore(c.env);
@@ -420,6 +423,13 @@ app.post("/api/queue/complete", async (c) => {
 	// TODO(W6):这里加 quote 锚定校验,配不上的要点标 anchored:false
 
 	const path = body.path && EXTRACT_PATHS.includes(body.path as ExtractPath) ? (body.path as ExtractPath) : result.meta.path;
+	// 转写段落(F4 原文区/将来跳转用):只收字符串数组,总量封顶,超了丢弃不报错
+	let paragraphs: string[] | undefined;
+	if (Array.isArray(body.paragraphs)) {
+		const strings = body.paragraphs.filter((p): p is string => typeof p === "string");
+		const total = strings.reduce((s, p) => s + p.length, 0);
+		if (strings.length > 0 && strings.length <= 5000 && total <= 500_000) paragraphs = strings;
+	}
 	// 顺序不变量:先写内容缓存,再标 done——轮询看到 done 时结果一定已就位
 	await c.env.WATCH.put(
 		contentCacheKey(task.contentKey),
@@ -428,6 +438,7 @@ app.post("/api/queue/complete", async (c) => {
 			contentKey: task.contentKey,
 			cachedAt: Date.now(),
 			url: task.url,
+			...(paragraphs ? { paragraphs } : {}),
 		} satisfies CachedContent),
 		{ expirationTtl: CONTENT_CACHE_TTL_S },
 	);

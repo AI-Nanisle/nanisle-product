@@ -9,3 +9,4 @@ dist/
 !.env.example
 *.tsbuildinfo
 worker-configuration.d.ts
+consumer/dist/

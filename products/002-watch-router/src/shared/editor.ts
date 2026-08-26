@@ -39,6 +39,84 @@ const EDIT_SYSTEM = `你是「观影路由」的编辑:读者没时间看完这�
 4. 只依据给你的正文判断,禁止外推或补充你自己知道的信息。
 5. point/gist/reason 用简体中文;quote 保持原文语言不翻译。`;
 
+// ---------- 视频/播客转写变体(慢车道消费者用,docs/03 C 线) ----------
+
+export interface TranscriptSegment {
+	/** 秒。 */
+	start: number;
+	text: string;
+}
+
+export interface TranscriptInput {
+	title?: string;
+	segments: TranscriptSegment[];
+	path: "subtitle" | "whisper";
+	/** 总时长(秒);没有就取最后一段的 start 兜底。 */
+	durationSec?: number;
+	onDelta?: (textDelta: string) => void;
+}
+
+const TRANSCRIPT_SYSTEM = `你是「观影路由」的编辑:读者没时间看这条视频/播客,你替他看完,产出判决、要点和分段地图,方便他跳回原片只看值得看的部分。只输出一个 JSON 对象,不要输出任何其他文字。
+
+输出 schema(字段名与类型必须完全一致,所有时间一律用秒的整数):
+{
+  "verdict": { "worth": "yes|no|partial", "reason": "值不值得花时间看,一句话,说出判断依据" },
+  "keyPoints": [ { "point": "要点", "quote": "支撑该要点的转写原文摘录", "start": 秒 } ],
+  "chapters": [ { "start": 秒, "end": 秒, "gist": "这一段在讲什么,一句话", "value": "core|context|low" } ]
+}
+
+硬规则:
+1. keyPoints 出 3~6 条。point 必须带具体的数字、名字、方法或结论——「讨论了 AI 的影响」这类说了跟没说一样的话禁止出现。
+2. quote 必须从转写文本逐字摘录,30 字以内,一字不改、不加省略号、不拼接两处;start 填它出现处的秒数(取所在 [t=秒] 标记)。
+3. chapters 按内容的自然转折切段,每段约 2~10 分钟:第一段 start=0,最后一段 end=总时长,首尾相接、不重叠、无空洞。gist 一句话。片头寒暄、广告、抽奖、重复啰嗦标 "low";背景铺垫标 "context";核心内容标 "core"。
+4. 只依据给你的转写判断,禁止外推或补充你自己知道的信息;转写可能有错字,引用时保持原样。
+5. point/gist/reason 用简体中文;quote 保持原文语言不翻译。`;
+
+/** 转写 → 一次编辑调用出 T4 schema。截断与 meta 规则同 editContent。 */
+export async function editTranscript(cfg: AiConfig, input: TranscriptInput): Promise<WatchResult> {
+	const segments: TranscriptSegment[] = [];
+	let chars = 0;
+	let truncated = false;
+	for (const s of input.segments) {
+		if (chars + s.text.length > MAX_INPUT_CHARS) {
+			truncated = true;
+			break;
+		}
+		segments.push(s);
+		chars += s.text.length;
+	}
+	if (segments.length === 0) throw new EditError("转写是空的");
+
+	if (resolveProvider(cfg) === "mock") {
+		const mock = mockWatchResult(input.path);
+		mock.meta = { path: input.path, truncated, ...(input.title ? { title: input.title } : {}) };
+		return mock;
+	}
+
+	const duration = Math.round(input.durationSec ?? segments[segments.length - 1].start);
+	const lines = segments.map((s) => `[t=${Math.round(s.start)}] ${s.text.replace(/\s+/g, " ").trim()}`).join("\n");
+	const prompt =
+		(input.title ? `标题:${input.title}\n` : "") +
+		`总时长约 ${duration} 秒。以下是带秒数标记的转写文本:\n\n${lines}`;
+
+	const res = await complete(cfg, { system: TRANSCRIPT_SYSTEM, prompt, json: true, onDelta: input.onDelta });
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(res.text);
+	} catch {
+		throw new EditError("模型没有返回合法 JSON");
+	}
+	(parsed as Record<string, unknown>).meta = {
+		path: input.path,
+		truncated,
+		...(input.title ? { title: input.title } : {}),
+	};
+	const valid = validateWatchResult(parsed);
+	if (!valid) throw new EditError("模型输出不符合 schema");
+	return valid;
+}
+
 /**
  * 一次编辑调用。mock 模式(没配 key)直接返回内置示例——调用方不用
  * 单独判断 provider。抛 EditError = 模型输出坏了(JSON 解析或 schema
