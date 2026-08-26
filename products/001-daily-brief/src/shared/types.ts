@@ -73,10 +73,24 @@ export interface DroppedItem {
 	reason: string;
 }
 
+/**
+ * 「今日速览」的一句:该追踪范围内今天动了什么的一条快讯合成。refs 是句子的
+ * 事实来源(锚回原文,可以一句挂多条同事件报道)——原文锚定哲学不因合成而破。
+ */
+export interface RecapSentence {
+	text: string;
+	refs: BriefLink[];
+}
+
 export interface BriefSection {
 	/** Tracker key this section belongs to (built-ins use "headlines"/"learn"). */
 	key: string;
 	title: string;
+	/**
+	 * 今日速览:不值得占条目位、但扫一眼有用的快讯,合成 0-4 句放在条目之前。
+	 * 不占追踪器配额;没有够格的快讯时缺省,UI 整块不渲染。
+	 */
+	recap?: RecapSentence[];
 	/** Empty items[] means the tracker ran but found nothing today — the UI
 	 * still renders the section with a "no news" line, never hides it. */
 	items: BriefItem[];

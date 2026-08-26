@@ -9,7 +9,7 @@
  */
 
 import { XMLParser } from "fast-xml-parser";
-import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem } from "./types";
+import type { Brief, BriefItem, BriefLink, BriefSection, DroppedItem, RecapSentence } from "./types";
 import { normalizeThreadKey } from "./threads.ts";
 import { countAiTells, normalizeCnStyle } from "./style.ts";
 
@@ -174,6 +174,11 @@ export interface Tracker {
 	rejectedSourceUrls?: string[];
 	/** Max items per issue for this tracker (1–3). */
 	quota: number;
+	/**
+	 * 当日速览开关。缺省 = 开(宁缺毋滥兜底:没有够格的快讯,模型给空,整块
+	 * 不出现);显式 false 才关。目前没有 UI,留给以后的档案页开关。
+	 */
+	recap?: boolean;
 	/** Default true; false pauses the tracker without losing its definition. */
 	enabled?: boolean;
 	/**
@@ -775,9 +780,17 @@ export interface EditorialPick {
 	threadTitle?: string;
 }
 
+/** 当日速览的一句(模型产出形态):文本 + 事实来源的候选 id。 */
+export interface EditorialRecap {
+	text: string;
+	ids: string[];
+}
+
 export interface EditorialResult {
 	/** Tracker key → picks, in tracker order. */
 	sections: Record<string, EditorialPick[]>;
+	/** 当日速览:tracker key → 0-4 句快讯合成。缺省 = 今天没有值得速览的。 */
+	recaps?: Record<string, EditorialRecap[]>;
 	/** X2 · 轴外位:不属于任何追踪器、但编辑认为读者该看见的一条。 */
 	offAxis?: { id: string; whyClick: string; reason: string } | null;
 	notableDrops: { id: string; reason: string }[];
@@ -900,6 +913,7 @@ export function buildEditorialPrompt(
 15. 用户消息里带了「读者的长期口味画像」段:它是过去几个月反馈的蒸馏,比单日反馈稳,但只是背景校准——与追踪器定义或「读者近期反馈」冲突时,以后两者为准;它同样不能推翻「不收」硬排除。`
 			: ""
 	}
+16. 当日速览(recaps):每个追踪器在条目之外,可以再给 0-4 句「今天该追踪范围内还动了什么」——把那些**不值得占一个条目位、但读者扫一眼有用**的事件型快讯(发布、数据、融资、人事、市场动向)合成短句。每句 ≤40 字,写事实本身,禁止评论;每句必须给 ids(1-3 个候选 id),句子里的每个事实只能来自这些候选的 excerpt。不要复述已入选条目讲过的事;同一事件多条报道合成一句。它不占配额也不受第 9 条总数限制,但同样宁缺毋滥:没有值得速览的就给空数组——速览是加菜,不是必须交的作业。
 
 ${STYLE_RULES}`;
 
@@ -918,6 +932,7 @@ ${STYLE_RULES}`;
 			} else {
 				lines.push("  信源范围:全部已启用来源");
 			}
+			if (t.recap === false) lines.push("  当日速览:读者已关闭,这个追踪器不要给 recaps");
 			const threadBlock = threadsByTracker.get(t.key);
 			if (threadBlock) lines.push(`  进行中的线索(能接上就接,别另起炉灶):
 ${threadBlock}`);
@@ -953,6 +968,9 @@ ${candidateText}
   "sections": {
     "<追踪器key>": [{"id": "...", "whyClick": "...", "relatesTo": "和该追踪器问题的关系(一小句)", "threadKey": "接上的线索key或新key", "threadTitle": "仅新线索需要", "caveat": "可选", "merged": ["同事件其他报道的id"], "related": ["拓展阅读的候选id"]}]
   },
+  "recaps": {
+    "<追踪器key>": [{"text": "≤40字的一句快讯合成", "ids": ["事实来源的候选id"]}]
+  },
   ${offAxis ? `"offAxis": {"id": "...", "whyClick": "...", "reason": "为什么我觉得你该看见(和任何追踪器都无关)"} 或 null,\n  ` : ""}"notableDrops": [{"id": "...", "reason": "值得说明的落选原因,只列 3-8 条最可惜的"}],
   "droppedSummary": "一句话:今天筛掉的主要是什么",
   "tldr": ["恰好 3 句,每句 ≤40 字:写「今天这期为什么值得点开」,只概括已入选内容,不复述标题,不出现链接"]
@@ -985,6 +1003,23 @@ export function parseEditorialJson(raw: string, trackers: Tracker[]): EditorialR
 			}));
 	}
 	parsed.sections = sections;
+	// 当日速览:只留已知追踪器(关掉速览的也丢),每追踪器最多 4 句;句子过长、
+	// 没文本、没 ids 的整条丢。id 是否真实存在由 assembleBrief 对照候选表把关。
+	const recaps: Record<string, EditorialRecap[]> = {};
+	for (const t of activeTrackers(trackers)) {
+		if (t.recap === false) continue;
+		const arr = Array.isArray(parsed.recaps?.[t.key]) ? parsed.recaps[t.key] : [];
+		const kept = arr
+			.filter((r) => r && typeof r.text === "string" && r.text.trim() && Array.isArray(r.ids))
+			.slice(0, 4)
+			.map((r) => ({
+				text: (clean(r.text.trim()) ?? "").slice(0, 80),
+				ids: r.ids.filter((i): i is string => typeof i === "string").slice(0, 3),
+			}))
+			.filter((r) => r.text && r.ids.length > 0);
+		if (kept.length) recaps[t.key] = kept;
+	}
+	parsed.recaps = Object.keys(recaps).length ? recaps : undefined;
 	parsed.notableDrops = parsed.notableDrops.map((d) => ({ ...d, reason: clean(d.reason) ?? "" }));
 	parsed.droppedSummary = clean(parsed.droppedSummary) ?? "";
 	// 「今天为什么是空的」是这个产品最常被问的问题,把答案留在日志里:
@@ -1050,6 +1085,8 @@ export async function assembleBrief(
 	const overflowDrops = new Map<string, string>();
 	// X1 · 单源占比上限,在代码里强制一遍(提示词只是先礼后兵)
 	const perSource = new Map<string, number>();
+	// 当日速览引用过的候选:不再进「已替你筛掉」——它们已经以速览锚点的形式交付
+	const recapIds = new Set<string>();
 	let total = 0;
 
 	for (const t of activeTrackers(opts.trackers)) {
@@ -1103,9 +1140,25 @@ export async function assembleBrief(
 				...(pick.threadTitle ? { threadTitle: pick.threadTitle.slice(0, 80) } : {}),
 			});
 		}
+		// 当日速览:每句锚回它的事实来源。引用了未知 id 或已入选条目的引用直接
+		// 丢弃(反捏造 + 不复述正条);一句的引用全被丢掉,这句也不留——没有
+		// 锚点的合成句无从核对,违反原文锚定。
+		const recap: RecapSentence[] = [];
+		if (t.recap !== false) {
+			for (const r of editorial.recaps?.[t.key] ?? []) {
+				const refs: BriefLink[] = [];
+				for (const rid of r.ids) {
+					const c = byId.get(rid);
+					if (!c || usedIds.has(rid)) continue;
+					refs.push({ label: `${c.publisher ?? c.source} · ${c.title}`, url: c.url });
+					recapIds.add(rid);
+				}
+				if (refs.length) recap.push({ text: r.text, refs });
+			}
+		}
 		// Empty sections stay in: "the radar swept and found nothing" is part
 		// of the product's accountability, not something to hide.
-		sections.push({ key: t.key, title: t.name, items });
+		sections.push({ key: t.key, title: t.name, ...(recap.length ? { recap } : {}), items });
 	}
 
 	// X2 · 轴外位:各追踪器都挑完之后再放,单独一格。它不占 TOTAL_ITEM_CAP
@@ -1133,7 +1186,7 @@ export async function assembleBrief(
 	const dropReasons = new Map(editorial.notableDrops.map((d) => [d.id, d.reason]));
 	const pickedIds = new Set(sections.flatMap((s) => s.items.map((i) => i.id)));
 	const unselected: DroppedItem[] = fetched.candidates
-		.filter((c) => !pickedIds.has(c.id) && !usedIds.has(c.id))
+		.filter((c) => !pickedIds.has(c.id) && !usedIds.has(c.id) && !recapIds.has(c.id))
 		.map((c) => ({
 			id: c.id,
 			title: c.title,
@@ -1165,7 +1218,8 @@ export async function assembleBrief(
 		...(offAxis ? { offAxis } : {}),
 		filteredOut: {
 			scanned: fetched.scanned,
-			dropped: Math.max(0, fetched.scanned - total),
+			// 速览引用过的不算「筛掉」——它们以速览锚点的形式交付了
+			dropped: Math.max(0, fetched.scanned - total - recapIds.size),
 			summary: editorial.droppedSummary || `扫描 ${fetched.scanned} 条,入选 ${total} 条。`,
 			items: filteredItems,
 		},

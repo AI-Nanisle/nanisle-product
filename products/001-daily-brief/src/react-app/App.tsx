@@ -210,7 +210,7 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 				    的视频时 002 接着答「哪几分钟值得看」。根相对路径:同源挂载,
 				    本地 :3000 代理和线上 nanisle.com 都通;002 下线也只是 404,不牵连本页 */}
 				<a
-					href={`/products/watch-router/?url=${encodeURIComponent(item.url)}&from=daily-brief`}
+					href={`/products/watch-router/app?url=${encodeURIComponent(item.url)}&from=daily-brief`}
 					target="_blank"
 					rel="noreferrer"
 					className="text-[var(--ink-3)] hover:text-[var(--ink)]"
@@ -870,6 +870,32 @@ function ProductPage() {
 							{section.items.length > 0 ? `${section.items.length} 条` : "0 条"}
 						</span>
 					</div>
+					{/* 今日速览:不占条目位的快讯合成,每句的 [n] 锚回事实来源。
+					    没有速览时整块不渲染——它是加菜,不该有空壳。 */}
+					{section.recap && section.recap.length > 0 && (
+						<div className={`py-4 pl-7 ${section.items.length > 0 ? "border-b border-[var(--line)]" : ""}`}>
+							<div className="font-mono-sc mb-2 text-[11px] tracking-widest text-[var(--ink-3)]">今日速览</div>
+							<ul className="space-y-1.5">
+								{section.recap.map((r, ri) => (
+									<li key={ri} className="text-[13px] leading-relaxed text-[var(--ink-2)]">
+										{r.text}
+										{r.refs.map((ref, j) => (
+											<a
+												key={j}
+												href={ref.url}
+												target="_blank"
+												rel="noreferrer"
+												title={ref.label}
+												className="font-mono-sc ml-1 text-[11px] text-[var(--accent)] hover:underline"
+											>
+												[{j + 1}]
+											</a>
+										))}
+									</li>
+								))}
+							</ul>
+						</div>
+					)}
 					{section.items.length > 0 ? (
 						<div className="py-6">
 							{section.items.map((item, i) => (
@@ -878,7 +904,7 @@ function ProductPage() {
 						</div>
 					) : (
 						<p className="pb-4 pl-7 text-[13px] text-[var(--ink-3)]">
-							今天没有新内容——雷达照常扫过,没有够格的。
+							{section.recap?.length ? "今天只有速览,没有值得单开一条的。" : "今天没有新内容——雷达照常扫过,没有够格的。"}
 						</p>
 					)}
 				</section>

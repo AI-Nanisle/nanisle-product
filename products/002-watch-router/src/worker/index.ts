@@ -112,8 +112,10 @@ function sessionCookieScope(env: AppEnv): { path: string; secure: boolean } {
 
 app.get("/auth/sso", async (c) => {
 	const secret = c.env.NANISLE_SSO_SECRET;
-	// 没配共享密钥的实例本来就不做登录门禁,直接回收单首页
-	if (!secret) return c.redirect(appUrl(c.env), 302);
+	// 没配共享密钥的实例本来就不做登录门禁,直接回收单首页。
+	// 落点是 app 子路径:裸挂载根是主站的产品详情页,进不了应用(mount
+	// 转发要求至少一段,web/lib/product-mounts.ts 有同款注释)。
+	if (!secret) return c.redirect(appUrl(c.env, "app"), 302);
 	const payload = await verifyToken(secret, c.req.query("token") ?? "");
 	if (!payload) {
 		// 不自动跳回主站重签:两边密钥配错时会陷入 302 死循环,这里停下来说清楚
@@ -146,7 +148,7 @@ app.get("/auth/sso", async (c) => {
 		secure: scope.secure,
 		maxAge: SESSION_TTL_S,
 	});
-	return c.redirect(appUrl(c.env), 302);
+	return c.redirect(appUrl(c.env, "app"), 302);
 });
 
 app.get("/auth/logout", (c) => {

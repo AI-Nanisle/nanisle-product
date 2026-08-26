@@ -109,6 +109,61 @@ test("buildEditorialPrompt:口味画像段进用户消息,并带对应的系统�
 	assert.ok(!bare.system.includes("长期口味画像"));
 });
 
+// ---------- 当日速览(recap) ----------
+
+import { assembleBrief, parseEditorialJson } from "./pipeline-core.ts";
+import type { FetchResult as FR } from "./pipeline-core";
+
+test("recap:parse 清洗 + assemble 锚定,未知 id 与已入选条目的引用被丢弃", async () => {
+	const trackers = [{ key: "t1", name: "追踪一", quota: 3 }];
+	const raw = JSON.stringify({
+		sections: { t1: [{ id: "a", whyClick: "why" }] },
+		recaps: {
+			t1: [
+				{ text: "甲发布了乙", ids: ["b", "ghost"] }, // ghost 不存在:丢引用留句子
+				{ text: "复述正条", ids: ["a"] }, // 只引用已入选条目:整句丢
+				{ text: "", ids: ["b"] }, // 没文本:parse 就丢
+			],
+			unknownTracker: [{ text: "不认识的追踪器", ids: ["b"] }],
+		},
+		notableDrops: [],
+		droppedSummary: "",
+	});
+	const editorial = parseEditorialJson(raw, trackers);
+	assert.equal(editorial.recaps?.t1.length, 2); // 空文本那句已在 parse 层被丢
+	assert.equal(editorial.recaps?.unknownTracker, undefined);
+
+	const fetched = {
+		candidates: [cand({ id: "a", title: "正条" }), cand({ id: "b", title: "快讯乙" })],
+		scanned: 10,
+		ruleDropped: [],
+	} as unknown as FR;
+	const brief = await assembleBrief(editorial, fetched, {
+		date: "2026-08-26",
+		sourceCount: 2,
+		trackers,
+		lookupDiscussions: false,
+	});
+	const recap = brief.sections[0].recap;
+	assert.equal(recap?.length, 1);
+	assert.equal(recap?.[0].text, "甲发布了乙");
+	assert.deepEqual(recap?.[0].refs.map((r) => r.url), ["https://a.example/b"]);
+	// 速览引用过的候选不再出现在「已替你筛掉」,也不计入 dropped
+	assert.ok(!brief.filteredOut.items.some((d) => d.id === "b"));
+	assert.equal(brief.filteredOut.dropped, 10 - 1 - 1);
+});
+
+test("recap:tracker.recap === false 时提示词带关闭标注,速览被整段丢弃", async () => {
+	const trackers = [{ key: "t1", name: "追踪一", quota: 3, recap: false }];
+	const { user } = buildEditorialPrompt([cand({ id: "a", title: "t" })], trackers);
+	assert.ok(user.includes("当日速览:读者已关闭"));
+	const editorial = parseEditorialJson(
+		JSON.stringify({ sections: { t1: [] }, recaps: { t1: [{ text: "不该出现", ids: ["a"] }] }, notableDrops: [], droppedSummary: "" }),
+		trackers,
+	);
+	assert.equal(editorial.recaps, undefined);
+});
+
 // ---------- 成稿重试(docs/05 后日谈:2026-08-24 断流事故) ----------
 
 import { enrichBrief } from "./pipeline-core.ts";
