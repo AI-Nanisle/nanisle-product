@@ -150,6 +150,48 @@ test("enrichBrief:首次调用断流,重试成功后散文照常写回", async (
 	assert.equal(brief.sections[0].items[0].take, "判断");
 });
 
+test("enrichBrief:只有导语的条目走降档成稿,提示词带上导语标记", async () => {
+	const { brief, fetched } = enrichFixture();
+	// 付费墙形态:feed 只有 200 字导语,抓原文也只拿到空
+	(fetched as unknown as { candidates: { excerpt: string }[] }).candidates[0].excerpt = "字".repeat(200);
+	let seenUser = "";
+	const n = await enrichBrief(
+		brief,
+		fetched,
+		[],
+		async (_system, user) => {
+			seenUser = user;
+			return JSON.stringify({ items: { a1: { substance: "仅基于导语:一句实质" } } });
+		},
+		() => {},
+		async () => "",
+	);
+	assert.equal(n, 1);
+	assert.ok(seenUser.includes("只拿到导语"));
+	// normalizeCnStyle 会把半角冒号规整成全角
+	assert.equal(brief.sections[0].items[0].substance, "仅基于导语：一句实质");
+});
+
+test("enrichBrief:连导语都没有的条目照旧跳过成稿", async () => {
+	const { brief, fetched } = enrichFixture();
+	(fetched as unknown as { candidates: { excerpt: string }[] }).candidates[0].excerpt = "太短";
+	let calls = 0;
+	const n = await enrichBrief(
+		brief,
+		fetched,
+		[],
+		async () => {
+			calls += 1;
+			return "{}";
+		},
+		() => {},
+		async () => "",
+	);
+	assert.equal(calls, 0);
+	assert.equal(n, 0);
+	assert.equal(brief.sections[0].items[0].substance, undefined);
+});
+
 test("enrichBrief:连炸两次才认输,保住路由版不抛错", async () => {
 	const { brief, fetched } = enrichFixture();
 	let calls = 0;

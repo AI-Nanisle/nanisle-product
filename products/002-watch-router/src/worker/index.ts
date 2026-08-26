@@ -20,8 +20,9 @@ import {
 	contentCacheKey,
 } from "../shared/store";
 import type { CachedContent, TaskRecord, TaskStep } from "../shared/store";
-import { aiConfig, awsConfigured } from "./env";
+import { aiConfig, awsConfigured, fastAiConfig } from "./env";
 import type { AppEnv } from "./env";
+import { computeTracked, mergeTracked } from "./interop";
 import {
 	SESSION_COOKIE,
 	appUrl,
@@ -43,6 +44,37 @@ const PRODUCT_MOUNT = "/products/watch-router/";
 /** 配额按天归位的「今天」。跟 001 一样用美东——用户在美东,半夜换日别错时区。 */
 function quotaDate(): string {
 	return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+}
+
+/**
+ * I3 · 交付时刻的用户级高亮:处理记录里有算过的直接用(用户级缓存,同一
+ * 内容不重复花钱);没有才做一次 fast 档小调用。整个函数失败即降级——
+ * 返回无高亮的原结果,顺带把处理记录落上(docs/02 T4/T7②)。
+ */
+async function withTracked(
+	env: AppEnv,
+	store: import("../shared/store").Store,
+	email: string,
+	contentKey: string,
+	url: string,
+	result: import("../shared/schema").WatchResult,
+): Promise<import("../shared/schema").WatchResult> {
+	try {
+		const rec = await store.getReadRecord(email, contentKey);
+		if (rec?.tracked) return mergeTracked(result, rec.tracked);
+		const tracked = await computeTracked(env, fastAiConfig(env), email, result);
+		await store.putReadRecord(email, {
+			contentKey,
+			url,
+			title: result.meta.title,
+			at: Date.now(),
+			// null = 001 不可用/没有追踪器(下次再试);{} = 算过没命中(缓存住,别重算)
+			...(tracked !== null ? { tracked } : {}),
+		});
+		return tracked ? mergeTracked(result, tracked) : result;
+	} catch {
+		return result;
+	}
 }
 
 app.get("/api/health", async (c) => {
@@ -153,19 +185,15 @@ app.post("/api/submit", userAiGuard, async (c) => {
 	const email = c.get("email");
 	const store = c.get("store");
 
-	// 缓存命中:两条车道都短路,不占配额(内容级结果全站共享,docs/02 T6)
+	// 缓存命中:两条车道都短路,不占配额(内容级结果全站共享,docs/02 T6);
+	// 新用户只花 I3 高亮小调用的钱——T4 两次调用拆分的意义所在
 	const cached = await c.env.WATCH.get<CachedContent>(contentCacheKey(cid.key), "json");
 	if (cached) {
-		await store.putReadRecord(email, {
-			contentKey: cid.key,
-			url: url || "",
-			title: cached.result.meta.title,
-			at: Date.now(),
-		});
+		const merged = await withTracked(c.env, store, email, cid.key, url || cached.url || "", cached.result);
 		return c.json({
 			cached: true,
 			lane: cid.lane,
-			result: cached.result,
+			result: merged,
 			...(cached.url ? { url: cached.url } : {}),
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		});
@@ -265,13 +293,9 @@ app.post("/api/submit", userAiGuard, async (c) => {
 							{ expirationTtl: CONTENT_CACHE_TTL_S },
 						);
 					}
-					await store.putReadRecord(email, {
-						contentKey: cid.key,
-						url: url || "",
-						title: result.meta.title,
-						at: Date.now(),
-					});
-					await send({ type: "result", cached: false, lane: "fast", result, paragraphs, ...(url ? { url } : {}) });
+					// I3:交付前做用户级高亮(withTracked 内部顺带落处理记录)
+					const merged = await withTracked(env, store, email, cid.key, url || "", result);
+					await send({ type: "result", cached: false, lane: "fast", result: merged, paragraphs, ...(url ? { url } : {}) });
 				} catch (err) {
 					console.error("fast lane failed", err);
 					await send({ type: "error", error: "处理失败,请稍后重试。" });
@@ -360,12 +384,14 @@ app.get("/api/task/:id", userGuard, async (c) => {
 			// 理论上到不了:complete 先写缓存再标 done。真到了就承认异常。
 			return c.json({ status: "failed", error: "结果丢失,请重新提交。" });
 		}
+		// I3:首次交付算高亮并缓存进处理记录,之后的轮询/重开都走缓存
+		const merged = await withTracked(c.env, store, c.get("email"), task.contentKey, task.url, cached.result);
 		return c.json({
 			status: "done",
 			step: "done",
 			path: task.path,
 			url: task.url,
-			result: cached.result,
+			result: merged,
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		});
 	}

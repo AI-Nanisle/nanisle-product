@@ -375,7 +375,7 @@ export default function App() {
 										</span>
 										<span className="gist">
 											{ch.gist}
-											{ch.tracked && <span className="tracked-chip">与你手头的事相关</span>}
+											{ch.tracked && <span className="tracked-chip">与你的追踪相关 · {ch.tracked}</span>}
 										</span>
 									</li>
 								))}

@@ -46,6 +46,12 @@ export interface ReadRecord {
 	url: string;
 	title?: string;
 	at: number;
+	/**
+	 * I3 · 用户级高亮(章节序号 → 追踪器名)。存进处理记录做用户级缓存:
+	 * 同一用户重复打开同一内容不重复花高亮小调用的钱;内容级共享缓存里
+	 * 永远没有这个字段(它是用户属性,docs/02 T4 的两次调用拆分)。
+	 */
+	tracked?: Record<string, string>;
 }
 
 export class QuotaExceededError extends Error {
@@ -70,6 +76,8 @@ export interface Store {
 	): Promise<void>;
 	/** 处理记录(结果页「我处理过的」将来消费;complete/缓存命中时落一条)。 */
 	putReadRecord(email: string, rec: ReadRecord): Promise<void>;
+	/** 读处理记录(I3 高亮的用户级缓存靠它)。 */
+	getReadRecord(email: string, contentKey: string): Promise<ReadRecord | null>;
 }
 
 export interface DdbConfig {
@@ -223,9 +231,31 @@ export class DdbStore implements Store {
 				SK: { S: `READ#${rec.contentKey}` },
 				url: { S: rec.url },
 				...(rec.title ? { title: { S: rec.title } } : {}),
+				...(rec.tracked ? { tracked: { S: JSON.stringify(rec.tracked) } } : {}),
 				at: { N: String(rec.at) },
 			},
 		});
+	}
+
+	async getReadRecord(email: string, contentKey: string): Promise<ReadRecord | null> {
+		const out = await this.call<{ Item?: Record<string, { S?: string; N?: string }> }>("GetItem", {
+			Key: { PK: { S: `USER#${email.toLowerCase()}` }, SK: { S: `READ#${contentKey}` } },
+		});
+		const it = out.Item;
+		if (!it) return null;
+		let tracked: Record<string, string> | undefined;
+		try {
+			tracked = it.tracked?.S ? (JSON.parse(it.tracked.S) as Record<string, string>) : undefined;
+		} catch {
+			tracked = undefined;
+		}
+		return {
+			contentKey,
+			url: it.url?.S ?? "",
+			title: it.title?.S,
+			at: Number(it.at?.N ?? 0),
+			...(tracked ? { tracked } : {}),
+		};
 	}
 }
 
@@ -276,6 +306,11 @@ export class MemoryStore implements Store {
 
 	async putReadRecord(email: string, rec: ReadRecord): Promise<void> {
 		this.reads.set(`${email}:${rec.contentKey}`, { ...rec });
+	}
+
+	async getReadRecord(email: string, contentKey: string): Promise<ReadRecord | null> {
+		const rec = this.reads.get(`${email}:${contentKey}`);
+		return rec ? { ...rec } : null;
 	}
 }
 

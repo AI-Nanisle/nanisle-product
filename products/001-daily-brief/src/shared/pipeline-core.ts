@@ -871,7 +871,7 @@ export function buildEditorialPrompt(
 1. whyClick 只回答"为什么值得点进去花 10 分钟",1-2 句;禁止复述原文内容梗概。
 2. 你写的每个字都必须有 excerpt 依据。excerpt 里没有的事实、数字、结论,一个都不许出现。
 3. caveat 字段:只有当 excerpt 里作者自己表达了限定、存疑、反方观点时才填,原样保留其怀疑;没有就省略。禁止自己编一个平衡观点。
-4. 每个追踪器宁缺毋滥:没有够格的候选就返回空数组,不许凑数。空着是正常结果,页面会显示「今天没有新内容」。
+4. 「够格」的门槛是**符合追踪器定义、今天值得读**,不是必须惊艳。配额是读者自己定的信息量预期:还有符合定义的候选时优先把配额用满,相对弱的排在后面即可,不要在明明有相关候选时只交一半配额。真正无关、命中排除项、或只能靠硬扯才沾边的才不选;全都不合格就返回空数组,空着是正常结果,页面会显示「今天没有新内容」。
 5. 追踪器的「不收」列表是硬性排除——命中就绝对不选,这是读者明确拒绝过的内容。
 6. 同一事件被多个源报道时,选最好的一篇为主,其余放进 merged。
 7. related 用于"拓展阅读":只能引用候选列表里的其他 id,不许出现任何列表外的链接或 id。
@@ -1196,6 +1196,12 @@ export const ENRICH_TEXT_CAP = 9000;
  * 原则要挡的东西。能用代码挡住的不变量,不靠叮嘱模型。
  */
 export const MIN_ENRICH_TEXT = 400;
+/**
+ * 导语兜底的下限:正文不足 MIN_ENRICH_TEXT 但至少有这么多字时,仍送成稿,
+ * 走「仅基于导语」降档(付费墙源如 FT/Stratechery 常年落在这一档,原先整条
+ * 只剩一句 whyClick,信息密度砍半)。再短就真的什么都没有,照旧跳过。
+ */
+export const TEASER_MIN_TEXT = 80;
 
 /**
  * 抓原文正文。只在 feed 只给了导语时才调用(见 TEASER_THRESHOLD),失败一律
@@ -1238,6 +1244,11 @@ export interface EnrichSource {
 	trackerPurpose?: string;
 	/** 正文(feed 自带的或抓回来的)。 */
 	text: string;
+	/**
+	 * 只拿到导语(付费墙或纯 teaser feed,全文抓取失败)。这类条目照样送成稿,
+	 * 但提示词按降档规则写:短 substance、显式标注只基于导语,绝不靠标题补。
+	 */
+	teaserOnly?: boolean;
 }
 
 export interface EnrichPick {
@@ -1264,7 +1275,8 @@ take 的硬边界(违反就是在编):
 - 没有值得说的判断,就指出正文里最该被质疑的那一处;实在没有,take 给空字符串;
 - 不许写「值得关注」「有待观察」「未来可期」这类正确的废话。
 
-正文为空或过短的条目:substance 和 take 都给空字符串,不许靠标题猜内容。
+正文为空的条目:substance 和 take 都给空字符串,不许靠标题猜内容。
+标了「⚠️ 只拿到导语」的条目按该条目下方的降档说明写,同样一个字都不许超出导语内容。
 只输出 JSON,不要任何其他文字。
 
 ${STYLE_RULES}`;
@@ -1274,6 +1286,11 @@ export function buildEnrichPrompt(items: EnrichSource[]): { system: string; user
 		const lines = [`### id=${it.id}`, `标题:${it.title}`, `来源:${it.source}`];
 		if (it.trackerQuestion) lines.push(`读者的长期问题:${it.trackerQuestion}`);
 		if (it.trackerPurpose) lines.push(`读者在忙什么:${it.trackerPurpose}`);
+		if (it.teaserOnly) {
+			lines.push(
+				`⚠️ 只拿到导语/开头 ${it.text.length} 字(全文抓取失败,大概率是付费墙)。降档规则:substance 压到 1-3 句、≤120 字,以「仅基于导语:」开头,只写导语里确有的信息;导语没有实质信息就给空字符串。take 没有把握就给空。`,
+			);
+		}
 		lines.push(`正文(${it.text.length} 字):\n${it.text || "(拿不到正文)"}`);
 		return lines.join("\n");
 	});
@@ -1403,15 +1420,19 @@ export async function enrichBrief(
 		const excerptById = new Map(fetched.candidates.map((c) => [c.id, c.excerpt]));
 		const texts = await collectEnrichTexts(targets, excerptById, log, fetchText);
 		for (const t of targets) t.text = texts.get(t.id) ?? "";
-		// 拿不到足量正文的条目直接不送:让它保持第一段的路由式文案,
-		// 也好过一段看起来像事实、实则靠标题猜出来的「实质」。
+		// 足量正文正常成稿;只有导语的(付费墙)降档成稿;连导语都没有的
+		// 直接不送:让它保持第一段的路由式文案,也好过一段看起来像事实、
+		// 实则靠标题猜出来的「实质」。
 		const usable = targets.filter((t) => t.text.length >= MIN_ENRICH_TEXT);
-		const skipped = targets.length - usable.length;
-		if (usable.length === 0) {
+		const teasers = targets.filter((t) => t.text.length >= TEASER_MIN_TEXT && t.text.length < MIN_ENRICH_TEXT);
+		for (const t of teasers) t.teaserOnly = true;
+		const sent = [...usable, ...teasers];
+		const skipped = targets.length - sent.length;
+		if (sent.length === 0) {
 			log(`[enrich] 全部 ${targets.length} 条都拿不到正文,跳过成稿`);
 			return 0;
 		}
-		const { system, user } = buildEnrichPrompt(usable);
+		const { system, user } = buildEnrichPrompt(sent);
 		// 一次性故障重试一次再认输:成稿是整期一把梭,断流(2026-08-24 真实发生:
 		// TypeError: terminated,整期只剩路由文案)或返回坏 JSON 都会废掉全部散文。
 		// 空结果的重试在 ai.ts 里已有,这里补「调用炸掉/解析不了」这条路;连炸两次
@@ -1424,7 +1445,11 @@ export async function enrichBrief(
 			parsed = parseEnrichJson(await call(system, user));
 		}
 		const n = applyEnrichment(brief, parsed);
-		log(`[enrich] ${n}/${usable.length} 条写出了实质与判断${skipped ? `,${skipped} 条因正文不足跳过` : ""}`);
+		log(
+			`[enrich] ${n}/${sent.length} 条写出了实质与判断` +
+				`${teasers.length ? `,其中 ${teasers.length} 条只有导语走降档` : ""}` +
+				`${skipped ? `,${skipped} 条因正文不足跳过` : ""}`,
+		);
 		return n;
 	} catch (err) {
 		log(`[enrich] FAILED, keeping the routing-only copy: ${err}`);

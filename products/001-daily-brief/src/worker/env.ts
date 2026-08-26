@@ -33,6 +33,11 @@ export interface AppEnv {
 	 * 未配置时退订端点返回 503(邮件本身也发不出去——Lambda 同样没配)。
 	 */
 	EMAIL_UNSUB_SECRET?: string;
+	/**
+	 * Secret. 跨产品只读端点(/api/interop/trackers)的共享密钥,与 002
+	 * 长视频总结同值(002 docs/02 T7②)。未配置 = interop 端点关闭。
+	 */
+	INTEROP_TOKEN?: string;
 	/** Main-site origin used in login redirects (default https://nanisle.com). */
 	NANISLE_URL?: string;
 	/** N1 · SES 发件地址(与 Lambda 的 EMAIL_FROM 同值,brief@nanisle.com)。 */

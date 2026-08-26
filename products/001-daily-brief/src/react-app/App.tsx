@@ -206,6 +206,17 @@ function Item({ item, date, index }: { item: BriefItem; date: string; index: num
 						讨论区
 					</a>
 				)}
+				{/* 深读入口(002 docs/02 T7①):001 答「值不值得点」,点进去是一小时
+				    的视频时 002 接着答「哪几分钟值得看」。根相对路径:同源挂载,
+				    本地 :3000 代理和线上 nanisle.com 都通;002 下线也只是 404,不牵连本页 */}
+				<a
+					href={`/products/watch-router/?url=${encodeURIComponent(item.url)}&from=daily-brief`}
+					target="_blank"
+					rel="noreferrer"
+					className="text-[var(--ink-3)] hover:text-[var(--ink)]"
+				>
+					深读 →
+				</a>
 				{item.extras?.map((x) => (
 					<a key={x.url} href={x.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-[var(--ink-3)] hover:text-[var(--ink)]">
 						{x.label}

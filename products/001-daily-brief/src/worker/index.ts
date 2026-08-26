@@ -17,6 +17,7 @@ import {
 	userGuard,
 } from "./guard";
 import type { Guarded } from "./guard";
+import { safeEqual } from "./guard";
 import { signToken, verifyToken } from "./sso";
 import { aiConfig, fastAiConfig } from "./env";
 import type { AppEnv } from "./env";
@@ -626,6 +627,37 @@ app.put("/api/trackers", userGuard, async (c) => {
 	if ("error" in cleaned) return c.json({ error: cleaned.error }, 400);
 	await saveTrackers(c.get("store"), c.get("email"), cleaned.trackers);
 	return c.json({ ok: true, count: cleaned.trackers.length });
+});
+
+// ---------- 跨产品只读端点(002 长视频总结的个性化高亮用;002 docs/02 T7②) ----------
+// 契约当外部 API 对待:只给追踪定义文本,不给源配置/简报/反馈;共享密钥
+// INTEROP_TOKEN 鉴权(与用户门禁无关,双方 wrangler secret put,独立轮换);
+// 未配置 = 端点整个关闭。任何一侧随时可下线,对方只是降级(002 地图无高亮)。
+// 出现「必须两侧同时改代码才能上线」的需求时,走合并不走加端点。
+app.get("/api/interop/trackers", async (c) => {
+	const token = c.env.INTEROP_TOKEN;
+	if (!token) return c.json({ error: "interop disabled" }, 404);
+	if (!(await safeEqual(token, c.req.header("x-interop-token") ?? ""))) {
+		return c.json({ error: "unauthorized" }, 401);
+	}
+	const email = c.req.query("email")?.trim().toLowerCase();
+	if (!email) return c.json({ error: "need ?email=" }, 400);
+	const { store } = makeStore(c.env);
+	// 裸 getConfig,不用 loadConfig——后者对没配置的用户会落一份默认配置
+	// (putConfig 顺带把人写进订阅名单)。interop 是只读契约,查询不许有副作用。
+	const config = await store.getConfig(email);
+	return c.json({
+		trackers: (config?.trackers ?? [])
+			// 草稿(向导中途)不外泄:定义还没生效,拿去做高亮判断只会误导
+			.filter((t) => !t.stage)
+			.map((t) => ({
+				key: t.key,
+				name: t.name,
+				...(t.question ? { question: t.question } : {}),
+				...(t.purpose ? { purpose: t.purpose } : {}),
+				...(t.intent ? { intent: t.intent } : {}),
+			})),
+	});
 });
 
 // ---------- 找源仪表(docs/02 §7.3):三个数判断找源机制是否够用 ----------

@@ -45,7 +45,9 @@
 		"AI_MODEL": "deepseek-v4-pro",
 		// 轻任务档:用户级高亮小调用(docs/02 T4 第二次调用)
 		"FAST_AI_MODEL": "deepseek-v4-flash",
-		"AI_MAX_OUTPUT_TOKENS": "8192",
+		// 16384:V4 Pro 的 thinking 占输出预算,高密度长文在 8192 下被截断
+		// (finish=length,线上实测;Lambda 侧同值)
+		"AI_MAX_OUTPUT_TOKENS": "16384",
 		"APP_URL": "https://nanisle.com/products/watch-router",
 		"NANISLE_URL": "https://nanisle.com",
 		// AWS side (NanisleWatchRouter stack in the main repo's infra/):
@@ -53,6 +55,11 @@
 		"DDB_TABLE": "nanisle-watch-router",
 		"AWS_REGION": "us-east-1",
 		// The tasks queue (the QueueUrl output of `cdk deploy NanisleWatchRouter`)
-		"QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/494347858613/nanisle-watch-router-tasks"
+		"QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/494347858613/nanisle-watch-router-tasks",
+		// 001 的跨产品只读端点(个性化高亮,docs/02 T7②)。必须走 workers.dev
+		// 直连域:Worker fetch 回自己 zone(nanisle.com)会被 Cloudflare 以 522
+		// 拒掉——同 zone 回环限制,线上实测。配套 secret INTEROP_TOKEN 未设时
+		// 高亮整个关闭。
+		"INTEROP_TRACKERS_URL": "https://nanisle-001-daily-brief.pang-huadong0811.workers.dev/api/interop/trackers"
 	}
 }

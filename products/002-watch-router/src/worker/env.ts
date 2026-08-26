@@ -32,6 +32,8 @@ export interface AppEnv {
 	JINA_KEY?: string;
 	/** Secret. v1.5 交互包:读 001 追踪器定义的共享密钥(docs/02 T7②)。 */
 	INTEROP_TOKEN?: string;
+	/** 001 的 interop trackers 端点地址(不设 = 高亮整个关闭,地图照常)。 */
+	INTEROP_TRACKERS_URL?: string;
 	/** Main-site origin used in login redirects (default https://nanisle.com). */
 	NANISLE_URL?: string;
 	/** Canonical public mount for this product (no trailing slash). */
