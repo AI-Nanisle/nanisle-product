@@ -9,6 +9,21 @@ import { complete, resolveProvider } from "./ai";
 import type { AiConfig } from "./ai";
 import { mockWatchResult, validateWatchResult } from "./schema";
 import type { ExtractPath, WatchResult } from "./schema";
+import { normalizeCnStyle } from "./style";
+
+/**
+ * 去 AI 味规整(001 同款 style.ts,一直复制着没接线):只动读者可见的
+ * 编辑产出(判词/要点/段落大意)。quote 绝对不动——它必须与原文逐字一致,
+ * 动了锚定校验(anchor.ts)就会把真引文误判成幻觉。
+ */
+function polishResult(r: WatchResult): WatchResult {
+	return {
+		...r,
+		verdict: { ...r.verdict, reason: normalizeCnStyle(r.verdict.reason) },
+		keyPoints: r.keyPoints.map((kp) => ({ ...kp, point: normalizeCnStyle(kp.point) })),
+		chapters: r.chapters.map((ch) => ({ ...ch, gist: normalizeCnStyle(ch.gist) })),
+	};
+}
 
 /** ≈100K token 的字符预算(中文约 2 字符/token,docs/02 T3)。 */
 export const MAX_INPUT_CHARS = 200_000;
@@ -114,7 +129,7 @@ export async function editTranscript(cfg: AiConfig, input: TranscriptInput): Pro
 	};
 	const valid = validateWatchResult(parsed);
 	if (!valid) throw new EditError("模型输出不符合 schema");
-	return valid;
+	return polishResult(valid);
 }
 
 /**
@@ -164,5 +179,5 @@ export async function editContent(cfg: AiConfig, input: EditInput): Promise<Watc
 	};
 	const valid = validateWatchResult(parsed);
 	if (!valid) throw new EditError("模型输出不符合 schema");
-	return valid;
+	return polishResult(valid);
 }

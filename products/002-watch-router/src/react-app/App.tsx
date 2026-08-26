@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { WatchResult } from "../shared/schema";
+import { SiteHeader } from "./SiteChrome";
+import { apiPath } from "./paths";
 
-// 收单 + 结果页(docs/03 F 线):
-//   F1 收单(?url= 预填承接 001 深读入口) F2 快车道 SSE 边生成边给进度
-//   F3 判决/要点/分段地图/灰段统计/路径徽章 F4 跳转(视频秒数 URL/文章段落锚点)
-//   F5 低置信灰显 F6 慢车道五步进度轮询 F7 页眉额度读数
+// 收单 + 结果页(docs/03 F 线)。视觉与主站 Workspace v2 / 001 同一套语言
+// (米白/黑墨/朱红,mono 做读数、serif 做内容),隐喻是「剪辑台」:
+// 判决灯、左轨时间码、被灰掉的低价值胶段。逻辑说明见各 F 项注释。
 
 interface Health {
 	ok: boolean;
@@ -56,13 +57,13 @@ interface FastEvent {
 }
 
 /** 慢车道五步进度的展示文案(F6;顺序与 shared/store.ts 的 TaskStep 一致)。 */
-const STEP_LABELS: Record<string, string> = {
-	queued: "排队中",
-	downloading: "下载中",
-	transcribing: "转写中",
-	editing: "编辑中",
-	done: "完成",
-};
+const STEPS = [
+	["queued", "排队"],
+	["downloading", "下载"],
+	["transcribing", "转写"],
+	["editing", "编辑"],
+	["done", "完成"],
+] as const;
 
 function fmtTime(sec: number): string {
 	const m = Math.floor(sec / 60);
@@ -97,6 +98,13 @@ interface Loaded {
 	url?: string;
 }
 
+const PATH_LABEL: Record<string, string> = {
+	subtitle: "官方字幕",
+	whisper: "whisper 转写(时间戳与文字精度低一档)",
+	article: "文章抽取",
+	paste: "手动粘贴",
+};
+
 export default function App() {
 	const [health, setHealth] = useState<Health | null>(null);
 	const [usage, setUsage] = useState<Usage | null>(null);
@@ -110,7 +118,7 @@ export default function App() {
 	const [showSource, setShowSource] = useState(false);
 
 	function refreshUsage() {
-		fetch("api/usage")
+		fetch(apiPath("usage"))
 			.then((r) => (r.ok ? (r.json() as Promise<Usage>) : null))
 			.then((u) => u && setUsage(u))
 			.catch(() => {});
@@ -120,22 +128,22 @@ export default function App() {
 		// ?url= 预填:001 简报「深读 →」入口的承接端(docs/02 T7①)
 		const preset = new URLSearchParams(window.location.search).get("url");
 		if (preset) setInput(preset);
-		fetch("api/health")
+		fetch(apiPath("health"))
 			.then((r) => r.json() as Promise<Health>)
 			.then(setHealth)
 			.catch(() => setHealth(null));
 		refreshUsage();
 	}, []);
 
-	/** F4 · 文章段落锚点:展开原文区后滚动到对应段并短暂高亮。 */
+	/** F4 · 文章段落锚点:展开原文区后滚动到对应段并短暂点亮。 */
 	function jumpToPara(n: number) {
 		setShowSource(true);
 		setTimeout(() => {
 			const el = document.getElementById(`para-${n}`);
 			if (!el) return;
 			el.scrollIntoView({ behavior: "smooth", block: "center" });
-			el.classList.add("bg-amber-100");
-			setTimeout(() => el.classList.remove("bg-amber-100"), 1600);
+			el.classList.add("para-hit");
+			setTimeout(() => el.classList.remove("para-hit"), 1600);
 		}, 60);
 	}
 
@@ -160,9 +168,9 @@ export default function App() {
 					continue;
 				}
 				if (ev.type === "phase") {
-					setFastStatus(ev.phase === "extracting" ? "抽取正文中…" : "编辑中(整篇一次调用,长文要一两分钟)…");
+					setFastStatus(ev.phase === "extracting" ? "抽取正文中" : "编辑中(整篇一次调用,长文要一两分钟)");
 				} else if (ev.type === "delta" && typeof ev.chars === "number") {
-					setFastStatus(`编辑中…已生成 ${ev.chars} 字`);
+					setFastStatus(`编辑中 · 已生成 ${ev.chars} 字`);
 				} else if (ev.type === "result" && ev.result) {
 					setLoaded({ result: ev.result, paragraphs: ev.paragraphs, url: ev.url });
 				} else if (ev.type === "error" && ev.error) {
@@ -176,7 +184,7 @@ export default function App() {
 	async function pollTask(taskId: string) {
 		for (;;) {
 			await new Promise((r) => setTimeout(r, 2500));
-			const res = await fetch(`api/task/${taskId}`);
+			const res = await fetch(apiPath(`task/${taskId}`));
 			const data = (await res.json()) as TaskResponse;
 			if (!res.ok) {
 				setError((data as { error?: string }).error ?? `轮询失败(${res.status})`);
@@ -205,7 +213,7 @@ export default function App() {
 		try {
 			const trimmed = input.trim();
 			const isUrl = /^https?:\/\//i.test(trimmed);
-			const res = await fetch("api/submit", {
+			const res = await fetch(apiPath("submit"), {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(isUrl ? { url: trimmed } : { text: trimmed }),
@@ -243,12 +251,13 @@ export default function App() {
 		: 0;
 	const lowLabel = isText ? `低价值段共 ${lowAmount} 段` : `低价值段共 ${Math.round(lowAmount / 60)} 分钟`;
 	const canJumpText = isText && (loaded?.paragraphs?.length ?? 0) > 0;
+	const stepIdx = STEPS.findIndex(([k]) => k === step);
 
-	/** 位置标签:能跳就渲染成链接/按钮,不能跳只显示。 */
+	/** 位置读数:能跳就是链接/按钮,不能跳只显示。 */
 	function Pos({ start, children }: { start: number; children: ReactNode }) {
 		if (canJumpText) {
 			return (
-				<button className="cursor-pointer underline decoration-dotted" onClick={() => jumpToPara(start)}>
+				<button type="button" className="pos-link" onClick={() => jumpToPara(start)}>
 					{children}
 				</button>
 			);
@@ -256,7 +265,7 @@ export default function App() {
 		const href = jumpHref(loaded?.url, start);
 		if (href && !isText) {
 			return (
-				<a className="underline decoration-dotted" href={href} target="_blank" rel="noreferrer">
+				<a className="pos-link" href={href} target="_blank" rel="noreferrer">
 					{children}
 				</a>
 			);
@@ -265,91 +274,78 @@ export default function App() {
 	}
 
 	return (
-		<div className="min-h-screen bg-zinc-50 text-zinc-900">
-			<main className="mx-auto max-w-2xl px-6 py-14">
-				<div className="flex items-baseline justify-between">
-					<h1 className="text-2xl font-semibold tracking-tight">长视频总结</h1>
+		<div>
+			<SiteHeader />
+			<main className="page">
+				<header className="masthead rise">
+					<h1>
+						长视频总结
+						<small>WATCH ROUTER · 002</small>
+						{health?.provider === "mock" && <span className="mock-chip">MOCK</span>}
+					</h1>
 					{usage && (
-						<span className="text-xs text-zinc-400">
+						<span className="usage-chip">
 							今日额度 {usage.used}/{usage.limit}
 						</span>
 					)}
-				</div>
-				<p className="mt-2 text-sm text-zinc-500">
-					丢给我一条视频、播客或文章链接:值不值得看、讲了什么、每一段在哪——AI 先替你看完。
-					{health && health.provider === "mock" && <span className="ml-1 font-mono text-amber-600">[mock 模式]</span>}
+				</header>
+				<p className="tagline rise">
+					丢给我一条视频、播客或文章链接:值不值得看、讲了什么、每一段在原片的哪几分钟——AI 先替你看完,你只看值得看的部分。
 				</p>
 
-				<div className="mt-8 space-y-3">
+				<section className="console rise" aria-label="收单">
 					<textarea
-						className="h-28 w-full resize-y rounded-lg border border-zinc-300 bg-white p-3 text-sm outline-none focus:border-zinc-500"
 						placeholder="粘贴链接(B站 / YouTube / 播客 / 文章),或直接把正文贴进来…"
 						value={input}
 						onChange={(e) => setInput(e.target.value)}
 					/>
-					<button
-						className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
-						disabled={busy || input.trim().length === 0}
-						onClick={submit}
-					>
-						{busy ? "看着呢…" : "替我看"}
-					</button>
-					{fastStatus && <div className="text-sm text-zinc-500">{fastStatus}</div>}
-					{step && (
-						<div className="flex items-center gap-2 text-sm text-zinc-500">
-							{["queued", "downloading", "transcribing", "editing", "done"].map((s, i) => (
-								<span key={s} className={s === step ? "font-medium text-zinc-900" : "opacity-50"}>
-									{i > 0 && <span className="mr-2 opacity-40">→</span>}
-									{STEP_LABELS[s]}
-								</span>
-							))}
-						</div>
-					)}
-				</div>
+					<div className="console-row">
+						<button type="button" className="btn-ink" disabled={busy || input.trim().length === 0} onClick={submit}>
+							{busy ? "看着呢…" : "替我看"}
+						</button>
+						{fastStatus && <span className="statusline">{fastStatus}</span>}
+						{step && (
+							<span className="steps" aria-label="处理进度">
+								{STEPS.map(([key, label], i) => (
+									<span key={key}>
+										{i > 0 && <span className="sep">→</span>} <span className={key === step || i < stepIdx ? "on" : ""}>{label}</span>
+									</span>
+								))}
+							</span>
+						)}
+					</div>
+				</section>
 
 				{error && (
-					<p className="mt-6 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+					<div className="error-box rise" role="alert">
 						{error}
 						{login && (
-							<a className="ml-2 underline" href={login}>
-								去登录 →
-							</a>
+							<>
+								{" "}
+								<a href={login}>去登录 →</a>
+							</>
 						)}
-					</p>
+					</div>
 				)}
 
 				{result && (
-					<section className="mt-8 space-y-6">
-						{result.meta.title && <h2 className="text-lg font-medium">{result.meta.title}</h2>}
-						<div className="rounded-lg border border-zinc-200 bg-white p-4">
-							<span
-								className={
-									"mr-2 rounded px-2 py-0.5 text-xs font-medium " +
-									(result.verdict.worth === "yes"
-										? "bg-green-100 text-green-800"
-										: result.verdict.worth === "no"
-											? "bg-red-100 text-red-700"
-											: "bg-amber-100 text-amber-800")
-								}
-							>
+					<section className="result">
+						{result.meta.title && <h2 className="content-title rise">{result.meta.title}</h2>}
+
+						<div className={`verdict rise worth-${result.verdict.worth}`}>
+							<span className="verdict-word">
 								{result.verdict.worth === "yes" ? "值得看" : result.verdict.worth === "no" ? "可以跳过" : "部分值得"}
 							</span>
-							<span className="text-sm">{result.verdict.reason}</span>
+							<p className="verdict-reason">{result.verdict.reason}</p>
 						</div>
 
-						<div>
-							<h2 className="text-sm font-semibold text-zinc-700">总体要点</h2>
-							<ul className="mt-2 space-y-2">
+						<div className="rise">
+							<h3 className="section-label">总体要点</h3>
+							<ul className="kp-list">
 								{result.keyPoints.map((kp, i) => (
-									<li
-										key={i}
-										className={
-											"rounded-lg border bg-white p-3 text-sm " +
-											(kp.anchored === false ? "border-zinc-200 opacity-60" : "border-zinc-200")
-										}
-									>
-										{kp.point}
-										<div className="mt-1 text-xs text-zinc-400">
+									<li key={i} className={`kp${kp.anchored === false ? " unanchored" : ""}`}>
+										<div className="kp-point">{kp.point}</div>
+										<div className="kp-quote">
 											「{kp.quote}」
 											{typeof kp.start === "number" && (
 												<>
@@ -364,48 +360,35 @@ export default function App() {
 							</ul>
 						</div>
 
-						<div>
-							<h2 className="text-sm font-semibold text-zinc-700">
+						<div className="rise">
+							<h3 className="section-label">
 								分段地图
-								{lowAmount > 0 && <span className="ml-2 font-normal text-zinc-400">{lowLabel}</span>}
-							</h2>
-							<ol className="mt-2 space-y-1">
+								{lowAmount > 0 && <span className="note">{lowLabel}</span>}
+							</h3>
+							<ol className="map">
 								{result.chapters.map((ch, i) => (
-									<li
-										key={i}
-										className={
-											"rounded-lg border p-3 text-sm " +
-											(ch.value === "low" ? "border-zinc-100 bg-zinc-50 text-zinc-400" : "border-zinc-200 bg-white")
-										}
-									>
-										<span className="mr-2 font-mono text-xs text-zinc-400">
+									<li key={i} className={ch.value === "low" ? "low" : ""}>
+										<span className="tc">
 											<Pos start={ch.start}>
 												{fmtPos(ch.start)}–{fmtPos(ch.end)}
 											</Pos>
 										</span>
-										{ch.gist}
-										{ch.tracked && (
-											<span className="ml-2 rounded bg-blue-100 px-1.5 py-0.5 text-xs text-blue-800">与你手头的事相关</span>
-										)}
+										<span className="gist">
+											{ch.gist}
+											{ch.tracked && <span className="tracked-chip">与你手头的事相关</span>}
+										</span>
 									</li>
 								))}
 							</ol>
 						</div>
 
-						<p className="text-xs text-zinc-400">
-							提取路径:
-							{result.meta.path === "subtitle"
-								? "官方字幕"
-								: result.meta.path === "whisper"
-									? "whisper 转写(时间戳与文字精度低一档)"
-									: result.meta.path === "paste"
-										? "手动粘贴"
-										: "文章抽取"}
+						<p className="meta-line rise">
+							提取路径:{PATH_LABEL[result.meta.path] ?? result.meta.path}
 							{result.meta.truncated && " · 内容过长已截断处理"}
 							{loaded?.url && !isText && (
 								<>
 									{" · "}
-									<a className="underline" href={loaded.url} target="_blank" rel="noreferrer">
+									<a href={loaded.url} target="_blank" rel="noreferrer">
 										打开原片 →
 									</a>
 								</>
@@ -413,18 +396,15 @@ export default function App() {
 						</p>
 
 						{canJumpText && (
-							<div>
-								<button
-									className="text-sm text-zinc-500 underline decoration-dotted"
-									onClick={() => setShowSource(!showSource)}
-								>
-									{showSource ? "收起原文" : "展开原文(点要点/分段可直接定位)"}
+							<div className="rise">
+								<button type="button" className="source-toggle" onClick={() => setShowSource(!showSource)}>
+									{showSource ? "收起原文" : "展开原文(点要点或分段的段号可直接定位)"}
 								</button>
 								{showSource && (
-									<div className="mt-3 max-h-96 space-y-3 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-4 text-sm leading-relaxed">
+									<div className="source">
 										{loaded!.paragraphs!.map((p, i) => (
-											<p key={i} id={`para-${i + 1}`} className="transition-colors duration-500">
-												<span className="mr-2 font-mono text-xs text-zinc-300">§{i + 1}</span>
+											<p key={i} id={`para-${i + 1}`}>
+												<span className="pn">§{i + 1}</span>
 												{p}
 											</p>
 										))}
@@ -435,15 +415,9 @@ export default function App() {
 					</section>
 				)}
 
-				<footer className="mt-16 text-xs text-zinc-400">
-					An island of{" "}
-					<a className="underline" href="https://nanisle.com">
-						nanisle.com
-					</a>{" "}
-					· open source ·{" "}
-					<a className="underline" href="https://github.com/AI-Nanisle/nanisle-product">
-						fork me
-					</a>
+				<footer className="site-footer">
+					An island of <a href="https://nanisle.com">nanisle.com</a> · open source ·{" "}
+					<a href="https://github.com/AI-Nanisle/nanisle-product">fork me</a>
 				</footer>
 			</main>
 		</div>
