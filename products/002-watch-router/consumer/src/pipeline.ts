@@ -55,8 +55,14 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<string> {
 	});
 }
 
+// 走代理的平台:02 T9 原判断只有 YouTube,但 B站从 AWS IP 访问一律 412
+// Precondition Failed(风控拦数据中心 IP 段,2026-08-26 云端实测)——假设被
+// 推翻,B站同样全程走代理。流量账:音频 32kbps 下 1 小时视频约 14MB,
+// 1GB 池约 70 小时视频,内测期充裕;播客/裸音频直链仍直连省流量。
+const PROXIED_PLATFORMS = new Set(["youtube", "bilibili"]);
+
 function ytdlpArgs(cfg: PipelineConfig, platform: string, extra: string[]): string[] {
-	const proxy = platform === "youtube" && cfg.proxyUrl ? ["--proxy", cfg.proxyUrl] : [];
+	const proxy = PROXIED_PLATFORMS.has(platform) && cfg.proxyUrl ? ["--proxy", cfg.proxyUrl] : [];
 	return [...proxy, "--no-warnings", ...extra];
 }
 
