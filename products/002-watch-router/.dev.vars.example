@@ -6,6 +6,16 @@
 # DEEPSEEK_API_KEY=sk-...
 # AI_PROVIDER=deepseek
 
+# --- 站长专线(主仓 backend/docs/01):这些账号改走 Claude Code 订阅网关,其他人照旧 ---
+# 全部不设 = 没有专线。线上用 wrangler secret put 逐个设置(URL 与 key 是 secret,
+# 其余也走 secret 免得站长邮箱进公开配置)。
+#OWNER_AI_EMAILS=you@example.com
+#OWNER_AI_PROVIDER=gateway
+#OWNER_AI_MODEL=opus
+#OWNER_FAST_AI_MODEL=sonnet
+#OWNER_AI_GATEWAY_URL=https://cc-gw.example.com
+#OWNER_AI_GATEWAY_KEY=...
+
 # SSO handoff from the main site. Unset locally = no login gate (dev@local).
 # NANISLE_SSO_SECRET=...
 # 本地连线上数据调试时冒充的身份(仅 NANISLE_SSO_SECRET 未设时生效):
@@ -21,3 +31,6 @@
 
 # r.jina.ai extraction fallback key (fast lane, docs/02 T2).
 # JINA_KEY=...
+
+# 订阅日报邮件(docs/05 §3.5):退订 token 密钥;不设 = 不发邮件(挑选与总结照常)。
+# EMAIL_UNSUB_SECRET=...

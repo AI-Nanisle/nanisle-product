@@ -11,9 +11,11 @@ import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { anchorKeyPoints } from "../../src/shared/anchor";
-import { editTranscript } from "../../src/shared/editor";
+import { editTranscriptWithSource } from "../../src/shared/editor";
 import type { TranscriptSegment } from "../../src/shared/editor";
-import type { AiConfig } from "../../src/shared/ai";
+import { buildNotes } from "../../src/shared/notes";
+import { applyOwnerRoute } from "../../src/shared/ai";
+import type { AiConfig, OwnerRoute } from "../../src/shared/ai";
 import { reportComplete, reportProgress } from "./callbacks";
 import type { CallbackConfig } from "./callbacks";
 
@@ -22,10 +24,24 @@ export interface TaskMessage {
 	url: string;
 	contentKey: string;
 	platform: string;
+	/** 提交任务的账号(老消息可能没有)。只用于站长专线路由,不做鉴权。 */
+	email?: string;
+	/** 订阅挑选时 RSS 给的标题;yt-dlp 对裸音频链接只能给一串 id 时用它。 */
+	title?: string;
+}
+
+/** yt-dlp 对裸 mp3 链接给的「标题」是路径末段/UUID——不是标题,别写进结果。 */
+function usableTitle(t: string | undefined, fallback?: string): string | undefined {
+	if (t && !/^[0-9a-f-]{20,}$/i.test(t) && !/^[\w-]+\.(mp3|m4a|aac|ogg|opus|flac|wav)$/i.test(t)) return t;
+	return fallback ?? t;
 }
 
 export interface PipelineConfig extends CallbackConfig {
 	ai: AiConfig;
+	/** 轻任务档(覆盖补漏用,docs/05 §2.2 第 6 条)。 */
+	fastAi: AiConfig;
+	/** 站长专线(主仓 backend/docs/01);null/未设 = 没配。 */
+	ownerRoute?: OwnerRoute | null;
 	groqApiKey?: string;
 	/** 只对 YouTube 生效的住宅代理(docs/02 T9);不设 = 直连。 */
 	proxyUrl?: string;
@@ -80,24 +96,27 @@ function vttTime(s: string): number {
 export function parseVtt(vtt: string): TranscriptSegment[] {
 	const cues: { start: number; text: string }[] = [];
 	const blocks = vtt.split(/\r?\n\r?\n/);
+	// YouTube 自动字幕的滚动形态:每个 cue 两行,第二行是新话、第一行是上一
+	// cue 的第二行原样重复。按整 cue 比对(startsWith/endsWith)拦不住这种
+	// 「半重复」,结果一句话进模型两遍、模型引用时自己去重、锚定就配不上了
+	// (2026-08-28 Karpathy 实测 11/60 要点因此未锚定)。改为按行去重:一行
+	// 只要和最近吐出的两行之一相同就丢。
+	const recent: string[] = [];
 	for (const block of blocks) {
 		const lines = block.split(/\r?\n/);
 		const timeIdx = lines.findIndex((l) => l.includes("-->"));
 		if (timeIdx < 0) continue;
 		const start = vttTime(lines[timeIdx].split("-->")[0]);
-		const text = lines
-			.slice(timeIdx + 1)
-			.join(" ")
-			.replace(/<[^>]+>/g, "")
-			.replace(/\s+/g, " ")
-			.trim();
-		if (!text) continue;
-		const prev = cues[cues.length - 1];
-		if (prev && (text === prev.text || text.startsWith(prev.text) || prev.text.endsWith(text))) {
-			// 滚动字幕重复:保留信息量更大的那条
-			if (text.length > prev.text.length) prev.text = text;
-			continue;
+		const fresh: string[] = [];
+		for (const raw of lines.slice(timeIdx + 1)) {
+			const line = raw.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+			if (!line || recent.includes(line)) continue;
+			fresh.push(line);
+			recent.push(line);
+			if (recent.length > 2) recent.shift();
 		}
+		const text = fresh.join(" ");
+		if (!text) continue;
 		cues.push({ start, text });
 	}
 	// 合并进 ~20 秒窗
@@ -246,13 +265,30 @@ export async function processTask(msg: TaskMessage, cfg: PipelineConfig): Promis
 			}
 
 			await reportProgress(cfg, msg.taskId, "editing", path);
-			let result = await editTranscript(cfg.ai, {
-				title: meta.title,
+			// 站长专线:按提交账号决定这条任务的编辑走哪套 provider(带 fallback)
+			const ai = applyOwnerRoute(msg.email, cfg.ai, cfg.ownerRoute ?? null);
+			const fastAi = applyOwnerRoute(msg.email, cfg.fastAi, cfg.ownerRoute ?? null, "fast");
+			// ① 大纲(判决/导读/要点/分段/术语表)
+			const edited = await editTranscriptWithSource(ai, {
+				title: usableTitle(meta.title, msg.title),
 				segments,
 				path,
 				durationSec: meta.duration,
 			});
-			result = anchorKeyPoints(result, segments.map((s) => s.text).join("\n"));
+			let result = anchorKeyPoints(edited.result, segments.map((s) => s.text).join("\n"));
+			// ② 逐章详写 + 覆盖补漏(docs/05 §2.2)。每章完成报一次进度:Worker 侧
+			// 的超时按「10 分钟无进展」判,长视频十几章的详写靠这个心跳活着
+			result = await buildNotes(ai, fastAi, {
+				kind: "transcript",
+				source: edited.source,
+				result,
+				segments: edited.segments,
+				durationSec: edited.durationSec,
+				onChapter: async (done, total) => {
+					console.log(`notes ${done}/${total}`);
+					await reportProgress(cfg, msg.taskId, "editing", path).catch(() => {});
+				},
+			});
 
 			await reportComplete(cfg, msg.taskId, {
 				result,

@@ -70,6 +70,11 @@ textarea::placeholder {
 .rise {
 	animation: rise-in 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 }
+/* 载入错峰(主站 landing 同款):结果区各段依次浮现,不齐步走 */
+.rise-1 { animation-delay: 0.07s; }
+.rise-2 { animation-delay: 0.14s; }
+.rise-3 { animation-delay: 0.21s; }
+.rise-4 { animation-delay: 0.28s; }
 
 /* ———————————————————— 页眉(001/主站同款) ———————————————————— */
 
@@ -210,6 +215,60 @@ textarea::placeholder {
 	border-color: var(--ink);
 	color: var(--ink);
 }
+
+/* 版记章(001 同款):产品页上唯一的行动号召。双线方框来自报头
+   .masthead 的双细线——同一句话压成一枚章。方角不违和:圆角属于
+   内容容器,这枚是操作件,本就该分层。悬停转朱红,按下沉一格。 */
+.btn-stamp {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.55rem;
+	padding: 0.45rem 1.05rem;
+	border: 1.5px solid var(--ink);
+	border-radius: 0;
+	background: transparent;
+	color: var(--ink);
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: 0.08em;
+	line-height: 1.5;
+	white-space: nowrap;
+	cursor: pointer;
+	transition:
+		color 0.18s ease,
+		border-color 0.18s ease,
+		transform 0.12s ease;
+}
+.btn-stamp::after {
+	content: "";
+	position: absolute;
+	inset: 2.5px;
+	border: 1px solid var(--ink);
+	opacity: 0.45;
+	transition:
+		border-color 0.18s ease,
+		opacity 0.18s ease;
+}
+.btn-stamp:hover:not(:disabled) {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+.btn-stamp:hover:not(:disabled)::after {
+	border-color: var(--accent);
+	opacity: 0.5;
+}
+.btn-stamp:active:not(:disabled) {
+	transform: translateY(1px);
+}
+.btn-stamp:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+/* 三角标记与状态灯同源:一个等着开工,一个正在跑 */
+.btn-stamp .mark {
+	color: var(--accent);
+}
 .user-menu {
 	position: relative;
 	display: flex;
@@ -312,22 +371,104 @@ textarea::placeholder {
 /* ———————————————————— 版面 ———————————————————— */
 
 .page {
-	max-width: 780px;
+	max-width: 712px; /* 001 的正文测量宽 672 + 两侧留白 */
 	margin-inline: auto;
 	padding: 40px clamp(20px, 4vw, 40px) 80px;
 }
 
-/* 报头:双细线 + 题字 + 右侧额度读数(001 的报纸家具) */
-.masthead {
+/* ———— 报头(001 简报页同款结构):小签行 → 特大题字 →
+        读数行 → 双细线 → 双线下的状态行 ———— */
+
+.mast-top {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px 16px;
+}
+.mast-sig {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.05em;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	flex: none;
+}
+.dot-accent {
+	background: var(--accent);
+	box-shadow: 0 0 0 3px rgba(194, 71, 46, 0.14);
+}
+
+/* 视图分段开关(001「简报/想法/配置」同款) */
+.view-seg {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	border: 1px solid var(--line);
+	background: var(--card);
+	border-radius: 8px;
+	padding: 3px;
+}
+.view-seg button {
+	border: none;
+	background: transparent;
+	border-radius: 6px;
+	padding: 4px 16px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--ink-2);
+	cursor: pointer;
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+.view-seg button:hover {
+	background: var(--paper-deep);
+	color: var(--ink);
+}
+.view-seg button[aria-pressed="true"] {
+	background: var(--ink);
+	color: var(--paper);
+}
+
+/* 特大题字:001 的报纸报头,不是小节标题 */
+.masthead h1 {
+	margin: 12px 0 0;
+	font-size: clamp(2.6rem, 9vw, 3.8rem);
+	font-weight: 900;
+	line-height: 1.2;
+	letter-spacing: 0.025em;
+}
+
+/* 读数行:mono 13px,第一个词 accent(001 的日期位) */
+.deck-line {
+	margin: 8px 0 12px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 16px;
+	font-family: var(--mono);
+	font-size: 13px;
+	color: var(--ink-2);
+}
+.deck-line .lead {
+	color: var(--accent);
+	font-weight: 500;
+}
+
+/* 报头双细线(001 .rule-double 同款) */
+.rule-double {
 	border-top: 3px solid var(--ink);
 	position: relative;
-	padding-top: 14px;
-	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 16px;
 }
-.masthead::after {
+.rule-double::after {
 	content: "";
 	position: absolute;
 	top: 4px;
@@ -335,33 +476,70 @@ textarea::placeholder {
 	right: 0;
 	border-top: 1px solid var(--ink);
 }
-.masthead h1 {
-	margin: 0;
-	font-size: 26px;
-	font-weight: 800;
-	letter-spacing: 0.02em;
-	line-height: 1.3;
-}
-.masthead h1 small {
+
+/* 双线下的状态行:平时一句读数,跑起来是进度;右侧额度圆签 */
+.status-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 16px;
+	padding-top: 8px;
 	font-family: var(--mono);
-	font-size: 11.5px;
-	font-weight: 500;
-	color: var(--ink-3);
-	letter-spacing: 0.08em;
-	margin-left: 10px;
-}
-.usage-chip {
-	font-family: var(--mono);
-	font-size: 11.5px;
-	color: var(--ink-3);
-	white-space: nowrap;
-}
-.tagline {
-	margin: 10px 0 0;
-	font-family: var(--serif);
-	font-size: 14.5px;
+	font-size: 12px;
 	color: var(--ink-2);
 }
+.status-row .mark {
+	color: var(--accent);
+}
+.status-row .right {
+	margin-left: auto;
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+/* 终端式光标:处理中的走字(001 同款) */
+@keyframes blink-caret {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0;
+	}
+}
+.caret {
+	display: inline-block;
+	width: 0.55em;
+	height: 1.05em;
+	background: var(--accent);
+	vertical-align: text-bottom;
+	animation: blink-caret 0.9s step-end infinite;
+	margin-left: 4px;
+}
+
+/* 额度圆签(001 同款语义:写「还剩几次」不写「用了几比几」;
+   剩 2 次以内转朱红提醒,用完换软底) */
+.quota-pill {
+	font-family: var(--mono);
+	font-size: 12px;
+	white-space: nowrap;
+	border: 1px solid var(--line-strong);
+	border-radius: 999px;
+	padding: 3px 10px;
+	color: var(--ink-2);
+}
+.quota-pill.warn {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+.quota-pill.out {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
 .mock-chip {
 	font-family: var(--mono);
 	font-size: 11px;
@@ -369,8 +547,7 @@ textarea::placeholder {
 	border: 1px solid currentColor;
 	border-radius: 4px;
 	padding: 1px 6px;
-	margin-left: 8px;
-	vertical-align: 2px;
+	vertical-align: 1px;
 }
 
 /* ———————————————————— 收单台 ———————————————————— */
@@ -410,33 +587,6 @@ textarea::placeholder {
 	flex-wrap: wrap;
 }
 
-/* 运行读数:等宽,前面一颗呼吸的状态灯 */
-@keyframes lamp-breathe {
-	0%,
-	100% {
-		opacity: 1;
-	}
-	50% {
-		opacity: 0.35;
-	}
-}
-.statusline {
-	font-family: var(--mono);
-	font-size: 12px;
-	color: var(--ink-2);
-	display: inline-flex;
-	align-items: center;
-	gap: 8px;
-}
-.statusline::before {
-	content: "";
-	width: 7px;
-	height: 7px;
-	border-radius: 50%;
-	background: var(--accent);
-	animation: lamp-breathe 1.4s ease-in-out infinite;
-}
-
 /* 慢车道五步:走过的暗、当前的亮 */
 .steps {
 	font-family: var(--mono);
@@ -472,10 +622,47 @@ textarea::placeholder {
 /* ———————————————————— 结果 ———————————————————— */
 
 .result {
-	margin-top: 36px;
+	margin-top: 40px;
 	display: flex;
 	flex-direction: column;
-	gap: 28px;
+	gap: 32px;
+}
+
+/* 编号分区卡(001 追踪器分区同款):mono 编号 + 粗体标题 + 右侧读数 */
+.sec-card {
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 0 clamp(18px, 4vw, 28px);
+}
+.sec-head {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	padding: 16px 0 12px;
+	border-bottom: 1px solid var(--line);
+}
+.sec-no {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--accent);
+}
+/* 中文标题拉宽字距会散,收到 0.06em(001 同注) */
+.sec-head h2 {
+	margin: 0;
+	font-size: 17px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+}
+.sec-count {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.sec-body {
+	padding: 18px 0 22px;
 }
 .result h2.content-title {
 	margin: 0;
@@ -519,13 +706,7 @@ textarea::placeholder {
 	margin: 0;
 }
 
-/* 导读:整卡衬线,像编辑替你写的一段短评;两个小标签是等宽读数 */
-.overview {
-	background: var(--card);
-	border: 1px solid var(--line);
-	border-radius: 10px;
-	padding: 16px 18px;
-}
+/* 导读:衬线短评,像编辑替你写的一段导语;两个小标签是等宽读数 */
 .ov-summary {
 	margin: 0;
 	font-family: var(--serif);
@@ -554,38 +735,21 @@ textarea::placeholder {
 	color: var(--accent);
 }
 
-.section-label {
-	font-family: var(--mono);
-	font-size: 11.5px;
-	font-weight: 600;
-	letter-spacing: 0.14em;
-	color: var(--ink-3);
-	text-transform: uppercase;
-	margin: 0 0 10px;
-	display: flex;
-	align-items: baseline;
-	gap: 10px;
-}
-.section-label .note {
-	font-weight: 400;
-	letter-spacing: 0;
-	text-transform: none;
-}
-
-/* 要点卡:观点衬线,引文等宽小字挂在下面 */
+/* 要点:卡内条目,细线分隔;观点衬线,引文等宽小字挂在下面 */
 .kp-list {
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
 	margin: 0;
 	padding: 0;
 	list-style: none;
 }
 .kp {
-	background: var(--card);
-	border: 1px solid var(--line);
-	border-radius: 10px;
-	padding: 12px 16px;
+	padding: 13px 0;
+	border-top: 1px solid var(--paper-deep);
+}
+.kp:first-child {
+	padding-top: 0;
+	border-top: none;
 }
 .kp-point {
 	font-family: var(--serif);
@@ -600,30 +764,37 @@ textarea::placeholder {
 	line-height: 1.7;
 	word-break: break-all;
 }
-.kp.unanchored {
-	border-style: dashed;
-	opacity: 0.65;
+/* 未锚定小签:引文没能在原文/转写稿里对上。状态只落在引文行,
+   观点正文保持全黑——出处待核不等于观点作废,整条压暗会被当成渲染坏了 */
+.anchor-chip {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--warn);
+	border: 1px solid currentColor;
+	border-radius: 4px;
+	padding: 0 5px;
+	margin-left: 8px;
+	white-space: nowrap;
+	vertical-align: 1px;
+	cursor: help;
 }
 
-/* 分段地图:左轨时间码,右侧大意;低价值段整行沉下去 */
+/* 分段地图:卡内列表,左轨时间码,右侧大意;低价值段整行沉下去 */
 .map {
 	margin: 0;
 	padding: 0;
 	list-style: none;
-	border: 1px solid var(--line);
-	border-radius: 10px;
-	overflow: hidden;
-	background: var(--card);
 }
 .map li {
 	display: flex;
 	gap: 14px;
-	padding: 10px 16px;
+	padding: 10px 0;
 	border-top: 1px solid var(--paper-deep);
 	font-size: 13.5px;
 }
 .map li:first-child {
 	border-top: none;
+	padding-top: 0;
 }
 .map .tc {
 	flex: none;
@@ -637,8 +808,11 @@ textarea::placeholder {
 	font-family: var(--serif);
 	line-height: 1.7;
 }
+/* 低价值段的底色贴满卡宽:负外边距吃掉卡的内边距 */
 .map li.low {
 	background: var(--paper-deep);
+	margin-inline: calc(-1 * clamp(18px, 4vw, 28px));
+	padding-inline: clamp(18px, 4vw, 28px);
 }
 .map li.low .gist,
 .map li.low .tc {
@@ -681,6 +855,20 @@ textarea::placeholder {
 }
 .meta-line a {
 	color: var(--ink-2);
+}
+/* 重新生成:001 简报页同款的一行灰字操作(不与版记章抢层级) */
+.regen {
+	font-family: var(--mono);
+	font-size: inherit;
+	color: var(--ink-3);
+	background: none;
+	border: none;
+	padding: 0;
+	cursor: pointer;
+	transition: color 0.15s ease;
+}
+.regen:hover {
+	color: var(--accent);
 }
 
 /* 原文区:衬线正文,段号在左;定位命中时短暂点亮 */
@@ -727,28 +915,6 @@ textarea::placeholder {
 }
 
 /* ———————————————————— N 线 · 记录与想法 ———————————————————— */
-
-.masthead-side {
-	display: flex;
-	align-items: baseline;
-	gap: 16px;
-	white-space: nowrap;
-}
-.nav-mono {
-	font-family: var(--mono);
-	font-size: 12px;
-	color: var(--ink-2);
-	background: none;
-	border: none;
-	padding: 0;
-	cursor: pointer;
-	text-decoration: underline;
-	text-decoration-style: dotted;
-	text-underline-offset: 3px;
-}
-.nav-mono:hover {
-	color: var(--accent);
-}
 
 .history-list {
 	margin: 24px 0 0;
@@ -889,14 +1055,222 @@ textarea::placeholder {
 	color: var(--ink);
 }
 
-.site-footer {
-	margin-top: 64px;
-	padding-top: 16px;
-	border-top: 1px solid var(--line);
+/* 终点戳(001「今日到此为止」同款):结果读完的仪式感 */
+.endnote {
+	margin-top: 24px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 26px;
+}
+.end-stamp {
+	width: 7.5rem;
+	height: 7.5rem;
+	border: 2px solid var(--accent);
+	border-radius: 50%;
+	color: var(--accent);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	transform: rotate(-6deg);
+	position: relative;
+	font-size: 14px;
+	font-weight: 700;
+	line-height: 1.65;
+}
+.end-stamp::after {
+	content: "";
+	position: absolute;
+	inset: 4px;
+	border: 1px solid var(--accent);
+	border-radius: 50%;
+	opacity: 0.5;
+}
+.endnote-meta {
+	margin: 0;
 	font-family: var(--mono);
 	font-size: 11px;
 	color: var(--ink-3);
 }
+
+/* 页脚:主站 .footer-row 同款读数(10.5px 疏排,悬停转朱红) */
+.site-footer {
+	margin-top: 64px;
+	padding-top: 20px;
+	border-top: 1px solid var(--line);
+	font-family: var(--mono);
+	font-size: 10.5px;
+	letter-spacing: 0.12em;
+	color: var(--ink-3);
+}
 .site-footer a {
+	color: var(--ink-3);
+	transition: color 0.15s ease;
+}
+.site-footer a:hover {
+	color: var(--accent);
+}
+
+/* ———————————————————— 窄屏与减动效 ———————————————————— */
+
+@media (max-width: 520px) {
+	/* 时间码轨在窄屏上让位:每段纵排,读数在上、大意在下 */
+	.map li {
+		flex-direction: column;
+		gap: 2px;
+	}
+	.map .tc {
+		width: auto;
+		padding-top: 0;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.rise,
+	.caret,
+	.logo-route-tile,
+	.brand:hover .logo-route-tile {
+		animation: none !important;
+	}
+	/* 静音版记章按下的那一格位移;转色不是动效,留着 */
+	.btn-stamp:active:not(:disabled) {
+		transform: none;
+	}
+}
+
+/* ============================================================
+   详细笔记(docs/05):按章的长文,衬线正文,章头左轨时间码与地图同款;
+   low 章只留一行灰色的大意;章内要点复用 kp 样式但缩一档
+   ============================================================ */
+.note-ch {
+	padding: 18px 0 6px;
+	border-top: 1px solid var(--paper-deep);
+}
+.note-ch:first-child {
+	padding-top: 0;
+	border-top: none;
+}
+.note-ch-head {
+	display: flex;
+	gap: 14px;
+	align-items: baseline;
+}
+.note-ch-head .tc {
+	flex: none;
+	width: 108px;
+	font-family: var(--mono);
+	font-size: 11.5px;
 	color: var(--ink-2);
+}
+.note-title {
+	margin: 0;
+	font-family: var(--serif);
+	font-size: 16.5px;
+	font-weight: 600;
+	line-height: 1.6;
+}
+.note-p {
+	margin: 10px 0 0 122px;
+	font-family: var(--serif);
+	font-size: 15px;
+	line-height: 1.95;
+	text-align: justify;
+}
+.note-pts {
+	margin: 12px 0 0 122px;
+	padding-left: 14px;
+	border-left: 2px solid var(--paper-deep);
+}
+.note-pts .kp-point {
+	font-size: 14px;
+}
+.note-ch.low {
+	padding: 10px 0;
+	background: var(--paper-deep);
+	margin-inline: calc(-1 * clamp(18px, 4vw, 28px));
+	padding-inline: clamp(18px, 4vw, 28px);
+}
+.note-ch.low .note-title {
+	font-size: 13.5px;
+	font-weight: 400;
+	color: var(--ink-3);
+}
+.note-ch.low .tc {
+	color: var(--ink-3);
+}
+.note-low-chip,
+.note-filled,
+.note-failed {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+.note-low-chip {
+	margin-left: 8px;
+	border: 1px solid currentColor;
+	border-radius: 4px;
+	padding: 0 5px;
+	white-space: nowrap;
+	vertical-align: 1px;
+}
+.note-filled,
+.note-failed {
+	margin: 8px 0 0 122px;
+}
+.note-failed {
+	color: var(--warn);
+}
+.terms {
+	margin: 0;
+}
+.terms .term {
+	display: flex;
+	gap: 14px;
+	padding: 9px 0;
+	border-top: 1px solid var(--paper-deep);
+	font-size: 14px;
+}
+.terms .term:first-child {
+	border-top: none;
+	padding-top: 0;
+}
+.terms dt {
+	flex: none;
+	width: 108px;
+	font-family: var(--mono);
+	font-size: 12px;
+	font-weight: 600;
+	word-break: break-word;
+}
+.terms dd {
+	margin: 0;
+	font-family: var(--serif);
+	line-height: 1.7;
+	color: var(--ink-2);
+}
+@media (max-width: 640px) {
+	.note-ch-head {
+		flex-direction: column;
+		gap: 4px;
+	}
+	.note-p,
+	.note-pts,
+	.note-filled,
+	.note-failed {
+		margin-left: 0;
+	}
+}
+
+/* 订阅列表里的平台小签 */
+.sub-label {
+	display: inline-block;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-2);
+	border: 1px solid var(--line-strong);
+	border-radius: 4px;
+	padding: 0 5px;
+	margin-right: 8px;
+	vertical-align: 1px;
 }

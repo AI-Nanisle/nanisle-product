@@ -1,14 +1,28 @@
 # 慢车道消费者
 
-字幕优先(yt-dlp)→ whisper 兜底(ffmpeg + Groq)→ 一次 DeepSeek 编辑调用 → 回程交给 Worker。
+字幕优先(yt-dlp)→ whisper 兜底(ffmpeg + Groq)→ DeepSeek 大纲调用 → 逐章详写 + 覆盖补漏(`src/shared/notes.ts`,docs/05)→ 回程交给 Worker。
 同一份代码两种跑法:**Lambda 容器**(生产,SQS 触发)和**本地进程**(联调/后备,直接长轮询 SQS)。
+同一条队列还跑订阅模式的 `{kind:"discover"}` 消息(`src/discover.ts`):经代理抓 YouTube UULF RSS / B站 APP 接口 / 播客 RSS,把候选 POST 回 Worker 的 `/api/queue/candidates`,挑选在 Worker 做。
 
 ## 打包
 
 ```bash
 # 在产品根目录(esbuild 走产品仓的 node_modules)
-npm run build:consumer      # 产物 consumer/dist/{lambda,local}.mjs
+npm run build:consumer      # 产物 consumer/dist/{lambda,local,notes-bench}.mjs
 ```
+
+## 详细笔记基准(改 prompt / 并发 / 思考力度前后对照)
+
+```powershell
+$env:DEEPSEEK_API_KEY = "sk-..."
+node consumer/dist/notes-bench.mjs paragraphs.json     # {"title","paragraphs":[...]}
+$env:BENCH_TITLE = "..."; $env:BENCH_DURATION = "3588"
+node consumer/dist/notes-bench.mjs karpathy.en.vtt     # yt-dlp --write-auto-subs 拿到的 VTT
+# 对照变量:NOTES_CONCURRENCY(默认 6)、NOTES_REASONING(low|none,默认 low)
+```
+
+打印每步耗时、DeepSeek 用量(`cache_hit` 是前缀缓存是否生效的仪表)与产出统计;结果落在同名 `.result.json`。
+2026-08-28 Karpathy 1h 的对照:low×3 并发 575s / 7.3K 字 / 锚定 82%;none×4 并发 284s / 8.5K 字 / 锚定 69% 且出现数字错——留 low,用并发换时间。
 
 ## 本地跑(联调 / Lambda 就绪前的临时消费者)
 

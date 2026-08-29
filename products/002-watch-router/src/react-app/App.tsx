@@ -26,6 +26,8 @@ interface NoteEntry {
 	at: number;
 	target: string;
 	text: string;
+	/** 写想法时所见结果的版本戳;与当前结果对不上的定点想法沉到「我的想法」。 */
+	resultAt?: number;
 }
 
 interface NoteRecord {
@@ -42,11 +44,29 @@ interface HistoryItem {
 	at: number;
 }
 
+/** 订阅模式(docs/05 §3):一条订阅 + 今天挑选结果。 */
+interface SubItem {
+	platform: "youtube" | "bilibili" | "podcast";
+	id: string;
+	title?: string;
+	label: string;
+	addedAt: number;
+	lastPickedAt?: number;
+}
+
+interface SubsResponse {
+	items: SubItem[];
+	limit: number;
+	emailPush: boolean;
+	today: { picked: { title: string; channelTitle?: string } | null; reason: string; contentKey?: string } | null;
+}
+
 interface SubmitResponse {
 	cached?: boolean;
 	lane?: string;
 	contentKey?: string;
 	result?: WatchResult;
+	resultAt?: number;
 	paragraphs?: string[];
 	url?: string;
 	taskId?: string;
@@ -62,6 +82,7 @@ interface TaskResponse {
 	url?: string;
 	contentKey?: string;
 	result?: WatchResult;
+	resultAt?: number;
 	paragraphs?: string[];
 	error?: string;
 }
@@ -71,8 +92,12 @@ interface FastEvent {
 	type: "phase" | "delta" | "result" | "error" | "ping";
 	phase?: string;
 	chars?: number;
+	/** phase=notes 的逐章进度。 */
+	done?: number;
+	total?: number;
 	contentKey?: string;
 	result?: WatchResult;
+	resultAt?: number;
 	paragraphs?: string[];
 	url?: string;
 	error?: string;
@@ -91,6 +116,14 @@ function fmtTime(sec: number): string {
 	const m = Math.floor(sec / 60);
 	const s = Math.floor(sec % 60);
 	return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** 沉底想法的原锚点标注:kp:2 → 「要点 3」(人读序号从 1 起)。 */
+function targetLabel(t: string): string {
+	if (t === "overview") return "导读";
+	const m = /^(kp|ch):(\d+)$/.exec(t);
+	if (m) return `${m[1] === "kp" ? "要点" : "分段"} ${Number(m[2]) + 1}`;
+	return t;
 }
 
 function fmtDate(ms: number): string {
@@ -127,6 +160,7 @@ function jumpHref(url: string | undefined, startSec: number): string | null {
 interface Loaded {
 	contentKey?: string;
 	result: WatchResult;
+	resultAt?: number;
 	paragraphs?: string[];
 	url?: string;
 }
@@ -150,8 +184,13 @@ export default function App() {
 	const [fastStatus, setFastStatus] = useState<string | null>(null);
 	const [showSource, setShowSource] = useState(false);
 	// N 线状态
-	const [view, setView] = useState<"main" | "history">("main");
+	const [view, setView] = useState<"main" | "history" | "subs">("main");
 	const [history, setHistory] = useState<HistoryItem[] | null>(null);
+	// 订阅模式状态
+	const [subs, setSubs] = useState<SubsResponse | null>(null);
+	const [subInput, setSubInput] = useState("");
+	const [subBusy, setSubBusy] = useState(false);
+	const [subMsg, setSubMsg] = useState("");
 	const [note, setNote] = useState<NoteRecord | null>(null);
 	/** 正在写想法的锚点(同一时刻只开一个输入框)。 */
 	const [noteAt, setNoteAt] = useState<string | null>(null);
@@ -166,8 +205,12 @@ export default function App() {
 
 	useEffect(() => {
 		// ?url= 预填:001 简报「深读 →」入口的承接端(docs/02 T7①)
-		const preset = new URLSearchParams(window.location.search).get("url");
+		const params = new URLSearchParams(window.location.search);
+		const preset = params.get("url");
 		if (preset) setInput(preset);
+		// ?open=<contentKey>:订阅邮件的回链(docs/05 §3.5),直接重开这条记录
+		const open = params.get("open");
+		if (open) void openRecord({ contentKey: open, at: 0 });
 		fetch(apiPath("health"))
 			.then((r) => r.json() as Promise<Health>)
 			.then(setHealth)
@@ -208,6 +251,88 @@ export default function App() {
 		}
 	}
 
+	// ---------- 订阅模式(docs/05 §3) ----------
+
+	async function loadSubs() {
+		setView("subs");
+		setSubMsg("");
+		try {
+			const res = await fetch(apiPath("subs"));
+			if (res.status === 401) {
+				const d = (await res.json()) as { loginUrl?: string };
+				setError("请先登录南屿账号。");
+				if (d.loginUrl) setLogin(d.loginUrl);
+				setView("main");
+				return;
+			}
+			setSubs((await res.json()) as SubsResponse);
+		} catch {
+			setSubMsg("读取订阅失败,稍后再试。");
+		}
+	}
+
+	async function addSub() {
+		const input = subInput.trim();
+		if (!input) return;
+		setSubBusy(true);
+		setSubMsg("");
+		try {
+			const res = await fetch(apiPath("subs"), {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ input }),
+			});
+			const d = (await res.json()) as { ok?: boolean; sub?: SubItem; error?: string };
+			if (d.ok && d.sub) {
+				setSubs((s) => (s ? { ...s, items: [...s.items, d.sub!] } : s));
+				setSubInput("");
+			} else {
+				setSubMsg(d.error ?? `添加失败(${res.status})`);
+			}
+		} catch {
+			setSubMsg("网络错误,稍后再试。");
+		} finally {
+			setSubBusy(false);
+		}
+	}
+
+	async function delSub(item: SubItem) {
+		setSubs((s) => (s ? { ...s, items: s.items.filter((x) => !(x.platform === item.platform && x.id === item.id)) } : s));
+		void fetch(apiPath("subs/delete"), {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ platform: item.platform, id: item.id }),
+		}).catch(() => {});
+	}
+
+	async function toggleEmailPush() {
+		if (!subs) return;
+		const next = !subs.emailPush;
+		setSubs({ ...subs, emailPush: next });
+		void fetch(apiPath("subs/prefs"), {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ emailPush: next }),
+		}).catch(() => {});
+	}
+
+	/** 立刻跑一轮「发现 → 挑一条」(本地/调试用;线上由每晚 cron 做)。 */
+	async function runSubsNow() {
+		setSubBusy(true);
+		setSubMsg("");
+		try {
+			const res = await fetch(apiPath("subs/run"), { method: "POST" });
+			const d = (await res.json()) as { ok?: boolean; outcome?: string; error?: string; sources?: Record<string, string> };
+			if (!d.ok) setSubMsg(d.error ?? `失败(${res.status})`);
+			else setSubMsg(`已跑完:${d.outcome}${d.sources ? " · " + Object.entries(d.sources).map(([k, v]) => `${k.split(":")[0]} ${v}`).join("、") : ""}`);
+			await loadSubs();
+		} catch {
+			setSubMsg("网络错误,稍后再试。");
+		} finally {
+			setSubBusy(false);
+		}
+	}
+
 	async function openRecord(item: HistoryItem) {
 		setError("");
 		try {
@@ -224,7 +349,7 @@ export default function App() {
 			if (d.result) {
 				setView("main");
 				setShowSource(false);
-				setLoaded({ contentKey: d.contentKey, result: d.result, paragraphs: d.paragraphs, url: d.url });
+				setLoaded({ contentKey: d.contentKey, result: d.result, resultAt: d.resultAt, paragraphs: d.paragraphs, url: d.url });
 				setNote(d.note ?? null);
 				setNoteAt(null);
 				window.scrollTo({ top: 0 });
@@ -242,7 +367,13 @@ export default function App() {
 			const res = await fetch(apiPath("note"), {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ contentKey: key, target, text }),
+				body: JSON.stringify({
+					contentKey: key,
+					target,
+					text,
+					// 版本戳:重新生成后,定点想法靠它判断还挂不挂在原位
+					...(typeof loaded?.resultAt === "number" ? { resultAt: loaded.resultAt } : {}),
+				}),
 			});
 			const d = (await res.json()) as { ok?: boolean; entry?: NoteEntry; error?: string };
 			if (d.ok && d.entry) {
@@ -293,11 +424,17 @@ export default function App() {
 					continue;
 				}
 				if (ev.type === "phase") {
-					setFastStatus(ev.phase === "extracting" ? "抽取正文中" : "编辑中(整篇一次调用,长文要一两分钟)");
+					setFastStatus(
+						ev.phase === "extracting"
+							? "抽取正文中"
+							: ev.phase === "notes"
+								? `逐章写详细笔记 · ${ev.done ?? 0}/${ev.total ?? "?"} 章`
+								: "编辑中(长文要一两分钟)",
+					);
 				} else if (ev.type === "delta" && typeof ev.chars === "number") {
 					setFastStatus(`编辑中 · 已生成 ${ev.chars} 字`);
 				} else if (ev.type === "result" && ev.result) {
-					present({ contentKey: ev.contentKey, result: ev.result, paragraphs: ev.paragraphs, url: ev.url });
+					present({ contentKey: ev.contentKey, result: ev.result, resultAt: ev.resultAt, paragraphs: ev.paragraphs, url: ev.url });
 				} else if (ev.type === "error" && ev.error) {
 					setError(ev.error + (ev.needPaste ? "(把正文粘进输入框再试)" : ""));
 				}
@@ -317,7 +454,7 @@ export default function App() {
 			}
 			setStep(data.step ?? data.status);
 			if (data.status === "done" && data.result) {
-				present({ contentKey: data.contentKey, result: data.result, paragraphs: data.paragraphs, url: data.url });
+				present({ contentKey: data.contentKey, result: data.result, resultAt: data.resultAt, paragraphs: data.paragraphs, url: data.url });
 				return;
 			}
 			if (data.status === "failed") {
@@ -327,7 +464,8 @@ export default function App() {
 		}
 	}
 
-	async function submit() {
+	/** regenUrl:对已生成的记录强制重算(跳过缓存,花一次额度;想法不动)。 */
+	async function submit(opts?: { regenUrl?: string }) {
 		setBusy(true);
 		setError("");
 		setLogin("");
@@ -337,12 +475,14 @@ export default function App() {
 		setFastStatus(null);
 		setShowSource(false);
 		try {
-			const trimmed = input.trim();
+			const trimmed = opts?.regenUrl ?? input.trim();
 			const isUrl = /^https?:\/\//i.test(trimmed);
 			const res = await fetch(apiPath("submit"), {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify(isUrl ? { url: trimmed } : { text: trimmed }),
+				body: JSON.stringify(
+					isUrl ? { url: trimmed, ...(opts?.regenUrl ? { force: true } : {}) } : { text: trimmed },
+				),
 			});
 			if (res.ok && res.headers.get("content-type")?.includes("text/event-stream")) {
 				await readFastStream(res);
@@ -352,7 +492,7 @@ export default function App() {
 					setError(data.error ?? `请求失败(${res.status})`);
 					if (res.status === 401 && data.loginUrl) setLogin(data.loginUrl);
 				} else if (data.result) {
-					present({ contentKey: data.contentKey, result: data.result, paragraphs: data.paragraphs, url: data.url });
+					present({ contentKey: data.contentKey, result: data.result, resultAt: data.resultAt, paragraphs: data.paragraphs, url: data.url });
 				} else if (data.taskId) {
 					setStep("queued");
 					await pollTask(data.taskId);
@@ -386,10 +526,25 @@ export default function App() {
 	const lowAmount = result
 		? result.chapters.filter((ch) => ch.value === "low").reduce((s, ch) => s + (ch.end - ch.start), 0)
 		: 0;
-	const lowLabel = isText ? `低价值段共 ${lowAmount} 段` : `低价值段共 ${Math.round(lowAmount / 60)} 分钟`;
+	const lowLabel = isText ? `低价值 ${lowAmount} 段` : `低价值约 ${Math.round(lowAmount / 60)} 分钟`;
 	const canJumpText = isText && (loaded?.paragraphs?.length ?? 0) > 0;
 	const stepIdx = STEPS.findIndex(([k]) => k === step);
 	const canNote = Boolean(loaded?.contentKey);
+	// 额度写「还剩几条」不写「用了几比几」:读者关心的是前者(001 同款语义)
+	const quotaLeft = usage ? Math.max(0, usage.limit - usage.used) : null;
+	// 分区编号(001 同款):导读/详细笔记/术语表可能缺席,编号按实际出现的顺序补位
+	const notes = result?.notes && result.notes.length > 0 ? result.notes : null;
+	const terms = result?.terms && result.terms.length > 0 ? result.terms : null;
+	const sections = [
+		result?.overview ? "overview" : null,
+		notes ? "notes" : null,
+		terms ? "terms" : null,
+		"keyPoints",
+		notes ? null : "map",
+		"mine",
+	].filter((s): s is string => s !== null);
+	const secNo = (key: string) => String(sections.indexOf(key) + 1).padStart(2, "0");
+	const notesChars = notes ? notes.reduce((s, n) => s + n.body.reduce((t, p) => t + p.length, 0), 0) : 0;
 
 	function Pos({ start, children }: { start: number; children: ReactNode }) {
 		if (canJumpText) {
@@ -410,10 +565,15 @@ export default function App() {
 		return <>{children}</>;
 	}
 
+	/** 定点想法是否属于当前这版结果;结果没带版本戳时(旧缓存/mock)不做甄别。 */
+	const inCurrentVersion = (e: NoteEntry) => typeof loaded?.resultAt !== "number" || e.resultAt === loaded.resultAt;
+	/** 版本对不上的定点想法:不挂原位(序号已指向别的内容),沉到「我的想法」。 */
+	const orphanNotes = canNote ? (note?.entries ?? []).filter((e) => e.target !== "general" && !inCurrentVersion(e)) : [];
+
 	/** N 线 · 一个锚点上的想法区:已有条目 + 「记一笔」入口。 */
 	function NoteSpot({ target, always }: { target: string; always?: boolean }) {
 		if (!canNote) return null;
-		const entries = (note?.entries ?? []).filter((e) => e.target === target);
+		const entries = (note?.entries ?? []).filter((e) => e.target === target && (target === "general" || inCurrentVersion(e)));
 		const open = noteAt === target;
 		if (!always && entries.length === 0 && !open) {
 			return (
@@ -463,33 +623,169 @@ export default function App() {
 		<div>
 			<SiteHeader />
 			<main className="page">
+				{/* 报头(001 简报页同款结构):小签行 → 特大题字 → 读数行 →
+				    双细线 → 双线下的状态行。进度与额度都压在状态行里,不跟题字抢版面。 */}
 				<header className="masthead rise">
-					<h1>
-						长视频总结
-						<small>WATCH ROUTER · 002</small>
-						{health?.provider === "mock" && <span className="mock-chip">MOCK</span>}
-					</h1>
-					<span className="masthead-side">
+					<div className="mast-top">
+						<span className="mast-sig">
+							<span className="dot dot-accent" />
+							No.002 · 每周一个产品
+							{health?.provider === "mock" && <span className="mock-chip">MOCK</span>}
+						</span>
+						<div className="view-seg">
+							<button type="button" aria-pressed={view === "main"} onClick={() => setView("main")}>
+								总结
+							</button>
+							<button type="button" aria-pressed={view === "history"} onClick={() => void loadHistory()}>
+								记录
+							</button>
+							<button type="button" aria-pressed={view === "subs"} onClick={() => void loadSubs()}>
+								订阅
+							</button>
+						</div>
+					</div>
+					<h1>长视频总结</h1>
+					<div className="deck-line">
 						{view === "history" ? (
-							<button type="button" className="nav-mono" onClick={() => setView("main")}>
-								← 返回
-							</button>
+							<>
+								<span className="lead">记录 · 你处理过的每一条</span>
+								<span>想法永久保存,结果缓存 60 天</span>
+							</>
+						) : view === "subs" ? (
+							<>
+								<span className="lead">订阅 · 每天替你看一条</span>
+								<span>YouTube 频道 · B站 UP 主 · 播客,每晚挑一条新的写成详细笔记</span>
+							</>
 						) : (
-							<button type="button" className="nav-mono" onClick={() => void loadHistory()}>
-								我的记录
-							</button>
+							<>
+								<span className="lead">视频 · 播客 · 文章</span>
+								<span>值不值得看 · 讲了什么 · 在原片哪几分钟</span>
+							</>
 						)}
-						{usage && (
-							<span className="usage-chip">
-								今日额度 {usage.used}/{usage.limit}
+					</div>
+					<div className="rule-double" />
+					<div className="status-row">
+						{busy && step ? (
+							<span className="steps" aria-label="处理进度">
+								<span className="mark">▸</span>{" "}
+								{STEPS.map(([key, label], i) => (
+									<span key={key}>
+										{i > 0 && <span className="sep">→</span>}{" "}
+										<span className={key === step || i < stepIdx ? "on" : ""}>{label}</span>
+									</span>
+								))}
+								<span className="caret" />
+							</span>
+						) : busy ? (
+							<span>
+								<span className="mark">▸</span> {fastStatus ?? "接单,准备处理…"}
+								<span className="caret" />
+							</span>
+						) : (
+							<span>
+								{view === "history"
+									? "点任意一条,回看结果和你留下的想法"
+									: view === "subs"
+										? "每晚 8 点(美东)从你的订阅里挑一条 48 小时内的新内容,写好后发一封邮件叫你"
+										: "丢一条链接进来,AI 先替你看完——你只看值得看的部分"}
 							</span>
 						)}
-					</span>
+						<span className="right">
+							{quotaLeft !== null && (
+								<span className={`quota-pill${quotaLeft === 0 ? " out" : quotaLeft <= 2 ? " warn" : ""}`}>
+									{quotaLeft === 0 ? "今日额度已用完" : `今日还可看 ${quotaLeft} 条`}
+								</span>
+							)}
+						</span>
+					</div>
 				</header>
 
-				{view === "history" ? (
+				{view === "subs" ? (
+					<section className="rise" aria-label="我的订阅">
+						<div className="console" style={{ marginTop: 24 }}>
+							<textarea
+								rows={2}
+								placeholder="粘一个地址:YouTube 频道(youtube.com/@名字 或 /channel/UC…)、B站 UP 主空间(space.bilibili.com/数字)、播客 RSS"
+								value={subInput}
+								onChange={(e) => setSubInput(e.target.value)}
+							/>
+							<div className="console-row">
+								<button type="button" className="btn-stamp" disabled={subBusy || subInput.trim().length === 0} onClick={() => void addSub()}>
+									<span className="mark" aria-hidden="true">
+										▸
+									</span>
+									{subBusy ? "处理中…" : "订阅"}
+								</button>
+								{subs && (
+									<span className="meta-line" style={{ margin: 0 }}>
+										{subs.items.length}/{subs.limit}
+									</span>
+								)}
+							</div>
+						</div>
+						{subMsg && (
+							<div className="error-box rise" role="status">
+								{subMsg}
+							</div>
+						)}
+						{subs === null ? (
+							<p className="meta-line" style={{ marginTop: 24 }}>
+								读取中…
+							</p>
+						) : subs.items.length === 0 ? (
+							<p className="meta-line" style={{ marginTop: 24 }}>
+								还没有订阅。粘一个频道地址试试——每天只挑一条,最多 {subs.limit} 个订阅。
+							</p>
+						) : (
+							<ol className="history-list">
+								{subs.items.map((s) => (
+									<li key={`${s.platform}:${s.id}`}>
+										<button type="button" onClick={() => void delSub(s)} title="点击取消订阅">
+											<span className="h-title">
+												<span className="sub-label">{s.label}</span>
+												{s.title || s.id}
+											</span>
+											<span className="h-date">{s.lastPickedAt ? `上次挑中 ${fmtDate(s.lastPickedAt)}` : "还没挑过"} · 取消 ×</span>
+										</button>
+									</li>
+								))}
+							</ol>
+						)}
+						{subs && (
+							<p className="meta-line rise rise-2">
+								{subs.today
+									? subs.today.picked
+										? <>今天挑了:{subs.today.picked.channelTitle ? `${subs.today.picked.channelTitle} · ` : ""}《{subs.today.picked.title}》({subs.today.reason}){subs.today.contentKey && <> · <button type="button" className="regen" onClick={() => void openRecord({ contentKey: subs.today!.contentKey!, at: 0 })}>打开 →</button></>}</>
+										: `今天没挑:${subs.today.reason}`
+									: "今天还没跑"}
+								{" · "}
+								<label style={{ cursor: "pointer" }}>
+									<input type="checkbox" checked={subs.emailPush} onChange={() => void toggleEmailPush()} /> 挑好后发邮件叫我
+								</label>
+								{subs.items.length > 0 && !subs.today && (
+									<>
+										{" · "}
+										<button type="button" className="regen" disabled={subBusy} onClick={() => void runSubsNow()} title="不等今晚,现在就从订阅里挑一条">
+											现在就挑一条 ↻
+										</button>
+									</>
+								)}
+							</p>
+						)}
+						{error && (
+							<div className="error-box rise" role="alert">
+								{error}
+								{login && (
+									<>
+										{" "}
+										<a href={login}>去登录 →</a>
+									</>
+								)}
+							</div>
+						)}
+					</section>
+				) : view === "history" ? (
 					<section className="rise">
-						<p className="tagline">你处理过的每一条都在这里;想法永久保存,结果缓存 60 天(过期一键重算)。</p>
 						{history === null ? (
 							<p className="meta-line" style={{ marginTop: 24 }}>
 								读取中…
@@ -518,31 +814,21 @@ export default function App() {
 					</section>
 				) : (
 					<>
-						<p className="tagline rise">
-							丢给我一条视频、播客或文章链接:值不值得看、讲了什么、每一段在原片的哪几分钟——AI 先替你看完,你只看值得看的部分。
-						</p>
-
-						<section className="console rise" aria-label="收单">
+						<section className="console rise rise-1" aria-label="收单">
 							<textarea
 								placeholder="粘贴链接(B站 / YouTube / 播客 / 文章),或直接把正文贴进来…"
 								value={input}
 								onChange={(e) => setInput(e.target.value)}
 							/>
 							<div className="console-row">
-								<button type="button" className="btn-ink" disabled={busy || input.trim().length === 0} onClick={submit}>
+								{/* 页面上唯一的行动号召:与 001「试生成一期」同一枚版记章 */}
+								<button type="button" className="btn-stamp" disabled={busy || input.trim().length === 0} onClick={() => void submit()}>
+									<span className="mark" aria-hidden="true">
+										▸
+									</span>
 									{busy ? "看着呢…" : "替我看"}
 								</button>
-								{fastStatus && <span className="statusline">{fastStatus}</span>}
-								{step && (
-									<span className="steps" aria-label="处理进度">
-										{STEPS.map(([key, label], i) => (
-											<span key={key}>
-												{i > 0 && <span className="sep">→</span>}{" "}
-												<span className={key === step || i < stepIdx ? "on" : ""}>{label}</span>
-											</span>
-										))}
-									</span>
-								)}
+								{/* 进度在页首状态行(001 同款):这里只留这一枚章 */}
 							</div>
 						</section>
 
@@ -562,7 +848,7 @@ export default function App() {
 							<section className="result">
 								{result.meta.title && <h2 className="content-title rise">{result.meta.title}</h2>}
 
-								<div className={`verdict rise worth-${result.verdict.worth}`}>
+								<div className={`verdict rise rise-1 worth-${result.verdict.worth}`}>
 									<span className="verdict-word">
 										{result.verdict.worth === "yes" ? "值得看" : result.verdict.worth === "no" ? "可以跳过" : "部分值得"}
 									</span>
@@ -570,25 +856,123 @@ export default function App() {
 								</div>
 
 								{result.overview && (
-									<div className="overview rise">
-										<p className="ov-summary">{result.overview.summary}</p>
-										<p className="ov-row">
-											<span className="ov-label">有意思的是</span>
-											{result.overview.interesting}
-										</p>
-										<p className="ov-row">
-											<span className="ov-label ov-counter">反着想</span>
-											{result.overview.counter}
-										</p>
-										<NoteSpot target="overview" />
-									</div>
+									<section className="sec-card rise rise-2">
+										<div className="sec-head">
+											<span className="sec-no">{secNo("overview")}</span>
+											<h2>导读</h2>
+										</div>
+										<div className="sec-body">
+											<p className="ov-summary">{result.overview.summary}</p>
+											<p className="ov-row">
+												<span className="ov-label">有意思的是</span>
+												{result.overview.interesting}
+											</p>
+											<p className="ov-row">
+												<span className="ov-label ov-counter">反着想</span>
+												{result.overview.counter}
+											</p>
+											<NoteSpot target="overview" />
+										</div>
+									</section>
 								)}
 
-								<div className="rise">
-									<h3 className="section-label">总体要点</h3>
+								{notes && (
+									<section className="sec-card rise rise-3" aria-label="详细笔记">
+										<div className="sec-head">
+											<span className="sec-no">{secNo("notes")}</span>
+											<h2>详细笔记</h2>
+											<span className="sec-count">
+												{notes.filter((n) => n.body.length > 0).length} 章 · 约 {notesChars} 字
+												{typeof result.meta.coverageGaps === "number" && result.meta.coverageGaps > 0 && ` · 补漏 ${result.meta.coverageGaps} 处`}
+											</span>
+										</div>
+										<div className="sec-body">
+											{notes.map((n) => {
+												const ch = result.chapters[n.chapter];
+												if (!ch) return null;
+												const low = ch.value === "low";
+												return (
+													<article key={n.chapter} className={`note-ch${low ? " low" : ""}`}>
+														<header className="note-ch-head">
+															<span className="tc">
+																<Pos start={ch.start}>
+																	{fmtPos(ch.start)}–{fmtPos(ch.end)}
+																</Pos>
+															</span>
+															<h3 className="note-title">
+																{low ? ch.gist : n.title}
+																{low && <span className="note-low-chip">低价值,略过</span>}
+																{ch.tracked && <span className="tracked-chip">与你的追踪相关 · {ch.tracked}</span>}
+															</h3>
+														</header>
+														{n.failed && <p className="note-failed">这一章的详写没成功——要点仍在,正文可点「重新生成」再试。</p>}
+														{n.body.map((p, i) => (
+															<p key={i} className="note-p">
+																{p}
+															</p>
+														))}
+														{n.points.length > 0 && (
+															<ul className="kp-list note-pts">
+																{n.points.map((kp, i) => (
+																	<li key={i} className="kp">
+																		<div className="kp-point">{kp.point}</div>
+																		<div className="kp-quote">
+																			「{kp.quote}」
+																			{typeof kp.start === "number" && (
+																				<>
+																					{" · "}
+																					<Pos start={kp.start}>{fmtPos(kp.start)}</Pos>
+																				</>
+																			)}
+																			{kp.anchored === false && (
+																				<span className="anchor-chip" title="这句引文没能在本章原文里对上,引用前自己核一眼">
+																					未锚定
+																				</span>
+																			)}
+																		</div>
+																	</li>
+																))}
+															</ul>
+														)}
+														{n.filled && <p className="note-filled">· 覆盖检查发现这一段原本没有要点,已补上</p>}
+														{!low && <NoteSpot target={`ch:${n.chapter}`} />}
+													</article>
+												);
+											})}
+										</div>
+									</section>
+								)}
+
+								{terms && (
+									<section className="sec-card rise rise-3">
+										<div className="sec-head">
+											<span className="sec-no">{secNo("terms")}</span>
+											<h2>术语表</h2>
+											<span className="sec-count">{terms.length} 条</span>
+										</div>
+										<div className="sec-body">
+											<dl className="terms">
+												{terms.map((t, i) => (
+													<div key={i} className="term">
+														<dt>{t.term}</dt>
+														<dd>{t.definition}</dd>
+													</div>
+												))}
+											</dl>
+										</div>
+									</section>
+								)}
+
+								<section className="sec-card rise rise-3">
+									<div className="sec-head">
+										<span className="sec-no">{secNo("keyPoints")}</span>
+										<h2>总体要点</h2>
+										<span className="sec-count">{result.keyPoints.length} 条</span>
+									</div>
+									<div className="sec-body">
 									<ul className="kp-list">
 										{result.keyPoints.map((kp, i) => (
-											<li key={i} className={`kp${kp.anchored === false ? " unanchored" : ""}`}>
+											<li key={i} className="kp">
 												<div className="kp-point">{kp.point}</div>
 												<div className="kp-quote">
 													「{kp.quote}」
@@ -598,19 +982,32 @@ export default function App() {
 															<Pos start={kp.start}>{fmtPos(kp.start)}</Pos>
 														</>
 													)}
-													{kp.anchored === false && " · 未能在原文中定位"}
+													{kp.anchored === false && (
+															<span
+																className="anchor-chip"
+																title="这句引文没能在原文/转写稿里对上——观点仍是从内容里提的,但出处待核,引用前自己核一眼"
+															>
+																未锚定
+															</span>
+														)}
 												</div>
 												<NoteSpot target={`kp:${i}`} />
 											</li>
 										))}
 									</ul>
-								</div>
+									</div>
+								</section>
 
-								<div className="rise">
-									<h3 className="section-label">
-										分段地图
-										{lowAmount > 0 && <span className="note">{lowLabel}</span>}
-									</h3>
+								{!notes && (
+								<section className="sec-card rise rise-4">
+									<div className="sec-head">
+										<span className="sec-no">{secNo("map")}</span>
+										<h2>分段地图</h2>
+										<span className="sec-count">
+											{result.chapters.length} 段{lowAmount > 0 && ` · ${lowLabel}`}
+										</span>
+									</div>
+									<div className="sec-body">
 									<ol className="map">
 										{result.chapters.map((ch, i) => (
 											<li key={i} className={ch.value === "low" ? "low" : ""}>
@@ -627,11 +1024,14 @@ export default function App() {
 											</li>
 										))}
 									</ol>
-								</div>
+									</div>
+								</section>
+								)}
 
-								<p className="meta-line rise">
+								<p className="meta-line rise rise-4">
 									提取路径:{PATH_LABEL[result.meta.path] ?? result.meta.path}
 									{result.meta.truncated && " · 内容过长已截断处理"}
+									{!notes && !isText && " · 这份结果没有详细笔记(旧版),重新生成可得"}
 									{loaded?.url && !isText && (
 										<>
 											{" · "}
@@ -640,17 +1040,49 @@ export default function App() {
 											</a>
 										</>
 									)}
+									{/* 重新生成:001 简报页同款的一行灰字,不是第二枚章(一页只有一枚)。
+									    只对有链接的内容开放——粘贴正文没有可回源的原文。 */}
+									{loaded?.url && loaded.contentKey && !busy && (
+										<>
+											{" · "}
+											<button
+												type="button"
+												className="regen"
+												title="重算这条,花一次今日额度;你的想法不会丢"
+												onClick={() => void submit({ regenUrl: loaded.url })}
+											>
+												重新生成 ↻
+											</button>
+										</>
+									)}
 								</p>
 
 								{canNote && (
-									<div className="rise">
-										<h3 className="section-label">我的想法</h3>
-										<NoteSpot target="general" always />
-									</div>
+									<section className="sec-card rise rise-4">
+										<div className="sec-head">
+											<span className="sec-no">{secNo("mine")}</span>
+											<h2>我的想法</h2>
+										</div>
+										<div className="sec-body">
+											{/* 版本对不上的定点想法沉到这里:标注原锚点,内容一字不动 */}
+											{orphanNotes.map((e) => (
+												<div key={e.at} className="note-entry">
+													<span className="note-meta">
+														{fmtDate(e.at)} · 记于上一版结果 · 原挂在「{targetLabel(e.target)}」
+													</span>
+													{e.text}
+													<button type="button" className="note-del" aria-label="删除这条想法" onClick={() => void delNote(e.at)}>
+														×
+													</button>
+												</div>
+											))}
+											<NoteSpot target="general" always />
+										</div>
+									</section>
 								)}
 
 								{canJumpText && (
-									<div className="rise">
+									<div className="rise rise-4">
 										<button type="button" className="source-toggle" onClick={() => setShowSource(!showSource)}>
 											{showSource ? "收起原文" : "展开原文(点要点或分段的段号可直接定位)"}
 										</button>
@@ -666,6 +1098,16 @@ export default function App() {
 										)}
 									</div>
 								)}
+
+								{/* 终点戳(001「今日到此为止」同款):这一条到此读完 */}
+								<footer className="endnote rise rise-4">
+									<div className="end-stamp">
+										替你
+										<br />
+										看完
+									</div>
+									<p className="endnote-meta">nanisle 每周一个产品 · 002 长视频总结</p>
+								</footer>
 							</section>
 						)}
 					</>

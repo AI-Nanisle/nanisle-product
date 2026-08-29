@@ -39,7 +39,67 @@ export interface TaskRecord {
 	error?: string;
 	createdAt: number;
 	updatedAt: number;
+	/** 谁发起的:用户手动提交(缺省)/ 订阅每日挑选(完成时发邮件,docs/05 §3.5)。 */
+	origin?: "user" | "subscription";
 }
+
+// ---------- 订阅模式(docs/05 §3.2;键约定见下) ----------
+//   SUBSCRIBERS / <email>                  有订阅的用户索引(cron 枚举用;最后一个订阅删掉时一并删)
+//   USER#<email> / SUB#<platform>:<id>     一条订阅
+//   USER#<email> / CAND#<date>             当天候选(消费者回传,ttl 2 天)
+//   USER#<email> / SUBRUN#<date>           当天挑选结果与理由(运营排查,ttl 30 天)
+//   USER#<email> / PREFS                   邮件开关等偏好
+
+export type SubPlatform = "youtube" | "bilibili" | "podcast";
+
+export interface SubRecord {
+	platform: SubPlatform;
+	/** YouTube channelId / B站 mid / 播客 feed URL。 */
+	id: string;
+	title?: string;
+	addedAt: number;
+	/** 上次被挑中的时间(频道轮转用)。 */
+	lastPickedAt?: number;
+}
+
+export const MAX_SUBSCRIPTIONS = 10;
+
+export interface CandidateRecord {
+	platform: SubPlatform;
+	/** 订阅键 `${platform}:${subId}`,轮转按它归属。 */
+	subKey: string;
+	id: string;
+	url: string;
+	title: string;
+	publishedAt: number;
+	durationSec?: number;
+	excluded?: string;
+	channelTitle?: string;
+}
+
+export interface CandidatesRecord {
+	date: string;
+	items: CandidateRecord[];
+	/** 消费者报告的每个订阅的抓取结果(成功条数或错误)。 */
+	sources: Record<string, string>;
+	at: number;
+}
+
+export interface SubRunRecord {
+	date: string;
+	/** 挑中的候选;null = 没挑(reason 说明)。 */
+	picked: CandidateRecord | null;
+	reason: string;
+	taskId?: string;
+	contentKey?: string;
+	at: number;
+}
+
+export interface UserPrefs {
+	emailPush?: boolean;
+}
+
+export const subKeyOf = (platform: string, id: string): string => `${platform}:${id}`;
 
 export interface ReadRecord {
 	contentKey: string;
@@ -64,6 +124,12 @@ export interface NoteEntry {
 	at: number;
 	target: string;
 	text: string;
+	/**
+	 * 写想法时所见结果的版本戳(= 内容缓存的 cachedAt)。重新生成后要点/分段
+	 * 的序号会指向另一段内容,版本对不上的定点想法沉到「我的想法」兜底展示,
+	 * 绝不挂错位。没有此字段的存量条目按「对不上」处理——保守但诚实。
+	 */
+	resultAt?: number;
 }
 
 export interface NoteRecord {
@@ -105,6 +171,19 @@ export interface Store {
 	listReadRecords(email: string): Promise<ReadRecord[]>;
 	getNote(email: string, contentKey: string): Promise<NoteRecord | null>;
 	putNote(email: string, note: NoteRecord): Promise<void>;
+
+	// 订阅模式(docs/05 §3)
+	listSubscriptions(email: string): Promise<SubRecord[]>;
+	putSubscription(email: string, sub: SubRecord): Promise<void>;
+	deleteSubscription(email: string, platform: SubPlatform, id: string): Promise<void>;
+	/** 有订阅的用户(cron 枚举)。 */
+	listSubscribers(): Promise<string[]>;
+	putCandidates(email: string, rec: CandidatesRecord): Promise<void>;
+	getCandidates(email: string, date: string): Promise<CandidatesRecord | null>;
+	putSubRun(email: string, run: SubRunRecord): Promise<void>;
+	getSubRun(email: string, date: string): Promise<SubRunRecord | null>;
+	getPrefs(email: string): Promise<UserPrefs>;
+	putPrefs(email: string, prefs: UserPrefs): Promise<void>;
 }
 
 export interface DdbConfig {
@@ -200,6 +279,7 @@ export class DdbStore implements Store {
 				status: { S: t.status },
 				step: { S: t.step },
 				...(t.path ? { path: { S: t.path } } : {}),
+				...(t.origin ? { origin: { S: t.origin } } : {}),
 				createdAt: { N: String(t.createdAt) },
 				updatedAt: { N: String(t.updatedAt) },
 				ttl: { N: String(Math.floor(t.createdAt / 1000) + 24 * 3600) },
@@ -225,6 +305,7 @@ export class DdbStore implements Store {
 			error: it.error?.S,
 			createdAt: Number(it.createdAt?.N ?? 0),
 			updatedAt: Number(it.updatedAt?.N ?? 0),
+			...(it.origin?.S === "subscription" ? { origin: "subscription" as const } : {}),
 		};
 	}
 
@@ -338,6 +419,127 @@ export class DdbStore implements Store {
 			},
 		});
 	}
+
+	// ---- 订阅模式 ----
+
+	private userPk(email: string): { S: string } {
+		return { S: `USER#${email.toLowerCase()}` };
+	}
+
+	async listSubscriptions(email: string): Promise<SubRecord[]> {
+		const out = await this.call<{ Items?: Record<string, { S?: string; N?: string }>[] }>("Query", {
+			KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+			ExpressionAttributeValues: { ":pk": this.userPk(email), ":pre": { S: "SUB#" } },
+			Limit: MAX_SUBSCRIPTIONS * 2,
+		});
+		return (out.Items ?? [])
+			.map((it) => ({
+				platform: (it.platform?.S ?? "podcast") as SubPlatform,
+				id: it.subId?.S ?? "",
+				title: it.title?.S,
+				addedAt: Number(it.addedAt?.N ?? 0),
+				...(it.lastPickedAt?.N ? { lastPickedAt: Number(it.lastPickedAt.N) } : {}),
+			}))
+			.filter((s) => s.id)
+			.sort((a, b) => a.addedAt - b.addedAt);
+	}
+
+	async putSubscription(email: string, sub: SubRecord): Promise<void> {
+		await this.call("PutItem", {
+			Item: {
+				PK: this.userPk(email),
+				SK: { S: `SUB#${subKeyOf(sub.platform, sub.id)}` },
+				platform: { S: sub.platform },
+				subId: { S: sub.id },
+				...(sub.title ? { title: { S: sub.title } } : {}),
+				addedAt: { N: String(sub.addedAt) },
+				...(sub.lastPickedAt ? { lastPickedAt: { N: String(sub.lastPickedAt) } } : {}),
+			},
+		});
+		// 订阅者索引:cron 靠它枚举;幂等 Put
+		await this.call("PutItem", {
+			Item: { PK: { S: "SUBSCRIBERS" }, SK: { S: email.toLowerCase() }, at: { N: String(Date.now()) } },
+		});
+	}
+
+	async deleteSubscription(email: string, platform: SubPlatform, id: string): Promise<void> {
+		await this.call("DeleteItem", {
+			Key: { PK: this.userPk(email), SK: { S: `SUB#${subKeyOf(platform, id)}` } },
+		});
+		if ((await this.listSubscriptions(email)).length === 0) {
+			await this.call("DeleteItem", { Key: { PK: { S: "SUBSCRIBERS" }, SK: { S: email.toLowerCase() } } });
+		}
+	}
+
+	async listSubscribers(): Promise<string[]> {
+		const out = await this.call<{ Items?: Record<string, { S?: string }>[] }>("Query", {
+			KeyConditionExpression: "PK = :pk",
+			ExpressionAttributeValues: { ":pk": { S: "SUBSCRIBERS" } },
+			Limit: 500,
+		});
+		return (out.Items ?? []).map((it) => it.SK?.S ?? "").filter(Boolean);
+	}
+
+	async putCandidates(email: string, rec: CandidatesRecord): Promise<void> {
+		await this.call("PutItem", {
+			Item: {
+				PK: this.userPk(email),
+				SK: { S: `CAND#${rec.date}` },
+				body: { S: JSON.stringify(rec) },
+				ttl: { N: String(Math.floor(Date.now() / 1000) + 2 * 24 * 3600) },
+			},
+		});
+	}
+
+	async getCandidates(email: string, date: string): Promise<CandidatesRecord | null> {
+		const out = await this.call<{ Item?: { body?: { S?: string } } }>("GetItem", {
+			Key: { PK: this.userPk(email), SK: { S: `CAND#${date}` } },
+		});
+		try {
+			return out.Item?.body?.S ? (JSON.parse(out.Item.body.S) as CandidatesRecord) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	async putSubRun(email: string, run: SubRunRecord): Promise<void> {
+		await this.call("PutItem", {
+			Item: {
+				PK: this.userPk(email),
+				SK: { S: `SUBRUN#${run.date}` },
+				body: { S: JSON.stringify(run) },
+				ttl: { N: String(Math.floor(Date.now() / 1000) + 30 * 24 * 3600) },
+			},
+		});
+	}
+
+	async getSubRun(email: string, date: string): Promise<SubRunRecord | null> {
+		const out = await this.call<{ Item?: { body?: { S?: string } } }>("GetItem", {
+			Key: { PK: this.userPk(email), SK: { S: `SUBRUN#${date}` } },
+		});
+		try {
+			return out.Item?.body?.S ? (JSON.parse(out.Item.body.S) as SubRunRecord) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	async getPrefs(email: string): Promise<UserPrefs> {
+		const out = await this.call<{ Item?: { body?: { S?: string } } }>("GetItem", {
+			Key: { PK: this.userPk(email), SK: { S: "PREFS" } },
+		});
+		try {
+			return out.Item?.body?.S ? (JSON.parse(out.Item.body.S) as UserPrefs) : {};
+		} catch {
+			return {};
+		}
+	}
+
+	async putPrefs(email: string, prefs: UserPrefs): Promise<void> {
+		await this.call("PutItem", {
+			Item: { PK: this.userPk(email), SK: { S: "PREFS" }, body: { S: JSON.stringify(prefs) } },
+		});
+	}
 }
 
 /** call() 内部用:条件写失败(到上限 / 任务不存在)与真故障分流的标记。 */
@@ -412,15 +614,65 @@ export class MemoryStore implements Store {
 	async putNote(email: string, note: NoteRecord): Promise<void> {
 		this.notes.set(`${email}:${note.contentKey}`, { ...note, entries: [...note.entries] });
 	}
+
+	// ---- 订阅模式 ----
+	private subs = new Map<string, SubRecord>();
+	private cands = new Map<string, CandidatesRecord>();
+	private runs = new Map<string, SubRunRecord>();
+	private prefs = new Map<string, UserPrefs>();
+
+	async listSubscriptions(email: string): Promise<SubRecord[]> {
+		return [...this.subs.entries()]
+			.filter(([k]) => k.startsWith(`${email}:`))
+			.map(([, v]) => ({ ...v }))
+			.sort((a, b) => a.addedAt - b.addedAt);
+	}
+
+	async putSubscription(email: string, sub: SubRecord): Promise<void> {
+		this.subs.set(`${email}:${subKeyOf(sub.platform, sub.id)}`, { ...sub });
+	}
+
+	async deleteSubscription(email: string, platform: SubPlatform, id: string): Promise<void> {
+		this.subs.delete(`${email}:${subKeyOf(platform, id)}`);
+	}
+
+	async listSubscribers(): Promise<string[]> {
+		return [...new Set([...this.subs.keys()].map((k) => k.slice(0, k.indexOf(":"))))];
+	}
+
+	async putCandidates(email: string, rec: CandidatesRecord): Promise<void> {
+		this.cands.set(`${email}:${rec.date}`, rec);
+	}
+
+	async getCandidates(email: string, date: string): Promise<CandidatesRecord | null> {
+		return this.cands.get(`${email}:${date}`) ?? null;
+	}
+
+	async putSubRun(email: string, run: SubRunRecord): Promise<void> {
+		this.runs.set(`${email}:${run.date}`, run);
+	}
+
+	async getSubRun(email: string, date: string): Promise<SubRunRecord | null> {
+		return this.runs.get(`${email}:${date}`) ?? null;
+	}
+
+	async getPrefs(email: string): Promise<UserPrefs> {
+		return { ...(this.prefs.get(email) ?? {}) };
+	}
+
+	async putPrefs(email: string, prefs: UserPrefs): Promise<void> {
+		this.prefs.set(email, { ...prefs });
+	}
 }
 
 /**
  * 结果缓存的 KV 键(docs/02 T6:content:<版本>:<platform>:<id>,60 天)。
  * 版本号进键:schema 有破坏性升级(如 2026-08-26 新增导读)时 bump 一位,
  * 老缓存自然被绕开并随 TTL 消亡——比迁移或运行时兼容分支都便宜。
+ * v3(2026-08-28):详细笔记(docs/05)——老结果没有 notes,重开时提示重算。
  */
 export function contentCacheKey(contentKey: string): string {
-	return `content:v2:${contentKey}`;
+	return `content:v3:${contentKey}`;
 }
 
 export const CONTENT_CACHE_TTL_S = 60 * 24 * 3600;

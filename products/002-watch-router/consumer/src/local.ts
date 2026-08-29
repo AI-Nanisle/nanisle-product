@@ -7,6 +7,9 @@
 // 可选 GROQ_API_KEY、PROXY_URL。用法见 ../README.md。
 
 import { AwsClient } from "aws4fetch";
+import { fastVariant, ownerRouteFromEnv } from "../../src/shared/ai";
+import { processDiscover } from "./discover";
+import type { DiscoverMessage } from "./discover";
 import { processTask } from "./pipeline";
 import type { PipelineConfig, TaskMessage } from "./pipeline";
 
@@ -32,17 +35,21 @@ async function sqs(params: Record<string, string>): Promise<string> {
 	return text;
 }
 
+const ai = {
+	provider: process.env.AI_PROVIDER ?? "deepseek",
+	model: process.env.AI_MODEL ?? "deepseek-v4-pro",
+	// 16384 对齐 Worker 侧:V4 thinking 也占输出预算,编辑产出放开长度后 8192 会顶到
+	maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "16384",
+	deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+};
 const cfg: PipelineConfig = {
 	workerBase: (process.env.WORKER_BASE_URL ?? "").replace(/\/+$/, ""),
 	consumerToken: process.env.CONSUMER_TOKEN ?? "",
-	ai: {
-		provider: process.env.AI_PROVIDER ?? "deepseek",
-		model: process.env.AI_MODEL ?? "deepseek-v4-pro",
-		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "8192",
-		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
-	},
+	ai,
+	fastAi: fastVariant(ai, { provider: process.env.FAST_AI_PROVIDER, model: process.env.FAST_AI_MODEL }),
 	groqApiKey: process.env.GROQ_API_KEY,
 	proxyUrl: process.env.PROXY_URL,
+	ownerRoute: ownerRouteFromEnv(process.env),
 };
 if (!cfg.workerBase || !cfg.consumerToken) throw new Error("WORKER_BASE_URL / CONSUMER_TOKEN not set");
 
@@ -66,9 +73,11 @@ for (;;) {
 		.replaceAll("&gt;", ">")
 		.replaceAll("&amp;", "&");
 	try {
-		const msg = JSON.parse(decoded) as TaskMessage;
-		if (msg.taskId && msg.url) {
-			await processTask(msg, cfg);
+		const msg = JSON.parse(decoded) as TaskMessage | DiscoverMessage;
+		if ((msg as DiscoverMessage).kind === "discover") {
+			await processDiscover(msg as DiscoverMessage, cfg);
+		} else if ((msg as TaskMessage).taskId && (msg as TaskMessage).url) {
+			await processTask(msg as TaskMessage, cfg);
 		} else {
 			console.log("skip non-task message:", decoded.slice(0, 120));
 		}

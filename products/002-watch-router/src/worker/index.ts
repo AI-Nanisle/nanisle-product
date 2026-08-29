@@ -8,7 +8,8 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { resolveProvider } from "../shared/ai";
 import { anchorKeyPoints } from "../shared/anchor";
 import { identifyText, identifyUrl } from "../shared/content-id";
-import { EditError, editContent } from "../shared/editor";
+import { EditError, editContentWithSource } from "../shared/editor";
+import { buildNotes } from "../shared/notes";
 import { mockWatchResult, validateWatchResult } from "../shared/schema";
 import type { ExtractPath } from "../shared/schema";
 import { extractArticle, textToParagraphs } from "./extract";
@@ -21,7 +22,7 @@ import {
 	contentCacheKey,
 } from "../shared/store";
 import type { CachedContent, TaskRecord, TaskStep } from "../shared/store";
-import { aiConfig, awsConfigured, fastAiConfig } from "./env";
+import { aiConfig, aiConfigFor, awsConfigured, fastAiConfigFor } from "./env";
 import type { AppEnv } from "./env";
 import { computeTracked, mergeTracked } from "./interop";
 import {
@@ -36,11 +37,16 @@ import {
 } from "./guard";
 import type { Guarded } from "./guard";
 import { makeStore } from "./store";
+import { notifySubscription, runScheduled, subsApp } from "./subs";
 import { sendTask } from "./sqs";
 import { signToken, verifyToken } from "./sso";
 
 const app = new Hono<Guarded>();
+// 订阅模式的路由(/api/subs*、/api/queue/candidates、/api/email/unsub)收在 subs.ts
+app.route("/", subsApp);
 const PRODUCT_MOUNT = "/products/watch-router/";
+/** 文章正文达到这个字数才做逐章详细笔记(docs/05 §2.4)。 */
+const NOTES_MIN_CHARS = 3000;
 
 /** 配额按天归位的「今天」。跟 001 一样用美东——用户在美东,半夜换日别错时区。 */
 function quotaDate(): string {
@@ -63,7 +69,7 @@ async function withTracked(
 	try {
 		const rec = await store.getReadRecord(email, contentKey);
 		if (rec?.tracked) return mergeTracked(result, rec.tracked);
-		const tracked = await computeTracked(env, fastAiConfig(env), email, result);
+		const tracked = await computeTracked(env, fastAiConfigFor(env, email), email, result);
 		await store.putReadRecord(email, {
 			contentKey,
 			url,
@@ -166,7 +172,7 @@ app.get("/auth/logout", (c) => {
 // ---------- 收单与分流(W10) ----------
 
 app.post("/api/submit", userAiGuard, async (c) => {
-	let body: { url?: unknown; text?: unknown };
+	let body: { url?: unknown; text?: unknown; force?: unknown };
 	try {
 		body = await c.req.json();
 	} catch {
@@ -174,6 +180,8 @@ app.post("/api/submit", userAiGuard, async (c) => {
 	}
 	const url = typeof body.url === "string" ? body.url.trim() : "";
 	const text = typeof body.text === "string" ? body.text.trim() : "";
+	// 重新生成:跳过缓存短路,整条管线重跑。照常先占额度——额度就是防滥用的闸。
+	const force = body.force === true;
 	if (!url && !text) {
 		return c.json({ error: "给我一个链接,或直接把正文粘进来。" }, 400);
 	}
@@ -190,7 +198,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 
 	// 缓存命中:两条车道都短路,不占配额(内容级结果全站共享,docs/02 T6);
 	// 新用户只花 I3 高亮小调用的钱——T4 两次调用拆分的意义所在
-	const cached = await c.env.WATCH.get<CachedContent>(contentCacheKey(cid.key), "json");
+	const cached = force ? null : await c.env.WATCH.get<CachedContent>(contentCacheKey(cid.key), "json");
 	if (cached) {
 		const merged = await withTracked(c.env, store, email, cid.key, url || cached.url || "", cached.result);
 		return c.json({
@@ -198,6 +206,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 			lane: cid.lane,
 			contentKey: cid.key,
 			result: merged,
+			resultAt: cached.cachedAt,
 			...(cached.url ? { url: cached.url } : {}),
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		});
@@ -213,7 +222,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 		const enc = new TextEncoder();
 		const send = (obj: unknown) => writer.write(enc.encode(`data: ${JSON.stringify(obj)}\n\n`)).catch(() => {});
 		const env = c.env;
-		const ai = aiConfig(env);
+		const ai = aiConfigFor(env, email);
 		const isMock = resolveProvider(ai) === "mock";
 
 		c.executionCtx.waitUntil(
@@ -260,8 +269,9 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					let chars = 0;
 					let lastPush = 0;
 					let result;
+					let edited;
 					try {
-						result = await editContent(ai, {
+						edited = await editContentWithSource(ai, {
 							title,
 							paragraphs,
 							path,
@@ -281,8 +291,23 @@ app.post("/api/submit", userAiGuard, async (c) => {
 						}
 						throw err;
 					}
-					result = anchorKeyPoints(result, paragraphs.join("\n"));
+					result = anchorKeyPoints(edited.result, paragraphs.join("\n"));
+					// 详细笔记(docs/05 §2.4):只对长文启用——短文的笔记会比原文还长。
+					// 逐章调用之间每章推一个 phase 事件,CF 代理的 100 秒无字节线靠它 + ping 兜底
+					const totalChars = edited.paragraphs.reduce((s, p) => s + p.length, 0);
+					if (totalChars >= NOTES_MIN_CHARS) {
+						await send({ type: "phase", phase: "notes", done: 0, total: result.chapters.length });
+						result = await buildNotes(ai, fastAiConfigFor(env, email), {
+							kind: "text",
+							source: edited.source,
+							result,
+							paragraphs: edited.paragraphs,
+							onChapter: (done, total) => void send({ type: "phase", phase: "notes", done, total }),
+						});
+					}
 
+					// 版本戳与缓存的 cachedAt 同值:想法按它对版本(mock 不缓存,戳只陪跑)
+					const cachedAt = Date.now();
 					// mock 结果不进缓存——占着 60 天的缓存位污染真结果
 					if (!isMock) {
 						await env.WATCH.put(
@@ -290,7 +315,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 							JSON.stringify({
 								result,
 								contentKey: cid.key,
-								cachedAt: Date.now(),
+								cachedAt,
 								...(url ? { url } : {}),
 								paragraphs,
 							} satisfies CachedContent),
@@ -299,7 +324,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					}
 					// I3:交付前做用户级高亮(withTracked 内部顺带落处理记录)
 					const merged = await withTracked(env, store, email, cid.key, url || "", result);
-					await send({ type: "result", cached: false, lane: "fast", contentKey: cid.key, result: merged, paragraphs, ...(url ? { url } : {}) });
+					await send({ type: "result", cached: false, lane: "fast", contentKey: cid.key, result: merged, resultAt: cachedAt, paragraphs, ...(url ? { url } : {}) });
 				} catch (err) {
 					console.error("fast lane failed", err);
 					await send({ type: "error", error: "处理失败,请稍后重试。" });
@@ -340,6 +365,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 	if (awsConfigured(c.env) && c.env.QUEUE_URL) {
 		await sendTask(c.env, {
 			taskId: task.id,
+			email: task.email,
 			url: task.url,
 			contentKey: task.contentKey,
 			platform: task.platform,
@@ -398,6 +424,7 @@ app.get("/api/result/:key", userGuard, async (c) => {
 	return c.json({
 		contentKey: key,
 		result: merged,
+		resultAt: cached.cachedAt,
 		url: cached.url ?? rec.url,
 		...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		...(note ? { note } : {}),
@@ -413,10 +440,14 @@ app.get("/api/note/:key", userGuard, async (c) => {
 const NOTE_TARGET_RE = /^(overview|general|kp:\d{1,3}|ch:\d{1,3})$/;
 
 app.post("/api/note", userGuard, async (c) => {
-	const body = await c.req.json<{ contentKey?: unknown; target?: unknown; text?: unknown }>().catch(() => null);
+	const body = await c.req
+		.json<{ contentKey?: unknown; target?: unknown; text?: unknown; resultAt?: unknown }>()
+		.catch(() => null);
 	const key = typeof body?.contentKey === "string" ? body.contentKey : "";
 	const target = typeof body?.target === "string" ? body.target : "";
 	const text = typeof body?.text === "string" ? body.text.trim() : "";
+	// 版本戳:客户端所见结果的 cachedAt;缺了也收(旧客户端),按存量规则沉底
+	const resultAt = typeof body?.resultAt === "number" && Number.isFinite(body.resultAt) ? body.resultAt : undefined;
 	if (!key || !NOTE_TARGET_RE.test(target) || !text) {
 		return c.json({ error: "need { contentKey, target, text }" }, 400);
 	}
@@ -436,7 +467,7 @@ app.post("/api/note", userGuard, async (c) => {
 	if (note.entries.length >= MAX_NOTE_ENTRIES) {
 		return c.json({ error: `这条内容的想法已满 ${MAX_NOTE_ENTRIES} 条。` }, 409);
 	}
-	const entry = { at: Date.now(), target, text };
+	const entry = { at: Date.now(), target, text, ...(resultAt !== undefined ? { resultAt } : {}) };
 	note.entries.push(entry);
 	note.updatedAt = entry.at;
 	await store.putNote(email, note);
@@ -490,6 +521,7 @@ app.get("/api/task/:id", userGuard, async (c) => {
 			url: task.url,
 			contentKey: task.contentKey,
 			result: merged,
+			resultAt: cached.cachedAt,
 			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
 		});
 	}
@@ -573,6 +605,10 @@ app.post("/api/queue/complete", async (c) => {
 		at: Date.now(),
 	});
 	await store.updateTask(body.taskId, { status: "done", step: "done", path });
+	// 订阅挑来的任务:结果落稳后发门铃邮件(docs/05 §3.5);失败只记日志,不影响上面已落的库
+	if (task.origin === "subscription") {
+		c.executionCtx.waitUntil(notifySubscription(c.env, store, task.email, task.contentKey, result));
+	}
 	return c.json({ ok: true });
 });
 
@@ -603,5 +639,10 @@ function unmountRequest(request: Request): Request {
 export default {
 	fetch(request, env, ctx) {
 		return app.fetch(unmountRequest(request), env, ctx);
+	},
+	// 订阅模式的两条 cron(wrangler.jsonc triggers;本地 `wrangler dev --test-scheduled` 后
+	// 打 /__scheduled?cron=0+0+*+*+* 触发)。分流逻辑在 subs.ts runScheduled。
+	scheduled(event, env, ctx) {
+		ctx.waitUntil(runScheduled(env, event.cron));
 	},
 } satisfies ExportedHandler<AppEnv>;

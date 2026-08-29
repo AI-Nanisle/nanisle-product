@@ -8,6 +8,10 @@
 		"enabled": true
 	},
 	"upload_source_maps": true,
+	// 订阅模式(docs/05 §3.4):00:00 UTC = 20:00 美东投发现消息(DeepSeek 非高峰、
+	// 避开 YouTube RSS 09–12 UTC 的 404 高发段);01:30 UTC 兜底挑选。两条 cron
+	// 的字符串是 src/worker/subs.ts 里 DISCOVER_CRON / SWEEP_CRON 的分流依据。
+	"triggers": { "crons": ["0 0 * * *", "30 1 * * *"] },
 	"assets": {
 		"directory": "./dist/client",
 		"binding": "ASSETS",
@@ -34,9 +38,13 @@
 	//   ACCESS_CODE            admin credential (x-access-code)
 	//   CONSUMER_TOKEN         auth for the slow-lane consumer's /api/queue/* callbacks
 	//   JINA_KEY               r.jina.ai extraction fallback (fast lane, docs/02 T2)
+	//   EMAIL_UNSUB_SECRET     订阅邮件退订 token 的 HMAC 密钥(docs/05 §3.5);不设 = 不发邮件
 	//   AWS_ACCESS_KEY_ID      minimal-permission IAM user `nanisle-watch-router-worker`:
 	//   AWS_SECRET_ACCESS_KEY    DynamoDB table access + SQS SendMessage
 	//   DEEPSEEK_API_KEY       only for AI_PROVIDER=deepseek (the production default)
+	//   OWNER_AI_EMAILS / OWNER_AI_PROVIDER / OWNER_AI_MODEL / OWNER_FAST_AI_MODEL /
+	//   OWNER_AI_GATEWAY_URL / OWNER_AI_GATEWAY_KEY
+	//                          站长专线(主仓 backend/docs/01),全部可选;不设 = 没有专线
 	"vars": {
 		// 生产默认 deepseek;没配 DEEPSEEK_API_KEY 时代码自动落回 mock(fork
 		// 零配置照样跑通,误配的实例在 /api/health 里看得见)
@@ -49,6 +57,8 @@
 		// (finish=length,线上实测;Lambda 侧同值)
 		"AI_MAX_OUTPUT_TOKENS": "16384",
 		"APP_URL": "https://nanisle.com/products/watch-router",
+		// 订阅日报发件地址(docs/05 §3.5)。域名身份 nanisle.com 在 001 的 SES 里已验证,同账号直接用
+		"EMAIL_FROM": "watch@nanisle.com",
 		"NANISLE_URL": "https://nanisle.com",
 		// AWS side (NanisleWatchRouter stack in the main repo's infra/):
 		// unset AWS credentials => in-memory fallback store (dev/fork).

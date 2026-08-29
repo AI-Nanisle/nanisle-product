@@ -12,6 +12,8 @@ A daily brief (product 001) answers "is this link worth clicking". But when the 
 
 - **One inbox for everything**: article URLs and pasted text get processed in seconds (streamed as they generate); videos and podcasts go through an async pipeline with live progress.
 - **Three outputs per item**: a one-line verdict (worth it / partial / skip), key points — each pinned to a verbatim quote from the source, and a chapter map covering the whole timeline with low-value segments (ads, filler) greyed out.
+- **Detailed notes, chapter by chapter** (docs/05): after the outline call, every chapter is written out separately (the full transcript stays as a shared prompt prefix so DeepSeek's context cache pays for it), assembled deterministically — no "summarize the summaries" pass, which is where detail gets lost. A coverage check flags any 5-minute window without an anchored point and fills it. ~4–8K Chinese characters for a one-hour video, with a glossary.
+- **Subscriptions**: subscribe to YouTube channels, Bilibili uploaders and podcast feeds (max 10). Every night the consumer discovers new items (YouTube `UULF` RSS, Bilibili's app API with the public appkey signature, podcast RSS), the Worker picks **one** per user (>=8 min, <=48h old, unseen, rotating across channels), runs it through the slow lane and sends a one-line "worth it / skip + open" email (no summary in the mail — the notes live on the site).
 - **Every quote is verified**: the model must cite the source verbatim; the worker string-matches each quote against the extracted text. Quotes that don't match are flagged "couldn't locate in source" instead of silently trusted.
 - **Jump back precisely**: YouTube/Bilibili chapters link with `t=` timestamps; article chapters scroll to the exact paragraph.
 - **Cached per content**: the second person (or the second URL form) of the same video gets the result instantly, free.
@@ -27,6 +29,9 @@ Cloudflare Worker (Hono, src/worker/)
    │             DeepSeek call → quote anchoring → KV content cache
    └─ slow lane: DynamoDB task + SQS message ──► Lambda consumer (yt-dlp /
                  whisper, container image) ──► /api/queue/* callbacks ──► KV
+Cron (00:00 / 01:30 UTC) ─► {kind: discover} per subscriber ──► Lambda fetches
+   feeds via the residential proxy ──► /api/queue/candidates ──► Worker picks one
+   ──► slow lane ──► on complete: SES email (docs/05 §3)
 ```
 
 - All AI calls go through the seam in `src/shared/ai.ts` (mock / deepseek / anthropic / gateway). No credentials exist in this repo.
@@ -64,7 +69,7 @@ npm run deploy
 npx cdk deploy NanisleWatchRouter --profile <your-profile>
 ```
 
-Worker secrets (`wrangler secret put`, never in files): `NANISLE_SSO_SECRET`, `ACCESS_CODE`, `CONSUMER_TOKEN`, `JINA_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DEEPSEEK_API_KEY`.
+Worker secrets (`wrangler secret put`, never in files): `NANISLE_SSO_SECRET`, `ACCESS_CODE`, `CONSUMER_TOKEN`, `JINA_KEY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `DEEPSEEK_API_KEY`, `EMAIL_UNSUB_SECRET` (subscription emails; the IAM user needs `ses:SendEmail` — in the CDK stack).
 
 ## Environment variables
 
@@ -79,6 +84,7 @@ Worker secrets (`wrangler secret put`, never in files): `NANISLE_SSO_SECRET`, `A
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | slow lane + quotas | secret; minimal-permission IAM user |
 | `DDB_TABLE` / `AWS_REGION` / `QUEUE_URL` | slow lane + quotas | vars, see wrangler.jsonc |
 | `AI_MAX_OUTPUT_TOKENS`, `AI_DISABLED`, `DEV_EMAIL` | no | cost cap / kill switch / local identity |
+| `EMAIL_UNSUB_SECRET` / `EMAIL_FROM` | subscriptions | secret HMAC key for unsubscribe links / sender address (var, default `watch@nanisle.com`); unset = no emails, picks still run |
 
 ## Known constraints (read before opening access)
 

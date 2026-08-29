@@ -46,6 +46,37 @@ export interface WatchChapter {
 	value: "core" | "context" | "low";
 	/** 命中用户追踪器时由用户级调用回填的 tracker key(v1.5 I3)。 */
 	tracked?: string;
+	/**
+	 * 详细笔记的目标字数(docs/05 §2.1:分钟 × 70,下限 200、上限 1200;
+	 * low 段为 0)。由代码按时长算,不让模型定——长度是配额不是任务。
+	 */
+	targetChars?: number;
+}
+
+/**
+ * 详细笔记(docs/05 §2):按章逐段详写、确定性拼装,不经过任何「汇总」调用。
+ * 每章都是一次独立调用的「开头」,绕开长转写一次喂入时中部被略过的位置
+ * 偏置;要点引文只能落在本章窗口的原文里。
+ */
+export interface WatchNoteChapter {
+	/** 对应 chapters[] 下标。 */
+	chapter: number;
+	/** 章标题(详写调用给的,比 gist 更像标题;low 章沿用 gist)。 */
+	title: string;
+	/** 正文段落,3~8 段;low 章为空数组。 */
+	body: string[];
+	/** 本章要点(quote/start/anchored 规则同总体要点)。 */
+	points: WatchKeyPoint[];
+	/** 覆盖检查发现空窗后由补漏调用并入过要点。 */
+	filled?: boolean;
+	/** 这一章的详写调用两次都失败:正文缺席,要点只有补漏给的。 */
+	failed?: boolean;
+}
+
+/** 术语表:大纲调用抽出,喂给每一章的详写,保证全篇同一套名词。 */
+export interface WatchTerm {
+	term: string;
+	definition: string;
 }
 
 export interface WatchMeta {
@@ -53,6 +84,8 @@ export interface WatchMeta {
 	truncated: boolean;
 	/** 内容标题(来自源页面/字幕文件元数据,尽力而为)。 */
 	title?: string;
+	/** 覆盖检查里补漏前的空窗数(每 5 分钟/每 8 段一窗;质量仪表,docs/05 §2.2 第 6 条)。 */
+	coverageGaps?: number;
 }
 
 export interface WatchResult {
@@ -61,7 +94,27 @@ export interface WatchResult {
 	overview?: WatchOverview;
 	keyPoints: WatchKeyPoint[];
 	chapters: WatchChapter[];
+	/** 详细笔记(docs/05);老缓存与短文没有,渲染端按可选处理。 */
+	notes?: WatchNoteChapter[];
+	terms?: WatchTerm[];
 	meta: WatchMeta;
+}
+
+/** 单条要点的结构校验(总体要点与章节要点共用)。坏一条整个列表判坏。 */
+function parseKeyPoints(list: unknown): WatchKeyPoint[] | null {
+	if (!Array.isArray(list)) return null;
+	const out: WatchKeyPoint[] = [];
+	for (const kp of list) {
+		const k = kp as Record<string, unknown>;
+		if (typeof k?.point !== "string" || typeof k?.quote !== "string") return null;
+		out.push({
+			point: k.point,
+			quote: k.quote,
+			...(typeof k.start === "number" ? { start: k.start } : {}),
+			...(typeof k.anchored === "boolean" ? { anchored: k.anchored } : {}),
+		});
+	}
+	return out;
 }
 
 /**
@@ -78,17 +131,8 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 	const meta = o.meta as Record<string, unknown> | undefined;
 	if (!meta || !["subtitle", "whisper", "article", "paste"].includes(meta.path as string)) return null;
 
-	const keyPoints: WatchKeyPoint[] = [];
-	for (const kp of o.keyPoints as unknown[]) {
-		const k = kp as Record<string, unknown>;
-		if (typeof k?.point !== "string" || typeof k?.quote !== "string") return null;
-		keyPoints.push({
-			point: k.point,
-			quote: k.quote,
-			...(typeof k.start === "number" ? { start: k.start } : {}),
-			...(typeof k.anchored === "boolean" ? { anchored: k.anchored } : {}),
-		});
-	}
+	const keyPoints = parseKeyPoints(o.keyPoints);
+	if (!keyPoints) return null;
 	const chapters: WatchChapter[] = [];
 	for (const ch of o.chapters as unknown[]) {
 		const h = ch as Record<string, unknown>;
@@ -100,7 +144,44 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 			gist: h.gist,
 			value: h.value as WatchChapter["value"],
 			...(typeof h.tracked === "string" ? { tracked: h.tracked } : {}),
+			...(typeof h.targetChars === "number" ? { targetChars: h.targetChars } : {}),
 		});
+	}
+	// notes / terms 可选(老结果、短文没有);它们是加法字段,坏了就整个字段
+	// 丢弃,不连累主结果——主结果单独已经是一份完整交付
+	let notes: WatchNoteChapter[] | undefined;
+	if (Array.isArray(o.notes)) {
+		const parsed: WatchNoteChapter[] = [];
+		let ok = true;
+		for (const n of o.notes as unknown[]) {
+			const x = n as Record<string, unknown>;
+			const points = parseKeyPoints(x?.points);
+			if (typeof x?.chapter !== "number" || typeof x?.title !== "string" || !Array.isArray(x?.body) || !points) {
+				ok = false;
+				break;
+			}
+			const body = (x.body as unknown[]).filter((p): p is string => typeof p === "string");
+			parsed.push({
+				chapter: x.chapter,
+				title: x.title,
+				body,
+				points,
+				...(x.filled === true ? { filled: true } : {}),
+				...(x.failed === true ? { failed: true } : {}),
+			});
+		}
+		if (ok) notes = parsed;
+	}
+	let terms: WatchTerm[] | undefined;
+	if (Array.isArray(o.terms)) {
+		const parsed: WatchTerm[] = [];
+		for (const t of o.terms as unknown[]) {
+			const x = t as Record<string, unknown>;
+			if (typeof x?.term === "string" && typeof x?.definition === "string") {
+				parsed.push({ term: x.term, definition: x.definition });
+			}
+		}
+		terms = parsed;
 	}
 	// overview 可选(老结果没有);有就三个字段都得是字符串,坏了整个丢弃
 	let overview: WatchOverview | undefined;
@@ -114,10 +195,13 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 		...(overview ? { overview } : {}),
 		keyPoints,
 		chapters,
+		...(notes ? { notes } : {}),
+		...(terms ? { terms } : {}),
 		meta: {
 			path: meta.path as ExtractPath,
 			truncated: meta.truncated === true,
 			...(typeof meta.title === "string" ? { title: meta.title } : {}),
+			...(typeof meta.coverageGaps === "number" ? { coverageGaps: meta.coverageGaps } : {}),
 		},
 	};
 }
@@ -136,10 +220,40 @@ export function mockWatchResult(path: ExtractPath = "article"): WatchResult {
 			{ point: "[mock] 示例要点:嘉宾团队用 20% 的抽样评测替代全量回归,发布周期从两周缩到三天。", quote: "两周缩到三天", start: 1210, anchored: true },
 		],
 		chapters: [
-			{ start: 0, end: 180, gist: "[mock] 开场与嘉宾介绍", value: "low" },
-			{ start: 180, end: 1500, gist: "[mock] 核心论点:成本下降如何改变竞争格局", value: "core" },
-			{ start: 1500, end: 2400, gist: "[mock] 案例复盘与听众问答", value: "context" },
+			{ start: 0, end: 180, gist: "[mock] 开场与嘉宾介绍", value: "low", targetChars: 0 },
+			{ start: 180, end: 1500, gist: "[mock] 核心论点:成本下降如何改变竞争格局", value: "core", targetChars: 1200 },
+			{ start: 1500, end: 2400, gist: "[mock] 案例复盘与听众问答", value: "context", targetChars: 1050 },
 		],
-		meta: { path, truncated: false, title: "[mock] 示例内容" },
+		notes: [
+			{ chapter: 0, title: "[mock] 开场与嘉宾介绍", body: [], points: [] },
+			{
+				chapter: 1,
+				title: "[mock] 成本一年降十倍之后,竞争转向数据与分发",
+				body: [
+					"[mock] 嘉宾先给出一个数字:同等能力的模型调用成本在过去一年下降了大约十倍。他把这归因于开源模型追平、推理硬件迭代和厂商价格战三件事同时发生,并强调这不是一次性事件而是趋势。",
+					"[mock] 由此推出核心判断:当模型能力不再稀缺,应用层的护城河只剩两样——独有数据和分发渠道。他用自家产品举例,说明同样的模型接到不同的数据上,效果差距比换模型更大。",
+					"[mock] 这一段的反方声音来自主持人:如果算力供给收紧,价格曲线会不会反转?嘉宾承认这是前提假设,但认为两年内看不到。",
+				],
+				points: [
+					{ point: "[mock] 模型成本一年降约十倍,归因于开源追平、硬件迭代与价格战三者叠加。", quote: "成本一年降了十倍", start: 312, anchored: true },
+					{ point: "[mock] 能力不稀缺后,护城河只剩独有数据与分发渠道。", quote: "只剩数据和分发", start: 640, anchored: true },
+				],
+			},
+			{
+				chapter: 2,
+				title: "[mock] 抽样评测替代全量回归:两周缩到三天",
+				body: [
+					"[mock] 案例部分讲团队怎么把发布周期从两周压到三天:放弃全量回归测试,改为按风险分层抽 20% 的用例跑评测,其余靠线上监控兜底。",
+					"[mock] 听众问答集中在「漏测怎么办」。嘉宾的回答是接受一定漏测率,用回滚速度换发布速度,并给出他们的回滚时间中位数。",
+				],
+				points: [
+					{ point: "[mock] 用 20% 抽样评测替代全量回归,发布周期两周缩到三天。", quote: "两周缩到三天", start: 1210, anchored: true },
+				],
+			},
+		],
+		terms: [
+			{ term: "[mock] 抽样评测", definition: "按风险分层只跑一部分测试用例,用发布速度换一定漏测率。" },
+		],
+		meta: { path, truncated: false, title: "[mock] 示例内容", coverageGaps: 0 },
 	};
 }
