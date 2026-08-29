@@ -57,7 +57,25 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<string> {
 /** GET 文本;proxied=true 且配了代理就走代理。 */
 async function get(cfg: DiscoverConfig, url: string, proxied: boolean): Promise<string> {
 	const proxy = proxied && cfg.proxyUrl ? ["--proxy", cfg.proxyUrl] : [];
-	return run("curl", ["-sS", "-L", "--max-time", "30", "-A", BROWSER_UA, ...proxy, url], 40_000);
+	// 播客 feed 的地址是用户给的,所以这里跟 Worker 侧一样要限死:
+	// --proto/--proto-redir 只留 https(不然重定向能拐到 file:// 或 gopher://),
+	// --max-redirs 限跳数,--max-filesize 限体积(默认无上限,一个大文件就能把
+	// Lambda 的内存和 /tmp 吃光)。主机白名单在入库时已经校验过一次。
+	return run(
+		"curl",
+		[
+			"-sS", "-L",
+			"--proto", "=https",
+			"--proto-redir", "=https",
+			"--max-redirs", "3",
+			"--max-filesize", String(2 * 1024 * 1024),
+			"--max-time", "30",
+			"-A", BROWSER_UA,
+			...proxy,
+			url,
+		],
+		40_000,
+	);
 }
 
 /** YouTube RSS 没有时长:对最新的几条用 yt-dlp 补(经代理,约 2 秒一条)。 */

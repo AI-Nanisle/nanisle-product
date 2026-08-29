@@ -19,6 +19,7 @@ import {
 	channelIdFromHtml,
 	parseBiliArchive,
 	parseBiliCard,
+	isBlockedFeedHost,
 	parsePodcastFeed,
 	parseSubscriptionInput,
 	parseYoutubeFeed,
@@ -29,11 +30,11 @@ import type { Candidate } from "../shared/discover";
 import { renderWatchEmail, sendWatchEmail, unsubToken, verifyUnsubToken } from "../shared/email";
 import { mockWatchResult } from "../shared/schema";
 import type { WatchResult } from "../shared/schema";
-import { CONTENT_CACHE_TTL_S, MAX_SUBSCRIPTIONS, contentCacheKey, subKeyOf } from "../shared/store";
+import { CONTENT_CACHE_TTL_S, MAX_SUBSCRIPTIONS, QuotaExceededError, contentCacheKey, readCachedContent, subKeyOf } from "../shared/store";
 import type { CachedContent, CandidateRecord, Store, SubPlatform, SubRecord, TaskRecord } from "../shared/store";
 import { awsConfigured } from "./env";
 import type { AppEnv } from "./env";
-import { appUrl, safeEqual, userGuard } from "./guard";
+import { appUrl, safeEqual, userAiGuard, userGuard } from "./guard";
 import type { Guarded } from "./guard";
 import { sendDiscover, sendTask } from "./sqs";
 import { makeStore } from "./store";
@@ -44,6 +45,66 @@ export function subDate(d = new Date()): string {
 }
 
 const PLATFORM_LABEL: Record<SubPlatform, string> = { youtube: "YouTube", bilibili: "B站", podcast: "播客" };
+
+/**
+ * 半路死掉的占位过了这么久,兜底 cron 可以接手(01:30 的兜底距 00:00 那轮 90 分钟)。
+ */
+const STALE_CLAIM_MS = 20 * 60 * 1000;
+
+// ---------- 抓用户给的 feed(唯一一处会去访问任意地址的地方) ----------
+
+const FEED_MAX_BYTES = 2 * 1024 * 1024;
+const FEED_TIMEOUT_MS = 10_000;
+const FEED_MAX_REDIRECTS = 3;
+
+/** 读响应体,超过上限就中断——`await res.text()` 遇到一个 500MB 的文件会直接撑爆 isolate。 */
+async function readCapped(res: Response, max: number): Promise<string> {
+	const reader = res.body?.getReader();
+	if (!reader) return "";
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.byteLength;
+		if (size > max) {
+			await reader.cancel();
+			throw new Error(`响应超过 ${Math.round(max / 1024)}KB`);
+		}
+		chunks.push(value);
+	}
+	const buf = new Uint8Array(size);
+	let at = 0;
+	for (const c of chunks) {
+		buf.set(c, at);
+		at += c.byteLength;
+	}
+	return new TextDecoder().decode(buf);
+}
+
+/**
+ * 抓一个**用户提供的** URL:限 https、限主机、限大小、限时间,重定向自己跟。
+ * 自己跟重定向是关键——交给 fetch 的话只有第一跳会过主机校验,`https://evil/`
+ * 302 到 `http://169.254.169.254/` 就绕过去了。
+ */
+async function fetchUserFeed(url: string, headers: Record<string, string>): Promise<string> {
+	let current = url;
+	for (let hop = 0; ; hop++) {
+		const u = new URL(current);
+		if (u.protocol !== "https:") throw new Error("只支持 https 地址");
+		if (isBlockedFeedHost(u.hostname)) throw new Error("拒绝内网地址");
+		const res = await fetch(current, { headers, redirect: "manual", signal: AbortSignal.timeout(FEED_TIMEOUT_MS) });
+		if (res.status >= 300 && res.status < 400) {
+			const loc = res.headers.get("location");
+			if (!loc) throw new Error(`${res.status} 没有 location`);
+			if (hop >= FEED_MAX_REDIRECTS) throw new Error("重定向过多");
+			current = new URL(loc, current).toString();
+			continue;
+		}
+		if (!res.ok) throw new Error(`rss ${res.status}`);
+		return await readCapped(res, FEED_MAX_BYTES);
+	}
+}
 
 // ---------- 订阅输入解析(Worker 侧;拿不到的交给用户换一种粘法) ----------
 
@@ -74,9 +135,13 @@ async function resolveSubscription(raw: string): Promise<{ sub: Omit<SubRecord, 
 		const info = card?.ok ? parseBiliCard(await card.json().catch(() => null)) : null;
 		return { sub: { platform: "bilibili", id: mid!, ...(info?.name ? { title: info.name } : {}) } };
 	}
-	const res = await fetch(parsed.feedUrl, { headers }).catch(() => null);
-	if (!res?.ok) return { error: "这个地址打不开。播客请粘 RSS 订阅地址(播客主页通常有「RSS」按钮)。" };
-	const feed = parsePodcastFeed(await res.text());
+	let body: string;
+	try {
+		body = await fetchUserFeed(parsed.feedUrl, headers);
+	} catch {
+		return { error: "这个地址打不开(或不是公网 https 地址)。播客请粘 RSS 订阅地址(播客主页通常有「RSS」按钮)。" };
+	}
+	const feed = parsePodcastFeed(body);
 	if (feed.items.length === 0) return { error: "这个地址不像播客 RSS(没有带音频的条目)。" };
 	return { sub: { platform: "podcast", id: parsed.feedUrl, ...(feed.channelTitle ? { title: feed.channelTitle } : {}) } };
 }
@@ -102,9 +167,7 @@ export async function discoverInline(subs: SubRecord[]): Promise<{ items: Candid
 				if (parsed.error) throw new Error(parsed.error);
 				found = parsed.items;
 			} else {
-				const res = await fetch(sub.id, { headers });
-				if (!res.ok) throw new Error(`rss ${res.status}`);
-				found = parsePodcastFeed(await res.text()).items;
+				found = parsePodcastFeed(await fetchUserFeed(sub.id, headers)).items;
 			}
 			items.push(...found.map((c) => ({ ...c, subKey: key })));
 			sources[key] = `ok:${found.length}`;
@@ -128,13 +191,41 @@ async function contentKeyFor(c: CandidateRecord): Promise<{ key: string; platfor
 	return { key: cid.key, platform: cid.platform };
 }
 
-export async function pickForUser(env: AppEnv, store: Store, email: string, date: string, opts?: { sweep?: boolean }): Promise<string> {
-	if (await store.getSubRun(email, date)) return "already_ran";
+export async function pickForUser(
+	env: AppEnv,
+	store: Store,
+	email: string,
+	date: string,
+	opts?: { sweep?: boolean; claimed?: boolean },
+): Promise<string> {
 	const cand = await store.getCandidates(email, date);
 	if (!cand) {
+		// 候选还没回来:**不**占当天的运行权,兜底那轮还要能再来一次
 		if (!opts?.sweep) return "no_candidates_yet";
+		if (!opts.claimed && (await store.claimSubRun(email, date, STALE_CLAIM_MS)) === "taken") return "already_ran";
 		await store.putSubRun(email, { date, picked: null, reason: "发现步骤没有回传候选(消费者失败或超时)", at: Date.now() });
 		return "no_candidates";
+	}
+	// 有候选了才占运行权。条件写是原子的,并发只有一个能拿到——这就是「每人每天
+	// 一条」真正的闸;之前是「读一眼 getSubRun 再往后跑」,读写之间隔着抓 feed 的
+	// 好几秒,并发请求会全部穿过去。
+	let claim: Awaited<ReturnType<Store["claimSubRun"]>> = "takeover";
+	if (!opts?.claimed) {
+		claim = await store.claimSubRun(email, date, opts?.sweep ? STALE_CLAIM_MS : undefined);
+		if (claim === "taken") return "already_ran";
+	}
+	// 额度只在**新**占位时扣:takeover 说明这一天已经扣过了(那次运行半路死了),
+	// 再扣一次会让 sub=1 把恢复路径自己堵死。
+	if (claim === "fresh") {
+		try {
+			await store.reserveQuota(email, date, "sub");
+		} catch (err) {
+			if (err instanceof QuotaExceededError) {
+				await store.putSubRun(email, { date, picked: null, reason: err.message, at: Date.now() });
+				return "quota_exceeded";
+			}
+			throw err;
+		}
 	}
 	const subs = await store.listSubscriptions(email);
 	const reads = await store.listReadRecords(email);
@@ -142,8 +233,14 @@ export async function pickForUser(env: AppEnv, store: Store, email: string, date
 	// pickDaily 按 `${platform}:${id}` 判已处理;这里把处理记录的 contentKey 翻译成同一口径
 	const seen = new Set<string>();
 	for (const c of cand.items) {
-		const { key } = await contentKeyFor(c);
-		if (seenKeys.has(key)) seen.add(`${c.platform}:${c.id}`);
+		// identifyUrl 对 ipfs:// 这类地址会抛。一条畸形 enclosure(发布方可控,真实
+		// 播客源里很常见)不该让整天的挑选 500 掉进 DLQ——跳过这条就是了。
+		try {
+			const { key } = await contentKeyFor(c);
+			if (seenKeys.has(key)) seen.add(`${c.platform}:${c.id}`);
+		} catch {
+			/* 坏 URL:pickDaily 那边同样会跳过它 */
+		}
 	}
 	const lastPicked = new Map(subs.map((s) => [subKeyOf(s.platform, s.id), s.lastPickedAt ?? 0]));
 	const outcome = pickDaily({ candidates: cand.items, seen, lastPicked, subKeyOf: (c) => (c as CandidateRecord).subKey });
@@ -160,7 +257,7 @@ export async function pickForUser(env: AppEnv, store: Store, email: string, date
 	if (sub) await store.putSubscription(email, { ...sub, lastPickedAt: Date.now() });
 
 	// 缓存命中(别人订阅了同一条):不跑管线,直接落记录 + 发邮件
-	const cached = await env.WATCH.get<CachedContent>(contentCacheKey(key), "json");
+	const cached = await readCachedContent(env.WATCH, key);
 	if (cached) {
 		await store.putReadRecord(email, { contentKey: key, url: picked.url, title: cached.result.meta.title ?? picked.title, at: Date.now() });
 		await store.putSubRun(email, { date, picked, reason: "缓存命中,直接交付", contentKey: key, at: Date.now() });
@@ -347,15 +444,20 @@ subsApp.post("/api/subs/prefs", userGuard, async (c) => {
 });
 
 /** 本地/fork 与运营手动触发:对当前用户立刻跑一轮「发现 → 挑一条」。线上也走 Worker 内联抓取(不经代理),只作调试。 */
-subsApp.post("/api/subs/run", userGuard, async (c) => {
+subsApp.post("/api/subs/run", userAiGuard, async (c) => {
 	const email = c.get("email");
 	const store = c.get("store");
 	const date = subDate();
 	const subs = await store.listSubscriptions(email);
 	if (subs.length === 0) return c.json({ error: "还没有订阅。" }, 400);
+	// 先占当天的运行权,再去抓。顺序反了的话:并发请求会各自把所有订阅源抓一遍
+	// (每人 10 个源 × 任意并发),这个端点就成了一个不限次数的对外抓取放大器。
+	if ((await store.claimSubRun(email, date)) === "taken") {
+		return c.json({ ok: true, outcome: "already_ran", run: await store.getSubRun(email, date) });
+	}
 	const found = await discoverInline(subs);
 	await store.putCandidates(email, { date, items: found.items, sources: found.sources, at: Date.now() });
-	const r = await pickForUser(c.env, store, email, date);
+	const r = await pickForUser(c.env, store, email, date, { claimed: true });
 	const run = await store.getSubRun(email, date);
 	return c.json({ ok: true, outcome: r, sources: found.sources, run });
 });
@@ -370,8 +472,16 @@ subsApp.post("/api/queue/candidates", async (c) => {
 	}
 	const body = await c.req.json<{ email?: string; date?: string; items?: unknown; sources?: Record<string, string> }>().catch(() => null);
 	if (!body?.email || !body.date || !Array.isArray(body.items)) return c.json({ error: "need { email, date, items[] }" }, 400);
+	// date 是幂等锁与额度的分区键:放任意字符串进来,持有 token 的一方换个日期就能
+	// 无限次触发。只认今天/昨天(消费者从收到发现消息到回传通常几分钟,跨天才需要昨天)。
+	const today = subDate();
+	const yesterday = subDate(new Date(Date.now() - 24 * 3600 * 1000));
+	if (body.date !== today && body.date !== yesterday) return c.json({ error: "bad date" }, 400);
 	const items = (body.items as CandidateRecord[]).filter((i) => i && typeof i.url === "string" && typeof i.title === "string" && typeof i.publishedAt === "number").slice(0, 300);
 	const { store } = makeStore(c.env);
+	// email 必须是真的订阅者:否则持有 token 的一方可以给任意地址塞候选,再借
+	// 订阅完成邮件(watch@nanisle.com)把攻击者选的标题和链接发出去。
+	if ((await store.listSubscriptions(body.email)).length === 0) return c.json({ error: "not a subscriber" }, 400);
 	await store.putCandidates(body.email, { date: body.date, items, sources: body.sources ?? {}, at: Date.now() });
 	const outcome = await pickForUser(c.env, store, body.email, body.date);
 	return c.json({ ok: true, outcome });

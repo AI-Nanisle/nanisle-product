@@ -93,7 +93,8 @@ function fmtDuration(sec?: number): string {
 export function renderWatchEmail(input: WatchEmailInput): { subject: string; html: string; text: string } {
 	const who = input.channelTitle ? `${input.channelTitle} 更新了` : "你订阅的频道更新了";
 	const dur = fmtDuration(input.durationSec);
-	const subject = `${WORTH_LABEL[input.worth]} · ${input.title}`.slice(0, 120);
+	// 标题来自 feed(发布方可控),剥掉换行再截断——别让它有机会往邮件头里塞东西
+	const subject = `${WORTH_LABEL[input.worth]} · ${input.title}`.replace(/[\r\n]+/g, " ").slice(0, 120);
 	const head = `${who}《${input.title}》${dur ? `(${dur})` : ""}`;
 	const verdict = `${WORTH_LABEL[input.worth]}——${input.reason}`;
 	const text = [head, "", verdict, "", `打开总结(详细笔记已替你写好):${input.openUrl}`, "", `不想收到这封邮件?退订:${input.unsubUrl}`].join("\n");

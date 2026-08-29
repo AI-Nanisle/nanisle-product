@@ -40,7 +40,13 @@ export async function handler(event: SqsEvent): Promise<{ ok: true }> {
 		const msg = JSON.parse(record.body) as TaskMessage | DiscoverMessage;
 		// 订阅模式的发现消息(docs/05 §3.1)与总结任务共用一条队列,按 kind 分流
 		if ((msg as DiscoverMessage).kind === "discover") {
-			await processDiscover(msg as DiscoverMessage, cfg);
+			// 形状先验一遍再进:少个 subs 字段就会在 for…of 里抛,消息重投两次进 DLQ
+			const d = msg as DiscoverMessage;
+			if (typeof d.email !== "string" || typeof d.date !== "string" || !Array.isArray(d.subs)) {
+				console.error("malformed discover message, skip:", record.body.slice(0, 200));
+				continue;
+			}
+			await processDiscover(d, cfg);
 			continue;
 		}
 		if (!(msg as TaskMessage).taskId || !(msg as TaskMessage).url) {

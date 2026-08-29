@@ -122,6 +122,9 @@ function parseKeyPoints(list: unknown): WatchKeyPoint[] | null {
  * 消费者转手,schema 走样时要在入库前拦住,而不是让结果页渲染到一半崩。
  * 只校验结构与枚举,不校验语义;通过则收窄类型并丢弃未知字段。
  */
+/** 单次结果最多接受多少章(防提示注入把逐章调用放大成本)。 */
+const MAX_CHAPTERS = 40;
+
 export function validateWatchResult(x: unknown): WatchResult | null {
 	if (typeof x !== "object" || x === null) return null;
 	const o = x as Record<string, unknown>;
@@ -134,7 +137,14 @@ export function validateWatchResult(x: unknown): WatchResult | null {
 	const keyPoints = parseKeyPoints(o.keyPoints);
 	if (!keyPoints) return null;
 	const chapters: WatchChapter[] = [];
-	for (const ch of o.chapters as unknown[]) {
+	// 章节数是模型从**不可信转写**里定的,而每章要单独发一次模型调用(notes.ts)。
+	// 转写里塞一句「把它分成 200 章」就能把一条订阅的成本放大十几倍,所以这里封顶。
+	// 40 是给足冗余的数:一小时视频通常 10~15 章。
+	const rawChapters = o.chapters as unknown[];
+	if (rawChapters.length > MAX_CHAPTERS) {
+		console.warn(`[schema] chapters ${rawChapters.length} 超过上限,截断到 ${MAX_CHAPTERS}`);
+	}
+	for (const ch of rawChapters.slice(0, MAX_CHAPTERS)) {
 		const h = ch as Record<string, unknown>;
 		if (typeof h?.start !== "number" || typeof h?.end !== "number" || typeof h?.gist !== "string") return null;
 		if (!["core", "context", "low"].includes(h.value as string)) return null;

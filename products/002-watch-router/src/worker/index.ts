@@ -20,6 +20,7 @@ import {
 	QuotaExceededError,
 	TASK_TIMEOUT_MS,
 	contentCacheKey,
+	readCachedContent,
 } from "../shared/store";
 import type { CachedContent, TaskRecord, TaskStep } from "../shared/store";
 import { aiConfig, aiConfigFor, awsConfigured, fastAiConfigFor } from "./env";
@@ -198,7 +199,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 
 	// 缓存命中:两条车道都短路,不占配额(内容级结果全站共享,docs/02 T6);
 	// 新用户只花 I3 高亮小调用的钱——T4 两次调用拆分的意义所在
-	const cached = force ? null : await c.env.WATCH.get<CachedContent>(contentCacheKey(cid.key), "json");
+	const cached = force ? null : await readCachedContent(c.env.WATCH, cid.key);
 	if (cached) {
 		const merged = await withTracked(c.env, store, email, cid.key, url || cached.url || "", cached.result);
 		return c.json({
@@ -410,7 +411,7 @@ app.get("/api/result/:key", userGuard, async (c) => {
 	const rec = await store.getReadRecord(email, key);
 	if (!rec) return c.json({ error: "没有这条记录。" }, 404);
 	const note = await store.getNote(email, key);
-	const cached = await c.env.WATCH.get<CachedContent>(contentCacheKey(key), "json");
+	const cached = await readCachedContent(c.env.WATCH, key);
 	if (!cached) {
 		return c.json({
 			expired: true,
@@ -507,7 +508,7 @@ app.get("/api/task/:id", userGuard, async (c) => {
 		return c.json({ status: "failed", step: task.step, error: "处理超时(10 分钟没有新进展)。可以重试;或把 transcript 粘贴进来。" });
 	}
 	if (task.status === "done") {
-		const cached = await c.env.WATCH.get<CachedContent>(contentCacheKey(task.contentKey), "json");
+		const cached = await readCachedContent(c.env.WATCH, task.contentKey);
 		if (!cached) {
 			// 理论上到不了:complete 先写缓存再标 done。真到了就承认异常。
 			return c.json({ status: "failed", error: "结果丢失,请重新提交。" });

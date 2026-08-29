@@ -15,8 +15,21 @@ import type { ExtractPath, WatchResult } from "./schema";
 /** 本地 dev / fork(没有登录闸口)的固定用户。 */
 export const DEV_USER = "dev@local";
 
-/** 每日额度(docs/02 T6:先占位后干活,占位失败 429,模型报错不退还)。 */
-export const QUOTA_LIMITS = { submit: 10 } as const;
+/**
+ * 每日额度(docs/02 T6:先占位后干活,占位失败 429,模型报错不退还)。
+ * submit = 用户手动提交;sub = 订阅日报(docs/05「每人每天一条」)。分开计是因为
+ * 订阅是产品答应「每天自动送一条」,不该去挤占用户自己想看点什么的那 10 次。
+ */
+export const QUOTA_LIMITS = { submit: 10, sub: 1 } as const;
+export type QuotaKind = keyof typeof QUOTA_LIMITS;
+/**
+ * 拿当天运行权的结果。区分 fresh 与 takeover 是为了额度:takeover 说明这一天的
+ * 额度已经被那个半路死掉的运行扣过了,兜底接手时不该再扣一次(否则 sub=1 会把
+ * 恢复路径自己堵死)。
+ */
+export type ClaimResult = "fresh" | "takeover" | "taken";
+/** 计数落在 USAGE#<date> 这一项的哪个属性上。 */
+const QUOTA_ATTR: Record<QuotaKind, string> = { submit: "submits", sub: "subRuns" };
 
 /** 慢车道五步进度(F6 进度页按这个顺序渲染)。 */
 export type TaskStep = "queued" | "downloading" | "transcribing" | "editing" | "done";
@@ -144,8 +157,12 @@ export interface NoteRecord {
 export const MAX_NOTE_ENTRIES = 50;
 
 export class QuotaExceededError extends Error {
-	constructor() {
-		super(`今日提交次数已用完(${QUOTA_LIMITS.submit} 次/日)。明天自动恢复。`);
+	constructor(kind: QuotaKind = "submit") {
+		super(
+			kind === "sub"
+				? "今天的订阅日报已经跑过一次了(每人每天一条)。明天自动恢复。"
+				: `今日提交次数已用完(${QUOTA_LIMITS.submit} 次/日)。明天自动恢复。`,
+		);
 	}
 }
 
@@ -153,7 +170,7 @@ export interface Store {
 	/** 内测白名单(docs/02 T7:门禁每请求复查)。 */
 	isWhitelisted(email: string): Promise<boolean>;
 	/** 原子占位(001 Q1 同款):自增与判上限压在同一个条件写里,超限抛 QuotaExceededError。 */
-	reserveQuota(email: string, date: string): Promise<void>;
+	reserveQuota(email: string, date: string, kind?: QuotaKind): Promise<void>;
 	/** 当日已用额度(F7 页眉读数;只读不占位)。 */
 	getQuota(email: string, date: string): Promise<number>;
 	createTask(task: TaskRecord): Promise<void>;
@@ -182,6 +199,15 @@ export interface Store {
 	getCandidates(email: string, date: string): Promise<CandidatesRecord | null>;
 	putSubRun(email: string, run: SubRunRecord): Promise<void>;
 	getSubRun(email: string, date: string): Promise<SubRunRecord | null>;
+	/**
+	 * 当天的运行权占位。没有记录(或只有一条超过 staleMs 的「运行中」占位)时写一条
+	 * 新占位并返回 true,否则 false。
+	 * 为什么不是「先 getSubRun 看一眼再写」:读和写之间隔着抓 feed 的好几秒,并发
+	 * 请求会全部穿过去,「每人每天一条」形同虚设。条件写把判断与占位压成一个原子操作。
+	 * staleMs 是留给兜底 cron 的:00:00 那轮中途崩了会留下一条挂着的占位,01:30 的
+	 * 兜底要能顶掉它接手,否则用户当天就彻底没有了。
+	 */
+	claimSubRun(email: string, date: string, staleMs?: number): Promise<ClaimResult>;
 	getPrefs(email: string): Promise<UserPrefs>;
 	putPrefs(email: string, prefs: UserPrefs): Promise<void>;
 }
@@ -240,21 +266,21 @@ export class DdbStore implements Store {
 		return Boolean(out.Item);
 	}
 
-	async reserveQuota(email: string, date: string): Promise<void> {
+	async reserveQuota(email: string, date: string, kind: QuotaKind = "submit"): Promise<void> {
 		try {
 			await this.call("UpdateItem", {
 				Key: { PK: { S: `USER#${email.toLowerCase()}` }, SK: { S: `USAGE#${date}` } },
 				UpdateExpression: "ADD #n :one SET #ttl = if_not_exists(#ttl, :ttl)",
 				ConditionExpression: "attribute_not_exists(#n) OR #n < :limit",
-				ExpressionAttributeNames: { "#n": "submits", "#ttl": "ttl" },
+				ExpressionAttributeNames: { "#n": QUOTA_ATTR[kind], "#ttl": "ttl" },
 				ExpressionAttributeValues: {
 					":one": { N: "1" },
-					":limit": { N: String(QUOTA_LIMITS.submit) },
+					":limit": { N: String(QUOTA_LIMITS[kind]) },
 					":ttl": { N: String(Math.floor(Date.now() / 1000) + 7 * 24 * 3600) },
 				},
 			});
 		} catch (err) {
-			if (err instanceof ConditionalFailure) throw new QuotaExceededError();
+			if (err instanceof ConditionalFailure) throw new QuotaExceededError(kind);
 			throw err;
 		}
 	}
@@ -513,6 +539,43 @@ export class DdbStore implements Store {
 		});
 	}
 
+	async claimSubRun(email: string, date: string, staleMs?: number): Promise<ClaimResult> {
+		if (await this.tryClaim(email, date)) return "fresh";
+		if (staleMs && (await this.tryClaim(email, date, staleMs))) return "takeover";
+		return "taken";
+	}
+
+	private async tryClaim(email: string, date: string, staleMs?: number): Promise<boolean> {
+		const now = Date.now();
+		const run: SubRunRecord = { date, picked: null, reason: "运行中", at: now };
+		// running/at 提到顶层是为了能写进条件表达式——body 是个 JSON 字符串,条件写读不进去
+		try {
+			await this.call("PutItem", {
+				Item: {
+					PK: this.userPk(email),
+					SK: { S: `SUBRUN#${date}` },
+					body: { S: JSON.stringify(run) },
+					running: { BOOL: true },
+					at: { N: String(now) },
+					ttl: { N: String(Math.floor(now / 1000) + 30 * 24 * 3600) },
+				},
+				ConditionExpression: staleMs
+					? "attribute_not_exists(SK) OR (running = :t AND #at < :cutoff)"
+					: "attribute_not_exists(SK)",
+				...(staleMs
+					? {
+							ExpressionAttributeNames: { "#at": "at" },
+							ExpressionAttributeValues: { ":t": { BOOL: true }, ":cutoff": { N: String(now - staleMs) } },
+						}
+					: {}),
+			});
+			return true;
+		} catch (err) {
+			if (err instanceof ConditionalFailure) return false;
+			throw err;
+		}
+	}
+
 	async getSubRun(email: string, date: string): Promise<SubRunRecord | null> {
 		const out = await this.call<{ Item?: { body?: { S?: string } } }>("GetItem", {
 			Key: { PK: this.userPk(email), SK: { S: `SUBRUN#${date}` } },
@@ -558,15 +621,15 @@ export class MemoryStore implements Store {
 		return true;
 	}
 
-	async reserveQuota(email: string, date: string): Promise<void> {
-		const key = `${email}:${date}`;
+	async reserveQuota(email: string, date: string, kind: QuotaKind = "submit"): Promise<void> {
+		const key = `${email}:${date}:${kind}`;
 		const n = this.quota.get(key) ?? 0;
-		if (n >= QUOTA_LIMITS.submit) throw new QuotaExceededError();
+		if (n >= QUOTA_LIMITS[kind]) throw new QuotaExceededError(kind);
 		this.quota.set(key, n + 1);
 	}
 
 	async getQuota(email: string, date: string): Promise<number> {
-		return this.quota.get(`${email}:${date}`) ?? 0;
+		return this.quota.get(`${email}:${date}:submit`) ?? 0;
 	}
 
 	async createTask(t: TaskRecord): Promise<void> {
@@ -656,6 +719,15 @@ export class MemoryStore implements Store {
 		return this.runs.get(`${email}:${date}`) ?? null;
 	}
 
+	async claimSubRun(email: string, date: string, staleMs?: number): Promise<ClaimResult> {
+		const key = `${email}:${date}`;
+		const cur = this.runs.get(key);
+		const stale = Boolean(staleMs && cur && cur.reason === "运行中" && Date.now() - cur.at > staleMs);
+		if (cur && !stale) return "taken";
+		this.runs.set(key, { date, picked: null, reason: "运行中", at: Date.now() });
+		return cur ? "takeover" : "fresh";
+	}
+
 	async getPrefs(email: string): Promise<UserPrefs> {
 		return { ...(this.prefs.get(email) ?? {}) };
 	}
@@ -676,6 +748,24 @@ export function contentCacheKey(contentKey: string): string {
 }
 
 export const CONTENT_CACHE_TTL_S = 60 * 24 * 3600;
+
+/** KV 的最小结构约束——不引 KVNamespace 类型,这个文件消费者(Node)也要 import。 */
+interface CacheKv {
+	get<T>(key: string, type: "json"): Promise<T | null>;
+}
+
+/**
+ * 读缓存:先看当前版本,没有再看上一版。
+ * 版本号 bump 会把老记录整批绕开,但「我的记录」里那些条目并没有真的过期——不回落
+ * 的话用户会看到一句假话(「缓存已过期(60 天)」),还要花一次额度才能重开。
+ * 只有读回落;写永远只写当前版本,老键随自己的 TTL 消亡。
+ */
+export async function readCachedContent(kv: CacheKv, contentKey: string): Promise<CachedContent | null> {
+	return (
+		(await kv.get<CachedContent>(contentCacheKey(contentKey), "json")) ??
+		(await kv.get<CachedContent>(`content:v2:${contentKey}`, "json"))
+	);
+}
 
 export interface CachedContent {
 	result: WatchResult;

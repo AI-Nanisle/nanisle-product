@@ -43,6 +43,33 @@ export type ParsedSubInput =
 	| { platform: "podcast"; feedUrl: string }
 	| null;
 
+/**
+ * 拒掉指向内网/云元数据的地址。播客订阅的 id **就是那个 URL**,存下来之后 Worker
+ * 与消费者每天各抓一次——不挡住的话,任何登录用户都能拿我们的两个出口当探针。
+ * 只按主机名判:Workers 里没法先解析 DNS 再校验,所以 DNS rebinding 这层挡不住;
+ * 但那需要攻击者控制权威 DNS,和「随手粘一个 169.254.169.254」不是一个量级。
+ */
+export function isBlockedFeedHost(hostname: string): boolean {
+	const h = hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+	if (!h) return true;
+	if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+	if (h.includes(":")) {
+		// IPv6:回环、链路本地、唯一本地
+		return h === "::" || h === "::1" || h.startsWith("fe80") || h.startsWith("fc") || h.startsWith("fd");
+	}
+	const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+	if (!m) return false; // 普通域名放行
+	const [a, b] = [Number(m[1]), Number(m[2])];
+	if (m.slice(1).some((x) => Number(x) > 255)) return true;
+	if (a === 0 || a === 10 || a === 127) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 169 && b === 254) return true; // 云元数据
+	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+	if (a >= 224) return true; // 组播与保留段
+	return false;
+}
+
 /** 用户输入 → 平台与初步 id。解析不到 id 的(YouTube @handle、b23 短链)交给消费者经代理解析。 */
 export function parseSubscriptionInput(raw: string): ParsedSubInput {
 	const s = raw.trim();
@@ -67,7 +94,10 @@ export function parseSubscriptionInput(raw: string): ParsedSubInput {
 	}
 	if (host === "b23.tv") return { platform: "bilibili", shortUrl: u.toString() };
 	if (host === "bilibili.com") return null;
-	// 其余 URL 一律当播客 feed(是不是 RSS 由消费者拉一次校验)
+	// 其余 URL 一律当播客 feed(是不是 RSS 由消费者拉一次校验)。
+	// 只收 https:http 的 feed 既有中间人风险,也是绕开主机白名单最省事的入口。
+	if (u.protocol !== "https:") return null;
+	if (isBlockedFeedHost(u.hostname)) return null;
 	return { platform: "podcast", feedUrl: u.toString() };
 }
 

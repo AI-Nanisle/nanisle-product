@@ -336,7 +336,9 @@ export default function App() {
 	async function openRecord(item: HistoryItem) {
 		setError("");
 		try {
-			const res = await fetch(apiPath(`result/${item.contentKey}`));
+			// 必须编码:contentKey 可能来自 ?open= 查询参数,不编码的话 ../../ 能把这个
+			// 请求拐到别的端点上去(比如一键登出)
+			const res = await fetch(apiPath(`result/${encodeURIComponent(item.contentKey)}`));
 			const d = (await res.json()) as SubmitResponse & { expired?: boolean; note?: NoteRecord };
 			if (d.expired) {
 				// 结果缓存过期(60 天):预填原链接引导重算,想法账还在
