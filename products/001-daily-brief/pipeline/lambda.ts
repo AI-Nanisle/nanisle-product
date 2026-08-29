@@ -506,7 +506,12 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 	const errorByUnionName = new Map(fetched.sourceErrors.map((e) => [e.name, e.error]));
 
 	const results: Record<string, unknown>[] = [];
-	for (const run of runs) {
+
+	/**
+	 * 一个用户的完整管线。候选池在上面已经按人切成各自的副本(remap 产出新对象),
+	 * store 的读写全部按 email 分区,用户之间没有共享的可变状态——所以可以并行跑。
+	 */
+	const runOne = async (run: UserRun): Promise<Record<string, unknown>> => {
 		try {
 			// 按该用户的源身份回切候选池与问责数据(sourceKey/name 换回用户自己的)
 			const remap = <T extends { sourceKey?: string; source: string }>(items: T[]): T[] => {
@@ -552,8 +557,7 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 					await store.putConfig(run.email, { ...run.config, sources: healed, updatedAt: new Date().toISOString() });
 				}
 				console.log(`[all] ${run.email}: no candidates today, skipped`);
-				results.push({ email: run.email, ok: false, error: "no candidates" });
-				continue;
+				return { email: run.email, ok: false, error: "no candidates" };
 			}
 			const ai = aiFor(run.email, cfg, enrichCfg);
 			const { picked, brief } = await produceBrief(store, ai.cfg, ai.enrichCfg, ai.fastCfg, run, userFetched, date, health);
@@ -568,13 +572,34 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 					console.error(`[all] ${run.email}: email FAILED`, err);
 				}
 			}
-			results.push({ email: run.email, ok: true, picked, emailed });
+			return { email: run.email, ok: true, picked, emailed };
 		} catch (err) {
 			// 失败隔离(§8.1):一个用户的编辑调用失败不拖累其他用户
 			console.error(`[all] ${run.email}: FAILED`, err);
-			results.push({ email: run.email, ok: false, error: err instanceof Error ? err.message : String(err) });
+			return { email: run.email, ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
-	}
+	};
+
+	// 用户之间并行,而不是一个接一个。原因是串行会超时:站长那一轮走 Claude 订阅
+	// 专线,单次模型调用 60~100 秒,三个用户串起来在 2026-08-29 撞了 Lambda 的
+	// 15 分钟硬上限——第一次 Status: timeout,EventBridge 重试后 13.2 分钟才跑完,
+	// 当天有两个用户被重复生成、白花了一份钱。15 分钟是 AWS 的上限,加不了,
+	// 只能让总耗时从「所有人之和」变成「最慢的那个人」。
+	// 并发上限默认 3:再高的收益递减(抓取已经在上面做完了,这里只剩模型调用),
+	// 而每多一路就多一份候选池与成稿驻留内存。用量涨上来时调 ALL_CONCURRENCY。
+	const limit = Math.max(1, Number.parseInt(process.env.ALL_CONCURRENCY ?? "", 10) || 3);
+	const queue = [...runs];
+	const started = Date.now();
+	await Promise.all(
+		Array.from({ length: Math.min(limit, queue.length) }, async () => {
+			for (;;) {
+				const run = queue.shift();
+				if (!run) return;
+				results.push(await runOne(run));
+			}
+		}),
+	);
+	console.log(`[all] ${runs.length} 位用户并行跑完,并发上限 ${limit},耗时 ${Math.round((Date.now() - started) / 1000)}s`);
 	const okCount = results.filter((r) => r.ok).length;
 	console.log(`[all] done: ${okCount}/${runs.length} ok`);
 	return response(200, { ok: true, date, users: runs.length, generated: okCount, results });
