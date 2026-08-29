@@ -63,6 +63,21 @@ describe("stripJsonFence", () => {
 		assert.equal(stripJsonFence('{"a":1}'), '{"a":1}');
 		assert.equal(stripJsonFence('text ```json\n{}\n``` more'), 'text ```json\n{}\n``` more');
 	});
+	it("keeps a fence that appears inside the JSON body", () => {
+		assert.equal(stripJsonFence('```json\n{"a":"see ```x```"}\n```'), '{"a":"see ```x```"}');
+	});
+	it("recovers the body of a fence that was truncated before it closed", () => {
+		// max_tokens 截断的典型形状:开了围栏没闭合
+		assert.equal(stripJsonFence('```json\n{"a":1}'), '{"a":1}');
+	});
+	it("is linear on an unclosed fence with a long whitespace tail (ReDoS 回归)", () => {
+		// 旧的正则版在这里会灾难性回溯:1KB 换行约 1.8 秒,8KB 超过 100 秒。
+		const evil = "```json\n" + "\n".repeat(20_000);
+		const t0 = performance.now();
+		stripJsonFence(evil);
+		const ms = performance.now() - t0;
+		assert.ok(ms < 100, `stripJsonFence took ${ms.toFixed(0)}ms on 20k newlines — 回溯又回来了`);
+	});
 });
 
 // 假的 Anthropic 兼容网关:按 SDK 的 SSE 协议吐一段文本,或按 MODE 回错误。
@@ -82,6 +97,12 @@ describe("complete() via gateway", () => {
 				if (prompt.includes("MODE:500")) {
 					res.writeHead(500, { "content-type": "application/json" });
 					res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: "upstream error" } }));
+					return;
+				}
+				if (prompt.includes("MODE:400") || prompt.includes("MODE:401")) {
+					const code = prompt.includes("MODE:400") ? 400 : 401;
+					res.writeHead(code, { "content-type": "application/json" });
+					res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "nope" } }));
 					return;
 				}
 				if (prompt.includes("MODE:429")) {
@@ -136,5 +157,12 @@ describe("complete() via gateway", () => {
 	});
 	it("does not fall back without a fallback config", async () => {
 		await assert.rejects(complete(gw(), { prompt: "MODE:500" }));
+	});
+	it("does NOT fall back on 4xx — a misconfigured lane must surface, not double-bill", async () => {
+		// 模型别名网关不认(400)、虚拟 key 被吊销(401):换一家只会把同一个错再犯
+		// 一遍,还双倍计费,而且故障被重试盖住没人发现。
+		const routed: AiConfig = { ...gw(), fallback: { provider: "mock" } };
+		await assert.rejects(complete(routed, { prompt: "MODE:400" }));
+		await assert.rejects(complete(routed, { prompt: "MODE:401" }));
 	});
 });

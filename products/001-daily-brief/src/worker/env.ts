@@ -126,12 +126,18 @@ export function ownerRoute(env: AppEnv): OwnerRoute | null {
 	return ownerRouteFromEnv(env as unknown as Record<string, string | undefined>);
 }
 
-/** 按账号取基础档配置:命中专线名单走专线(带 fallback),否则就是 aiConfig(env)。 */
+/**
+ * 按账号取基础档配置:命中专线名单走专线(带 fallback),否则就是 aiConfig(env)。
+ * 调用点显式传的 overrides 最后再盖一次——否则 OWNER_AI_MAX_OUTPUT_TOKENS 这类
+ * 专线字段会把调用点故意压低的上限顶掉(蒸馏那次的 2048 就是这么被吃掉的)。
+ */
 export function aiConfigFor(env: AppEnv, email: string | undefined, overrides?: Partial<AiConfig>): AiConfig {
-	return applyOwnerRoute(email, aiConfig(env, overrides), ownerRoute(env));
+	const routed = applyOwnerRoute(email, aiConfig(env, overrides), ownerRoute(env));
+	return overrides ? { ...routed, ...overrides } : routed;
 }
 
 /** 按账号取轻任务档配置。先 fastVariant 再路由:FAST_AI_MODEL 的 deepseek 型号不能带进专线。 */
 export function fastAiConfigFor(env: AppEnv, email: string | undefined, overrides?: Partial<AiConfig>): AiConfig {
-	return applyOwnerRoute(email, fastAiConfig(env, overrides), ownerRoute(env), "fast");
+	const routed = applyOwnerRoute(email, fastAiConfig(env, overrides), ownerRoute(env), "fast");
+	return overrides ? { ...routed, ...overrides } : routed;
 }

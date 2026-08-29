@@ -139,8 +139,18 @@ export function makeClient(cfg: AiConfig, provider: AiProvider): Anthropic {
  * 仍会包一层,所以 json 调用统一过一遍。不是围栏包裹的原样返回。
  */
 export function stripJsonFence(text: string): string {
-	const m = /^\s*```[a-zA-Z]*\s*\n?([\s\S]*?)\n?\s*```\s*$/.exec(text);
-	return m ? m[1] : text;
+	// 手写而不是用正则:`^\s*```...\n?([\s\S]*?)\n?\s*```\s*$` 这种写法里几段空白
+	// 匹配是互相二义的,遇到「开了围栏但没闭合 + 一串尾随空白」会灾难性回溯——实测
+	// 1KB 换行就要 1.8 秒 CPU,几 KB 直接顶穿 Worker 的 CPU 上限。模型输出被
+	// max_tokens 截断时正好长这样,不需要有人故意构造。下面是线性的,顺带把截断
+	// 的半截围栏也处理掉(正则版对它是直接放弃)。
+	const t = text.trim();
+	if (!t.startsWith("```")) return text;
+	const firstNl = t.indexOf("\n");
+	const lastFence = t.lastIndexOf("```");
+	if (firstNl < 0) return text;
+	// 闭合围栏在首行之后 = 正常情况;否则是只有开头那个围栏(截断),取首行之后全部
+	return lastFence > firstNl ? t.slice(firstNl + 1, lastFence).trim() : t.slice(firstNl + 1).trim();
 }
 
 const JSON_ONLY_HINT = "只输出一个 JSON 对象本身,不要 Markdown 代码围栏,不要任何解释文字。";
@@ -278,10 +288,15 @@ async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<Co
 	}
 }
 
-/** 主配置的哪些失败值得用 fallback 重试:上游类错误都算,模型拒答/请求本身不合法不算。 */
+/** 主配置的哪些失败值得用 fallback 重试:上游故障算,请求本身不合法不算。 */
 function shouldFallBack(err: unknown): boolean {
 	if (err instanceof AiError) return err.status >= 500;
-	// SDK 抛的 APIError(401/429/5xx)、连接错误、超时——都是专线那头的问题
+	// SDK 的 APIError 带 status。4xx 是配置或请求本身的问题——模型别名网关不认、
+	// 虚拟 key 被吊销、正文超了上下文——换一家只会把同一个错再犯一遍,还双倍计费,
+	// 而且故障会被这层重试盖住、没人知道专线坏了。只有 429 与 5xx、以及压根没有
+	// status 的连接错误/超时(那是网络或那台机器的问题)才走退路。
+	const status = (err as { status?: unknown } | null)?.status;
+	if (typeof status === "number") return status >= 500 || status === 429;
 	return true;
 }
 
@@ -330,7 +345,9 @@ async function completeOnce(cfg: AiConfig, input: CompleteInput): Promise<Comple
 			...(system ? { system } : {}),
 			messages: [{ role: "user", content: input.prompt }],
 		},
-		// SDK 自带按次超时;超时抛 APIConnectionTimeoutError,调用方按普通失败重试
+		// 注意:流式下 SDK 这个超时只盖到「响应头到达」为止,读流体的过程不受它约束
+		// (计时器在 fetch resolve 时就清掉了)。网关返回 200 之后卡住的话,这里会一直等——
+		// 靠调用方自己的运行时上限兜底,fallback 也不会触发(它要求有异常抛出来)。
 		input.timeoutMs ? { timeout: input.timeoutMs } : undefined,
 	);
 	if (input.onDelta) stream.on("text", (delta) => input.onDelta?.(delta));

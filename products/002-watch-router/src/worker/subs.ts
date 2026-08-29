@@ -363,7 +363,11 @@ subsApp.post("/api/subs/run", userGuard, async (c) => {
 /** 消费者回传候选(x-consumer-token 鉴权,同 /api/queue/*)。回传即挑选。 */
 subsApp.post("/api/queue/candidates", async (c) => {
 	const token = c.env.CONSUMER_TOKEN;
-	if (!token || !safeEqual(token, c.req.header("x-consumer-token") ?? "")) return c.json({ error: "unauthorized" }, 401);
+	// safeEqual 是 async:漏了 await 的话 `!Promise` 恒为 false,401 分支永远不可达,
+	// 这个端点就等于对全网开放(index.ts:539 与 guard.ts 里的同类检查都是 await 的)。
+	if (!token || !(await safeEqual(token, c.req.header("x-consumer-token") ?? ""))) {
+		return c.json({ error: "unauthorized" }, 401);
+	}
 	const body = await c.req.json<{ email?: string; date?: string; items?: unknown; sources?: Record<string, string> }>().catch(() => null);
 	if (!body?.email || !body.date || !Array.isArray(body.items)) return c.json({ error: "need { email, date, items[] }" }, 400);
 	const items = (body.items as CandidateRecord[]).filter((i) => i && typeof i.url === "string" && typeof i.title === "string" && typeof i.publishedAt === "number").slice(0, 300);
