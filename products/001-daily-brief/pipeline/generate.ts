@@ -96,7 +96,6 @@ function envAiConfig(): AiConfig {
 		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "16384",
 		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
 		anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-		anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: process.env.AI_GATEWAY_URL,
 		gatewayKey: process.env.AI_GATEWAY_KEY,
 	};

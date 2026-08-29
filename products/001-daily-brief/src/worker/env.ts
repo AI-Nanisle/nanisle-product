@@ -3,8 +3,8 @@
 // `wrangler secret put` (deployed) or .dev.vars (local, gitignored).
 // 密钥清单与轮换 runbook:主仓 infra/README.md。
 
-import { fastVariant } from "../shared/ai";
-import type { AiConfig } from "../shared/ai";
+import { applyOwnerRoute, fastVariant, ownerRouteFromEnv } from "../shared/ai";
+import type { AiConfig, OwnerRoute } from "../shared/ai";
 
 export interface AppEnv {
 	/** Static client bundle, used when this Worker is called through a Service Binding. */
@@ -77,12 +77,25 @@ export interface AppEnv {
 	DEEPSEEK_API_KEY?: string;
 	/** Secret. AI_PROVIDER=anthropic only. */
 	ANTHROPIC_API_KEY?: string;
-	/** Secret. AI_PROVIDER=anthropic 的另一种凭证:Claude Code 订阅的 setup token(OAuth)。 */
-	ANTHROPIC_AUTH_TOKEN?: string;
 	/** Base URL of an Anthropic-compatible endpoint — AI_PROVIDER=gateway only. */
 	AI_GATEWAY_URL?: string;
 	/** Secret. Virtual key issued by the gateway, sent as `Authorization: Bearer`. */
 	AI_GATEWAY_KEY?: string;
+	// --- 站长专线(主仓 backend/docs/01):这些账号改走另一套 provider,其余用户不受影响 ---
+	/** Secret. 逗号分隔的邮箱;不设 = 没有专线。 */
+	OWNER_AI_EMAILS?: string;
+	/** 专线的 provider(通常 gateway)。 */
+	OWNER_AI_PROVIDER?: string;
+	/** 专线基础档模型(如 opus)。 */
+	OWNER_AI_MODEL?: string;
+	/** 专线轻任务档模型(如 sonnet);不设跟 OWNER_AI_MODEL。 */
+	OWNER_FAST_AI_MODEL?: string;
+	/** 专线的输出上限;不设跟 AI_MAX_OUTPUT_TOKENS。 */
+	OWNER_AI_MAX_OUTPUT_TOKENS?: string;
+	/** Secret. 专线网关地址(不进仓,避免被定向扫描)。 */
+	OWNER_AI_GATEWAY_URL?: string;
+	/** Secret. 专线网关的 Bearer key。 */
+	OWNER_AI_GATEWAY_KEY?: string;
 }
 
 /** AppEnv → 运行时无关的 AiConfig(shared/ai.ts 的入参)。 */
@@ -93,7 +106,6 @@ export function aiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConfig {
 		maxOutputTokens: env.AI_MAX_OUTPUT_TOKENS,
 		deepseekApiKey: env.DEEPSEEK_API_KEY,
 		anthropicApiKey: env.ANTHROPIC_API_KEY,
-		anthropicAuthToken: env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: env.AI_GATEWAY_URL,
 		gatewayKey: env.AI_GATEWAY_KEY,
 		...overrides,
@@ -106,4 +118,20 @@ export function fastAiConfig(env: AppEnv, overrides?: Partial<AiConfig>): AiConf
 		...fastVariant(aiConfig(env), { provider: env.FAST_AI_PROVIDER, model: env.FAST_AI_MODEL }),
 		...overrides,
 	};
+}
+
+
+/** 站长专线路由表(env → OwnerRoute);没配 OWNER_AI_EMAILS 时为 null。 */
+export function ownerRoute(env: AppEnv): OwnerRoute | null {
+	return ownerRouteFromEnv(env as unknown as Record<string, string | undefined>);
+}
+
+/** 按账号取基础档配置:命中专线名单走专线(带 fallback),否则就是 aiConfig(env)。 */
+export function aiConfigFor(env: AppEnv, email: string | undefined, overrides?: Partial<AiConfig>): AiConfig {
+	return applyOwnerRoute(email, aiConfig(env, overrides), ownerRoute(env));
+}
+
+/** 按账号取轻任务档配置。先 fastVariant 再路由:FAST_AI_MODEL 的 deepseek 型号不能带进专线。 */
+export function fastAiConfigFor(env: AppEnv, email: string | undefined, overrides?: Partial<AiConfig>): AiConfig {
+	return applyOwnerRoute(email, fastAiConfig(env, overrides), ownerRoute(env), "fast");
 }

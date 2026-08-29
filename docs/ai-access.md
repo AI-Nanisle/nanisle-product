@@ -63,3 +63,12 @@ The threat model: a public demo whose backend spends the owner's tokens will be 
 - Request logging per key, so abuse is attributable and measurable.
 
 Product code stays simple because the expensive controls are centralized at the gateway; the gateway stays private because that's where identity and money live. If you fork a product and host it publicly with your own key, replicate at least Layer 1 (`ACCESS_CODE`) — it's already built in; just set the secret.
+
+## Owner lane (private subscription gateway)
+
+The hosted instance can route **a fixed list of accounts** (in practice: the owner) to a different provider while everyone else stays on the default. It is configured entirely at deploy time — there is no UI for it — via `OWNER_AI_EMAILS`, `OWNER_AI_PROVIDER`, `OWNER_AI_MODEL`, `OWNER_FAST_AI_MODEL`, `OWNER_AI_GATEWAY_URL`, `OWNER_AI_GATEWAY_KEY` (all optional; unset `OWNER_AI_EMAILS` = no lane). Requests on the lane keep the default config as a fallback, so a broken lane degrades to the default provider instead of failing the user.
+
+The owner's lane points at a gateway that fronts a headless official **Claude Code CLI** running with the owner's own `claude setup-token`; that gateway lives in the private platform repo. Two rules follow from Anthropic's 2026 policy on subscription OAuth tokens (server-side enforced since 2026-01-09, documented 2026-02-19):
+
+- A Claude subscription OAuth token (`sk-ant-oat…`) **must not** be used by this repo's code directly (SDK, Agent SDK, or raw HTTP). The `anthropic` mode only accepts an API key.
+- Only the official Claude Code client may spend subscription quota, and only for its owner. Do not build a "paste your setup token" feature for other users.

@@ -32,7 +32,7 @@ import {
 } from "../src/shared/pipeline-core";
 import type { Candidate, FetchResult, SourceConfig, Tracker } from "../src/shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../src/shared/default-sources";
-import { AiError, complete, fastVariant, resolveProvider } from "../src/shared/ai";
+import { AiError, applyOwnerRoute, complete, fastVariant, ownerRouteFromEnv, resolveProvider } from "../src/shared/ai";
 import type { AiConfig } from "../src/shared/ai";
 import { buildFeedbackEcho, feedbackPromptBlock, loadFeedbackDigest } from "../src/shared/feedback";
 import type { FeedbackDigest } from "../src/shared/feedback";
@@ -105,7 +105,6 @@ function envAiConfig(): AiConfig {
 		maxOutputTokens: process.env.AI_MAX_OUTPUT_TOKENS ?? "16384",
 		deepseekApiKey: process.env.DEEPSEEK_API_KEY,
 		anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-		anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
 		gatewayUrl: process.env.AI_GATEWAY_URL,
 		gatewayKey: process.env.AI_GATEWAY_KEY,
 	};
@@ -138,6 +137,20 @@ function envFastAiConfig(base: AiConfig): AiConfig {
 		provider: process.env.FAST_AI_PROVIDER,
 		model: process.env.FAST_AI_MODEL,
 	});
+}
+
+/**
+ * 站长专线(主仓 backend/docs/01):OWNER_AI_EMAILS 里的账号三档配置都改走专线
+ * (带 fallback,专线挂了回到 deepseek 不漏刊),其他账号原样。没配就是恒等。
+ * 轻任务档要先 fastVariant 再路由,免得 FAST_AI_MODEL 的 deepseek 型号带进专线。
+ */
+const OWNER_ROUTE = ownerRouteFromEnv(process.env);
+function aiFor(email: string, cfg: AiConfig, enrichCfg: AiConfig): { cfg: AiConfig; enrichCfg: AiConfig; fastCfg: AiConfig } {
+	return {
+		cfg: applyOwnerRoute(email, cfg, OWNER_ROUTE),
+		enrichCfg: applyOwnerRoute(email, enrichCfg, OWNER_ROUTE),
+		fastCfg: applyOwnerRoute(email, envFastAiConfig(cfg), OWNER_ROUTE, "fast"),
+	};
 }
 
 function envStore(): Store {
@@ -217,6 +230,8 @@ async function produceBrief(
 	cfg: AiConfig,
 	/** 成稿段的 AI 配置(ENRICH_* 开关,没设时就是 cfg 本身)。 */
 	enrichCfg: AiConfig,
+	/** 轻任务档(口味蒸馏)的 AI 配置,已按用户做过专线路由。 */
+	fastCfg: AiConfig,
 	run: UserRun,
 	fetched: FetchResult,
 	date: string,
@@ -266,7 +281,7 @@ async function produceBrief(
 	let taste = run.config.taste;
 	if (resolveProvider(cfg) !== "mock") {
 		const fresh = await maybeDistillTaste(store, run.email, run.config, {
-			call: (system, user) => complete(envFastAiConfig(cfg), { prompt: user, system, json: true }).then((r) => r.text),
+			call: (system, user) => complete(fastCfg, { prompt: user, system, json: true }).then((r) => r.text),
 			log: (m) => console.log(`[${run.email}] ${m}`),
 		});
 		if (fresh) taste = fresh;
@@ -422,11 +437,12 @@ async function generateOne(
 	}
 	// 单用户模式抓的就是他自己的源,status 的 key 直接可用
 	const health = new Map(fetched.sourceStatus.map((s) => [s.key, { ok: s.ok, error: s.error }]));
-	const { picked } = await produceBrief(store, cfg, enrichCfg, { email, config }, fetched, date, health, onStep);
+	const ai = aiFor(email, cfg, enrichCfg);
+	const { picked } = await produceBrief(store, ai.cfg, ai.enrichCfg, ai.fastCfg, { email, config }, fetched, date, health, onStep);
 	return response(200, {
 		ok: true,
 		date,
-		provider: resolveProvider(cfg),
+		provider: resolveProvider(ai.cfg),
 		picked,
 		scanned: fetched.scanned,
 		sourceErrors: fetched.sourceErrors,
@@ -539,7 +555,8 @@ async function generateAll(store: Store, cfg: AiConfig, enrichCfg: AiConfig, dat
 				results.push({ email: run.email, ok: false, error: "no candidates" });
 				continue;
 			}
-			const { picked, brief } = await produceBrief(store, cfg, enrichCfg, run, userFetched, date, health);
+			const ai = aiFor(run.email, cfg, enrichCfg);
+			const { picked, brief } = await produceBrief(store, ai.cfg, ai.enrichCfg, ai.fastCfg, run, userFetched, date, health);
 			console.log(`[all] ${run.email}: ok picked=${picked} scanned=${userFetched.scanned}`);
 			// E1 · 刊已落库,再发提醒邮件。缺省为开(prefs.emailPush !== false);
 			// 发信失败只记日志——邮件是门铃,门铃坏了不能把刊也砸了。

@@ -9,8 +9,8 @@ AI_PROVIDER=mock
 #AI_MODEL=deepseek-v4-pro
 AI_MAX_OUTPUT_TOKENS=4096
 # 成稿(enrich)换模对照:只覆盖成稿那一次调用,选材照旧走 AI_PROVIDER。
-# 例:ENRICH_AI_PROVIDER=anthropic + 下面的 ANTHROPIC_AUTH_TOKEN,即可用
-# Claude 订阅额度跑成稿、deepseek 跑选材,npm run generate 直接对照两版文风。
+# 例:ENRICH_AI_PROVIDER=anthropic + 下面的 ANTHROPIC_API_KEY,npm run generate
+# 直接对照两版文风。
 #ENRICH_AI_PROVIDER=anthropic
 #ENRICH_AI_MODEL=claude-opus-5
 #ENRICH_AI_MAX_OUTPUT_TOKENS=4096
@@ -55,12 +55,21 @@ APP_URL=http://localhost:3000/products/daily-brief
 #DEEPSEEK_API_KEY=sk-...
 # AI_PROVIDER=anthropic only:
 #ANTHROPIC_API_KEY=sk-ant-...
-# 或者用 Claude Code 订阅的 setup token(`claude setup-token` 生成,sk-ant-oat 开头,
-# OAuth 凭证走 Bearer 头)。两个都给时 ANTHROPIC_API_KEY 优先。
-#ANTHROPIC_AUTH_TOKEN=sk-ant-oat...
+# 注意:Claude 订阅的 OAuth token(claude setup-token 的 sk-ant-oat…)不能在这里用——
+# Anthropic 服务端只放行官方 Claude Code 客户端,条款也禁止第三方产品使用。
 # AI_PROVIDER=gateway only:
 #AI_GATEWAY_URL=https://your-gateway.example.com
 #AI_GATEWAY_KEY=vk-...
+
+# --- 站长专线(主仓 backend/docs/01):这些账号改走 Claude Code 订阅网关,其他人照旧 ---
+# 全部不设 = 没有专线。线上用 wrangler secret put 逐个设置(URL 与 key 是 secret,
+# 其余也走 secret 免得站长邮箱进公开配置)。
+#OWNER_AI_EMAILS=you@example.com
+#OWNER_AI_PROVIDER=gateway
+#OWNER_AI_MODEL=opus
+#OWNER_FAST_AI_MODEL=sonnet
+#OWNER_AI_GATEWAY_URL=https://cc-gw.example.com
+#OWNER_AI_GATEWAY_KEY=...
 
 # --- pipeline (npm run generate, 本地调试用;生产入口是 pipeline/lambda.ts) ---
 # The pipeline reads this same file. Extra pipeline-only knobs:

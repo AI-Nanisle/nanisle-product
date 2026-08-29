@@ -19,7 +19,7 @@ import {
 import type { Guarded } from "./guard";
 import { safeEqual } from "./guard";
 import { signToken, verifyToken } from "./sso";
-import { aiConfig, fastAiConfig } from "./env";
+import { aiConfig, aiConfigFor, fastAiConfigFor } from "./env";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
 import { ISSUE_ITEM_ID } from "../shared/types";
@@ -931,7 +931,7 @@ async function runWizard(c: Context<Guarded>, fn: WizardHandler) {
 	const ipQuota = await store.reserveQuota(ipQuotaSubject(clientIp(c)), today, "ai", IP_QUOTA_LIMITS.ai);
 	if (!ipQuota.ok) return c.json({ error: IP_LIMIT_MSG }, 429);
 	// 向导/改稿/蒸馏走轻任务档(docs/05 §D):交互端点延迟敏感,flash 快且省。
-	const ctx: WizardContext = { store, email, ai: fastAiConfig(c.env) };
+	const ctx: WizardContext = { store, email, ai: fastAiConfigFor(c.env, email) };
 	try {
 		const result = await fn(ctx, body);
 		return c.json(result.body, result.status);
@@ -1198,7 +1198,7 @@ async function generateInline(
 		};
 	}
 
-	const cfg = aiConfig(env);
+	const cfg = aiConfigFor(env, email);
 	let provider = "mock";
 	try {
 		provider = resolveProvider(cfg);
@@ -1228,7 +1228,7 @@ async function generateInline(
 		const fresh = await maybeDistillTaste(store, email, config, {
 			// 蒸馏走轻任务档(docs/05 §D):结构化摘要,不需要 pro 的深思考
 			call: (system, user) =>
-				complete(fastAiConfig(env, { maxOutputTokens: "2048" }), { prompt: user, system, json: true }).then(
+				complete(fastAiConfigFor(env, email, { maxOutputTokens: "2048" }), { prompt: user, system, json: true }).then(
 					(r) => r.text,
 				),
 			log: (m) => console.log(m),
