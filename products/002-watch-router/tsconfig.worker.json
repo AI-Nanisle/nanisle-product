@@ -4,5 +4,8 @@
 		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
 		"types": ["@cloudflare/workers-types", "vite/client"]
 	},
+	// 测试文件由 `npm test`(node --test,自带 node 类型环境)运行,
+	// 不进 worker 项目——这里的 types 是 workers-types,认不得 node:test。
+	"exclude": ["src/worker/*.test.ts"],
 	"include": ["src/worker"]
 }

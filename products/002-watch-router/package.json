@@ -5,7 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite",
-		"test": "node --experimental-strip-types --test src/shared/ai.test.ts src/shared/subs-guard.test.ts",
+		"test": "node --experimental-strip-types --test src/worker/sso.test.ts src/shared/ai.test.ts src/shared/subs-guard.test.ts",
 		"build": "tsc -b && vite build",
 		"check": "tsc -b && vite build && wrangler deploy --dry-run",
 		"deploy": "npm run build && wrangler deploy",

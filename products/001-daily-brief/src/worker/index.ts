@@ -18,7 +18,7 @@ import {
 } from "./guard";
 import type { Guarded } from "./guard";
 import { safeEqual } from "./guard";
-import { signToken, verifyToken } from "./sso";
+import { AUDIENCE, signToken, verifyToken } from "./sso";
 import { aiConfig, aiConfigFor, fastAiConfigFor } from "./env";
 import type { AppEnv } from "./env";
 import type { Brief, FeedbackEvent, FeedbackKind } from "../shared/types";
@@ -142,7 +142,9 @@ app.get("/auth/sso", async (c) => {
 	const secret = c.env.NANISLE_SSO_SECRET;
 	// 没配共享密钥的实例本来就不做登录门禁,直接回配置页
 	if (!secret) return c.redirect(appUrl(c.env, "config"), 302);
-	const payload = await verifyToken(secret, c.req.query("token") ?? "");
+	// 只认主站签给**本产品**的手递票:aud 对不上(签给别的产品)或 typ 对不上
+	// (拿会话 cookie 来冒充手递)都在这里被拒,文案不区分原因。
+	const payload = await verifyToken(secret, c.req.query("token") ?? "", { aud: AUDIENCE, typ: "sso" });
 	if (!payload) {
 		// 不自动跳回主站重签:两边密钥配错时会陷入 302 死循环,这里停下来说清楚
 		return c.html(
@@ -156,6 +158,9 @@ app.get("/auth/sso", async (c) => {
 	const session = await signToken(secret, {
 		email: payload.email,
 		exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+		// 会话只对本产品有效,且与手递票不同类——两者不能互相顶用(sso.ts)
+		aud: AUDIENCE,
+		typ: "session",
 	});
 	const scope = sessionCookieScope(c.env);
 	setCookie(c, SESSION_COOKIE, session, {

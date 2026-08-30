@@ -11,7 +11,7 @@
 
 import { createMiddleware } from "hono/factory";
 import { getCookie } from "hono/cookie";
-import { safeEqual, verifyToken } from "./sso";
+import { AUDIENCE, safeEqual, verifyToken } from "./sso";
 import { DEV_USER } from "../shared/store";
 import type { Store } from "../shared/store";
 import { makeStore } from "./store";
@@ -69,7 +69,8 @@ export async function sessionEmail(env: AppEnv, cookie: string | undefined): Pro
 	// 这条回落只在 NANISLE_SSO_SECRET 未配置时生效,托管实例身份只认会话 cookie。
 	if (!env.NANISLE_SSO_SECRET) return env.DEV_EMAIL?.trim() || DEV_USER;
 	if (!cookie) return null;
-	const payload = await verifyToken(env.NANISLE_SSO_SECRET, cookie);
+	// 只认本产品签的会话:aud 挡住别的产品的 cookie,typ 挡住 URL 里捡到的手递票
+	const payload = await verifyToken(env.NANISLE_SSO_SECRET, cookie, { aud: AUDIENCE, typ: "session" });
 	return payload?.email ?? null;
 }
 
