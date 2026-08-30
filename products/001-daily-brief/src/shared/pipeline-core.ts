@@ -410,6 +410,42 @@ export function parseFeed(xml: string): RawEntry[] {
 }
 
 /**
+ * 拒掉指向内网/云元数据的主机(2026-08-30 安全复查)。
+ *
+ * 为什么在 001 也要有:用户自己加的信息源就是一串 URL,存下来之后
+ * **每天由生成 Lambda 抓一次**,抓回来的正文还会被总结进当天的简报里发到邮箱
+ * ——不挡住的话,任何登录用户都能把我们的两个出口(Worker 的试抓、Lambda 的
+ * 日常抓取)当探针,并且把探到的内容原样读出来。试抓那条路还会跟着页面里
+ * 声明的 feed 链接再抓几次,放大同一个问题。
+ *
+ * 只按主机名判:Worker 里没法先解析 DNS 再校验,所以 DNS rebinding 这层挡不住;
+ * 但那需要攻击者控制权威 DNS,和「随手粘一个 169.254.169.254」不是一个量级。
+ *
+ * 与 002 的 `src/shared/discover.ts` 是同一份实现的拷贝——按 docs/conventions.md
+ * 的规矩产品之间不互相 import,同样的东西宁可抄一份。改这里记得改那边。
+ */
+export function isBlockedFeedHost(hostname: string): boolean {
+	const h = hostname.toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+	if (!h) return true;
+	if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+	if (h.includes(":")) {
+		// IPv6:回环、链路本地、唯一本地
+		return h === "::" || h === "::1" || h.startsWith("fe80") || h.startsWith("fc") || h.startsWith("fd");
+	}
+	const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+	if (!m) return false; // 普通域名放行
+	const [a, b] = [Number(m[1]), Number(m[2])];
+	if (m.slice(1).some((x) => Number(x) > 255)) return true;
+	if (a === 0 || a === 10 || a === 127) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 192 && b === 168) return true;
+	if (a === 169 && b === 254) return true; // 云元数据
+	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+	if (a >= 224) return true; // 组播与保留段
+	return false;
+}
+
+/**
  * 查询源:按关键词/分类构造的检索型 feed(docs/02 §7.3 第 1 层)。边界:GitHub
  * releases、YouTube 频道这类构造出来的「具体实体 feed」不算——仪表要区分的是
  * 检索侦察兵 vs 确定的源,供观察式发现(第 4 层)判断何时把前者升级成后者。
@@ -536,8 +572,22 @@ export async function fetchAllSources(
 	// 白花一次抓取预算。跳过时不写 sourceStatus,健康计数原地不动;复活的路
 	// 有两条——周自评对坏源真实试抓一轮(通了清零,见 lambda 的 weekly),
 	// 或用户在来源库「让编辑修一下」换掉它。
-	const active = sources.filter((s) => s.enabled !== false && !isUnhealthy(s));
-	const skippedUnhealthy = sources.filter((s) => s.enabled !== false && isUnhealthy(s)).map((s) => s.name);
+	// 抓取那一刻再挡一次内网地址(2026-08-30 安全复查)。写入路径(cleanSources)
+	// 和试抓(probeFeed)都已经挡了,这一层是给**存量**兜底:护栏是后加的,谁也
+	// 不敢保证库里没有更早写进去的东西,而这里才是真正发出请求的地方。
+	const blocked = sources.filter((s) => {
+		try {
+			return isBlockedFeedHost(new URL(s.url).hostname);
+		} catch {
+			return true; // 连 URL 都解析不了,更不该抓
+		}
+	});
+	if (blocked.length > 0) {
+		log(`[fetch] ${blocked.length} 个源指向内网或不是合法 URL,已跳过:${blocked.map((s) => s.name).join("、")}`);
+	}
+	const usable = sources.filter((s) => !blocked.includes(s));
+	const active = usable.filter((s) => s.enabled !== false && !isUnhealthy(s));
+	const skippedUnhealthy = usable.filter((s) => s.enabled !== false && isUnhealthy(s)).map((s) => s.name);
 	if (skippedUnhealthy.length > 0) {
 		log(`[fetch] ${skippedUnhealthy.length} 个源连续失败中,本轮跳过:${skippedUnhealthy.join("、")}`);
 	}

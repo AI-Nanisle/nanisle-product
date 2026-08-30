@@ -6,6 +6,8 @@
 // 重定向才知道真实 ID,Worker 里跟跳转要花一次 fetch——v1 不做,短链按
 // URL hash 归一,代价是同内容短链/长链各占一个缓存位,不影响正确性。
 
+import { isBlockedFeedHost } from "./discover.ts";
+
 export type Lane = "fast" | "slow";
 
 export interface ContentId {
@@ -33,13 +35,22 @@ async function sha256Hex(s: string): Promise<string> {
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** URL → 平台 + 内容 ID + 车道。抛错 = 不是合法 http(s) URL(调用方给 400)。 */
+/** URL → 平台 + 内容 ID + 车道。抛错 = 这个 URL 不许进(调用方给 400)。 */
 export async function identifyUrl(raw: string): Promise<ContentId> {
 	const url = new URL(raw);
 	// 协议白名单:后续两条车道都会拿这个 URL 去 fetch/喂 yt-dlp,
 	// 非 http(s) 一律在门口拒掉
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
 		throw new Error("only http(s) URLs");
+	}
+	// 主机名黑名单:和订阅那条路用的是同一个函数(2026-08-30 安全复查)。
+	// 之前只有订阅入口做了这层,而 /api/submit 才是更显眼的入口——粘一个
+	// `https://10.0.0.5/x` 会当文章走快车道(Worker 去 fetch),粘一个
+	// `https://<内网地址>/x.mp3` 会当播客走慢车道(消费者 Lambda 去 fetch),
+	// 抓回来的正文还会被总结进结果里回显给提交者,等于一条读取通道。
+	// 两个出口今天各自还有一层平台级保护,但那不该是唯一的一层。
+	if (isBlockedFeedHost(url.hostname)) {
+		throw new Error("blocked host");
 	}
 	const host = url.hostname.toLowerCase().replace(/^www\./, "");
 

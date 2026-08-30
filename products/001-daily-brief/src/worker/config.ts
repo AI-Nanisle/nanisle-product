@@ -8,6 +8,7 @@ import {
 	MAX_INTENT_VERSIONS,
 	SOURCE_CATEGORIES,
 	fnv1a,
+	isBlockedFeedHost,
 	joinSegments,
 	normalizeQuota,
 } from "../shared/pipeline-core.ts";
@@ -83,6 +84,13 @@ export function cleanSources(raw: unknown): { sources: SourceConfig[] } | { erro
 		const category = s.category as SourceConfig["category"];
 		if (!name || name.length > 100) return { error: `source #${i + 1}: name required (≤100 chars)` };
 		if (!/^https?:\/\/\S+$/.test(url) || url.length > 500) return { error: `source #${i + 1}: url must be http(s)` };
+		// 内网/云元数据地址不许存进来:这串 URL 之后每天由生成 Lambda 抓一次,
+		// 抓回来的内容会进简报回显给用户(见 pipeline-core 的 isBlockedFeedHost)。
+		try {
+			if (isBlockedFeedHost(new URL(url).hostname)) return { error: `source #${i + 1}: 不接受内网地址` };
+		} catch {
+			return { error: `source #${i + 1}: url must be http(s)` };
+		}
 		if (!SOURCE_CATEGORIES.includes(category)) return { error: `source #${i + 1}: bad category` };
 		const maxItems =
 			typeof s.max_items === "number" && s.max_items >= 1 && s.max_items <= 50 ? Math.floor(s.max_items) : undefined;

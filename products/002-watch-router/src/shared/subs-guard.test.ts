@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { isBlockedFeedHost, parseSubscriptionInput } from "./discover.ts";
+import { identifyUrl } from "./content-id.ts";
 import { MemoryStore, QUOTA_LIMITS, QuotaExceededError } from "./store.ts";
 
 describe("isBlockedFeedHost", () => {
@@ -88,5 +89,38 @@ describe("订阅额度与提交额度分开计", () => {
 		for (let i = 0; i < QUOTA_LIMITS.submit; i++) await store.reserveQuota("a@b.c", "2026-08-29");
 		await assert.rejects(store.reserveQuota("a@b.c", "2026-08-29"), QuotaExceededError);
 		assert.equal(await store.getQuota("a@b.c", "2026-08-29"), QUOTA_LIMITS.submit);
+	});
+});
+
+// 提交入口的主机名黑名单(2026-08-30 安全复查)。此前 isBlockedFeedHost 只挂在
+// 订阅那条路上,而 /api/submit 才是更显眼的入口:非平台 URL 走快车道由 Worker
+// 抓,`.mp3` 结尾的走慢车道由消费者 Lambda 抓,抓回来的正文还会总结进结果
+// 回显给提交者。
+describe("identifyUrl 的主机名黑名单", () => {
+	it("拒绝内网与云元数据(快车道那条路)", async () => {
+		for (const u of [
+			"https://169.254.169.254/latest/meta-data/",
+			"http://127.0.0.1:8787/admin",
+			"https://10.0.0.5/internal",
+			"https://[::1]/x",
+			"https://svc.internal/status",
+		]) {
+			await assert.rejects(() => identifyUrl(u), /blocked host/, u);
+		}
+	});
+
+	it("拒绝伪装成播客直链的内网地址(慢车道那条路)", async () => {
+		await assert.rejects(() => identifyUrl("https://169.254.169.254/x.mp3"), /blocked host/);
+		await assert.rejects(() => identifyUrl("https://192.168.1.10/feed/ep1.m4a"), /blocked host/);
+	});
+
+	it("仍然拒绝非 http(s) 协议", async () => {
+		await assert.rejects(() => identifyUrl("file:///etc/passwd"), /only http/);
+	});
+
+	it("正常内容照旧放行,车道不变", async () => {
+		assert.equal((await identifyUrl("https://www.youtube.com/watch?v=abc123XYZ_-")).lane, "slow");
+		assert.equal((await identifyUrl("https://example.com/post/1")).lane, "fast");
+		assert.equal((await identifyUrl("https://example.com/ep/1.mp3")).platform, "podcast");
 	});
 });

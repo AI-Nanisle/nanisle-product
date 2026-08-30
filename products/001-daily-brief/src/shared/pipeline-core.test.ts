@@ -14,6 +14,7 @@ import {
 	buildEditorialPrompt,
 	clusterSameStory,
 	fetchAllSources,
+	isBlockedFeedHost,
 	titleTokens,
 } from "./pipeline-core.ts";
 import { DEFAULT_FILTERS } from "./default-sources.ts";
@@ -257,4 +258,38 @@ test("enrichBrief:连炸两次才认输,保住路由版不抛错", async () => {
 	assert.equal(calls, 2);
 	assert.equal(n, 0);
 	assert.equal(brief.sections[0].items[0].substance, undefined);
+});
+
+// isBlockedFeedHost(2026-08-30 安全复查):用户自加的信息源存下来之后每天由
+// 生成 Lambda 抓一次,抓回来的内容进简报回显——不挡内网地址等于给每个登录用户
+// 一条读取通道。这份实现是 002 src/shared/discover.ts 的拷贝(conventions.md
+// 规定产品间不互 import),两边的用例必须保持一致。
+test("isBlockedFeedHost 挡住回环/私网/云元数据/CGNAT", () => {
+	for (const h of [
+		"127.0.0.1",
+		"127.1.2.3",
+		"10.0.0.5",
+		"172.16.0.1",
+		"172.31.255.255",
+		"192.168.1.1",
+		"169.254.169.254", // 云元数据
+		"100.64.0.1", // CGNAT
+		"0.0.0.0",
+		"224.0.0.1",
+		"localhost",
+		"foo.localhost",
+		"printer.local",
+		"svc.internal",
+		"::1",
+		"fe80::1",
+		"fd00::1",
+	]) {
+		assert.equal(isBlockedFeedHost(h), true, `应拦下 ${h}`);
+	}
+});
+
+test("isBlockedFeedHost 放行正常的公网源", () => {
+	for (const h of ["news.ycombinator.com", "hnrss.org", "8.8.8.8", "172.32.0.1", "192.169.0.1", "example.com"]) {
+		assert.equal(isBlockedFeedHost(h), false, `不该拦 ${h}`);
+	}
 });

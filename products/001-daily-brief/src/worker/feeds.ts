@@ -3,7 +3,7 @@
 // carries. Every source the chat agent touches goes through here first:
 // nothing enters the config unless it actually parsed.
 
-import { parseFeedMeta, USER_AGENT } from "../shared/pipeline-core.ts";
+import { isBlockedFeedHost, parseFeedMeta, USER_AGENT } from "../shared/pipeline-core.ts";
 import type { RawEntry } from "../shared/pipeline-core";
 import { DEFAULT_FILTERS } from "../shared/default-sources.ts";
 
@@ -95,7 +95,11 @@ export async function probeFeed(input: string, timeoutMs = 12_000): Promise<Feed
 	let url = input.trim();
 	if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 	try {
-		void new URL(url);
+		// 内网/云元数据地址在这里就拒:试抓是「立刻用我们的出口打一次这个地址」,
+		// 是这条路上最直接的探针(见 pipeline-core 的 isBlockedFeedHost)。
+		if (isBlockedFeedHost(new URL(url).hostname)) {
+			return { ok: false, url: input, error: "不接受内网地址" };
+		}
 	} catch {
 		return { ok: false, url: input, error: "不是合法的 URL" };
 	}
@@ -117,6 +121,14 @@ export async function probeFeed(input: string, timeoutMs = 12_000): Promise<Feed
 	let attempts = 0;
 	for (const cand of candidates) {
 		if (seen.has(cand)) continue;
+		// 候选来自页面自己声明的 <link>:那是被抓页面说了算的内容,等于第二次
+		// 用户可控输入,必须再过一遍主机名黑名单(否则一个公网页面就能把我们
+		// 的出口指向内网,绕开上面那次校验)。
+		try {
+			if (isBlockedFeedHost(new URL(cand).hostname)) continue;
+		} catch {
+			continue;
+		}
 		if (attempts >= MAX_DISCOVERY_FETCHES) break;
 		seen.add(cand);
 		attempts++;
