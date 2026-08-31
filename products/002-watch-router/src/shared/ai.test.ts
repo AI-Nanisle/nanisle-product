@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, before, describe, it } from "node:test";
-import { applyOwnerRoute, complete, ownerRouteFromEnv, stripJsonFence } from "./ai.ts";
+import { applyOwnerRoute, complete, extractJsonText, ownerRouteFromEnv, stripJsonFence } from "./ai.ts";
 import type { AiConfig } from "./ai.ts";
 
 describe("ownerRouteFromEnv", () => {
@@ -80,12 +80,31 @@ describe("stripJsonFence", () => {
 	});
 });
 
+describe("extractJsonText", () => {
+	it("takes bare JSON and fenced JSON as-is", () => {
+		assert.equal(extractJsonText('{"a":1}'), '{"a":1}');
+		assert.equal(extractJsonText('```json\n{"a":1}\n```'), '{"a":1}');
+	});
+	it("salvages JSON wrapped in prose — the 2026-08-30 失败形态", () => {
+		// stripJsonFence 只认「整段以围栏开头」,前面多一句话它就原样放行
+		assert.equal(extractJsonText('好的,我看完了:\n{"a":1}'), '{"a":1}');
+		assert.equal(extractJsonText('{"a":1}\n\n以上就是全部内容。'), '{"a":1}');
+		assert.equal(extractJsonText('前言\n```json\n{"a":1}\n```\n后记'), '{"a":1}');
+	});
+	it("returns null when there is no parsable object", () => {
+		assert.equal(extractJsonText("完全不是 JSON"), null);
+		assert.equal(extractJsonText('{"a":'), null); // 半截
+		assert.equal(extractJsonText(""), null);
+	});
+});
+
 // 假的 Anthropic 兼容网关:按 SDK 的 SSE 协议吐一段文本,或按 MODE 回错误。
 // 验的是 complete() 的 SDK 路径——流式、onDelta、json 去围栏、专线失败回退。
 describe("complete() via gateway", () => {
 	let server: Server;
 	let base = "";
 	let lastBody: Record<string, unknown> | null = null;
+	let calls = 0;
 	before(async () => {
 		server = createServer((req, res) => {
 			let raw = "";
@@ -110,14 +129,22 @@ describe("complete() via gateway", () => {
 					res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "limit" } }));
 					return;
 				}
-				const text = prompt.includes("MODE:fenced") ? '```json\n{"ok":true}\n```' : `echo:${prompt}`;
+				const text = prompt.includes("MODE:fenced")
+					? '```json\n{"ok":true}\n```'
+					: prompt.includes("MODE:preamble")
+						? '好的,我看完了:\n{"ok":true}'
+						: prompt.includes("MODE:garbage")
+							? "这不是 JSON,一个花括号都没有。"
+							: `echo:${prompt}`;
+				const stopReason = prompt.includes("MODE:maxtokens") ? "max_tokens" : "end_turn";
+				calls++;
 				res.writeHead(200, { "content-type": "text/event-stream" });
 				const ev = (type: string, data: Record<string, unknown>) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
 				ev("message_start", { message: { id: "msg_1", type: "message", role: "assistant", model: "claude-test", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
 				ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
 				for (const piece of text.match(/[\s\S]{1,5}/g) ?? []) ev("content_block_delta", { index: 0, delta: { type: "text_delta", text: piece } });
 				ev("content_block_stop", { index: 0 });
-				ev("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 3 } });
+				ev("message_delta", { delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 3 } });
 				ev("message_stop", {});
 				res.end();
 			});
@@ -164,5 +191,30 @@ describe("complete() via gateway", () => {
 		const routed: AiConfig = { ...gw(), fallback: { provider: "mock" } };
 		await assert.rejects(complete(routed, { prompt: "MODE:400" }));
 		await assert.rejects(complete(routed, { prompt: "MODE:401" }));
+	});
+
+	// ---- 2026-08-30 事故:网关 200 + end_turn,产出却不是裸 JSON ----
+
+	it("salvages JSON that came wrapped in prose", async () => {
+		const r = await complete(gw(), { prompt: "MODE:preamble", system: "S", json: true });
+		assert.equal(r.text, '{"ok":true}');
+	});
+	it("retries once in place when the output is unparsable and there is no fallback", async () => {
+		calls = 0;
+		await assert.rejects(complete(gw(), { prompt: "MODE:garbage", system: "S", json: true }));
+		assert.equal(calls, 2, "应当原地重来一次再放弃");
+	});
+	it("falls back on unparsable output — 专线吐坏一次不该让整单失败", async () => {
+		const routed: AiConfig = { ...gw(), fallback: { provider: "mock" } };
+		const r = await complete(routed, { prompt: "MODE:garbage", system: "S", json: true });
+		assert.equal(r.provider, "mock");
+	});
+	it("treats stop_reason=max_tokens as a failure, not as a short answer", async () => {
+		// 半截 JSON 以前会被当成功放行,到 parseResult 才炸,报错还甩锅给模型
+		await assert.rejects(complete(gw(), { prompt: "MODE:maxtokens", system: "S" }), /max_tokens/);
+	});
+	it("does not police non-json calls", async () => {
+		const r = await complete(gw(), { prompt: "MODE:garbage", system: "S" });
+		assert.equal(r.text, "这不是 JSON,一个花括号都没有。");
 	});
 });

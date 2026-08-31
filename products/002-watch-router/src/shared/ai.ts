@@ -19,6 +19,17 @@ export class AiError extends Error {
 	}
 }
 
+/**
+ * 上游 200 了,产出却不是合法 JSON。单列一类是因为它的处方和上游故障不同:
+ * 有退路的走退路,没退路的原地重来一次——同样的输入,模型下一次多半就规矩了。
+ * status 取 502 让它同时落进 shouldFallBack 的可退路档。
+ */
+export class JsonShapeError extends AiError {
+	constructor(message = "模型没有返回合法 JSON。") {
+		super(message, 502);
+	}
+}
+
 /** 运行时无关的 AI 配置。Worker 用 aiConfig(env) 适配,Lambda 直接从 process.env 拼。 */
 export interface AiConfig {
 	provider?: string;
@@ -153,6 +164,44 @@ export function stripJsonFence(text: string): string {
 	return lastFence > firstNl ? t.slice(firstNl + 1, lastFence).trim() : t.slice(firstNl + 1).trim();
 }
 
+/**
+ * 从模型输出里取出可解析的 JSON 文本,三级递降:
+ *   ① 原样    —— 规矩的输出(deepseek 有 response_format,基本都走这级)
+ *   ② 去围栏  —— stripJsonFence,SDK 路径靠提示词约束时的常见形态
+ *   ③ 捞花括号 —— 第一个 { 到最后一个 },给偶发的前言/后记兜底
+ * 第三级是这次事故补的:stripJsonFence 只认「整段以围栏开头」,输出前面多一句
+ * 「好的,我看完了:」它就原样放行,一路撞到 JSON.parse 才炸,而且报的是
+ * 「模型没有返回合法 JSON」——把一次措辞抖动说成了模型坏掉。
+ * 返回归一化后的文本(调用方后面还要自己 parse 一次);取不出来返回 null。
+ */
+export function extractJsonText(text: string): string | null {
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	const candidates = [text.trim(), stripJsonFence(text).trim(), start >= 0 && end > start ? text.slice(start, end + 1) : ""];
+	for (const c of candidates) {
+		if (!c) continue;
+		try {
+			JSON.parse(c);
+			return c;
+		} catch {
+			// 换下一级
+		}
+	}
+	return null;
+}
+
+/**
+ * 解析不了时留证。只记首尾各 200 字:够认出是「前言」「围栏」还是「半截」,
+ * 又不会把整篇产出灌进日志。2026-08-30 那次事故就卡在这儿——错误信息里一个
+ * 字都没留,网关按设计也不记产出正文,事后无从复原它究竟吐了什么。
+ */
+function logUnparsable(provider: AiProvider, model: string, text: string): void {
+	console.error(
+		`json parse failed: provider=${provider} model=${model} chars=${text.length} ` +
+			`head=${JSON.stringify(text.slice(0, 200))} tail=${JSON.stringify(text.slice(-200))}`,
+	);
+}
+
 const JSON_ONLY_HINT = "只输出一个 JSON 对象本身,不要 Markdown 代码围栏,不要任何解释文字。";
 
 export interface CompleteInput {
@@ -280,11 +329,22 @@ async function completeDeepseek(cfg: AiConfig, input: CompleteInput): Promise<Co
 		}
 		if (!res.body) throw new AiError("上游 AI 错误,请稍后重试。", 502);
 		const { text, finish } = await readSse(res.body, input.onDelta);
-		if (text) return { text, provider: "deepseek", model };
-		console.error(`deepseek empty content, finish_reason=${finish}, max_tokens=${maxTokens(cfg)}, attempt=${attempt + 1}`);
+		// 有文本不等于这次调用成功。以前这里是 `if (text) return`,于是两种坏结果被
+		// 当成好结果放行,半截 JSON 一路传到 parse 才炸:
+		//   finish=length —— 预算(含思考)用尽,JSON 断在半路
+		//   finish 缺失   —— 流在终止 chunk 之前就断了。优雅关闭,reader 不抛错,
+		//                     usage chunk 也不会来,现场干净得像正常结束
 		if (finish === "length") {
 			throw new AiError("模型输出被 max_tokens 截断(思考也占预算),请调大 AI_MAX_OUTPUT_TOKENS。", 502);
 		}
+		if (text && finish === "stop") return { text, provider: "deepseek", model };
+		if (text) {
+			// 截断的流:重试一次(瞬时故障),再不行如实报连接问题,别赖模型
+			console.error(`deepseek stream ended without finish_reason (finish=${finish}, chars=${text.length}), attempt=${attempt + 1}`);
+			if (attempt >= 1) throw new AiError("上游连接中断,请重试。", 502);
+			continue;
+		}
+		console.error(`deepseek empty content, finish_reason=${finish}, max_tokens=${maxTokens(cfg)}, attempt=${attempt + 1}`);
 		if (attempt >= 1) throw new AiError("模型返回了空结果,请重试。", 502);
 	}
 }
@@ -307,7 +367,16 @@ function shouldFallBack(err: unknown): boolean {
  * 带 fallback 的配置(站长专线)失败时用退路重试一次:任务失败比多花几毛钱严重。
  */
 export async function complete(cfg: AiConfig, input: CompleteInput): Promise<CompleteResult> {
-	if (!cfg.fallback) return completeOnce(cfg, input);
+	if (!cfg.fallback) {
+		try {
+			return await completeOnce(cfg, input);
+		} catch (err) {
+			// 只重来这一类:上游是好的,只是这一次没按 JSON 说话。上游故障重来也是白花钱
+			if (!(err instanceof JsonShapeError)) throw err;
+			console.error("[json-retry] 产出解析不了,原样再要一次");
+			return completeOnce(cfg, input);
+		}
+	}
 	try {
 		return await completeOnce(cfg, input);
 	} catch (err) {
@@ -318,7 +387,25 @@ export async function complete(cfg: AiConfig, input: CompleteInput): Promise<Com
 	}
 }
 
+/**
+ * 一次调用 + 交付前验收。json 调用在这里把「是不是合法 JSON」验掉,而不是留给
+ * 各个调用方自己 JSON.parse:验在这一层,失败才落进 complete() 的退路/重试机制
+ * (2026-08-30 那次就是坏 JSON 从这里溜出去,parseResult 才炸,退路根本没机会触发)。
+ * 返回的 text 是归一化过的——调用方拿到的一定是能 parse 的那一段。
+ */
 async function completeOnce(cfg: AiConfig, input: CompleteInput): Promise<CompleteResult> {
+	const res = await completeRaw(cfg, input);
+	// mock 的产出本来就不是 JSON(零配置演示),不参与验收,行为与改动前一致
+	if (!input.json || res.provider === "mock") return res;
+	const json = extractJsonText(res.text);
+	if (json === null) {
+		logUnparsable(res.provider, res.model, res.text);
+		throw new JsonShapeError();
+	}
+	return { ...res, text: json };
+}
+
+async function completeRaw(cfg: AiConfig, input: CompleteInput): Promise<CompleteResult> {
 	const provider = resolveProvider(cfg);
 
 	if (provider === "mock") {
@@ -353,10 +440,15 @@ async function completeOnce(cfg: AiConfig, input: CompleteInput): Promise<Comple
 	if (message.stop_reason === "refusal") {
 		throw new AiError("The model declined this request.", 422);
 	}
+	// 和 deepseek 的 finish=length 同一件事:产出被预算截断,拿到的是半截
+	if (message.stop_reason === "max_tokens") {
+		throw new AiError("模型输出被 max_tokens 截断,请调大 AI_MAX_OUTPUT_TOKENS。", 502);
+	}
 
 	const raw = message.content
 		.filter((block) => block.type === "text")
 		.map((block) => block.text)
 		.join("");
-	return { text: input.json ? stripJsonFence(raw) : raw, provider, model: message.model };
+	// 去围栏不在这里做了:json 调用统一由 completeOnce 的 extractJsonText 归一
+	return { text: raw, provider, model: message.model };
 }
