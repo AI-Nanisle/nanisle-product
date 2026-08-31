@@ -674,7 +674,18 @@ export default function App() {
 	const secNo = (key: string) => String(sections.indexOf(key) + 1).padStart(2, "0");
 	const notesChars = notes ? notes.reduce((s, n) => s + n.body.reduce((t, p) => t + p.length, 0), 0) : 0;
 
-	function Pos({ start, children }: { start: number; children: ReactNode }) {
+	/**
+	 * 下面两个是**渲染辅助函数,不是组件**——调用它们(`{pos(...)}`)而不是写成
+	 * `<Pos />`。区别不是风格:定义在 App 体内的函数每次渲染都是一个新的函数引用,
+	 * React 认它是「另一种组件类型」,于是每渲染一次就把它的整棵子树卸载重建。
+	 * 想法输入框正好落在这棵子树里:每敲一个字 → setNoteText → App 重渲染 →
+	 * textarea 的 DOM 节点被销毁重建,iOS 上待插入的那个字符会落进新节点再来一遍,
+	 * 打出来就是「iihhssuuqq」(2026-08-31 站长在 iPhone 上报的)。顺带,一份 23 章
+	 * 一万多字的笔记每敲一下就整棵重建,手机上光是这个也卡得不像话。
+	 * 写成函数调用后它们返回的 JSX 直接内联进 App 自己的树里,没有组件边界,
+	 * 按位置复用,textarea 从头到尾是同一个 DOM 节点。
+	 */
+	function pos(start: number, children: ReactNode): ReactNode {
 		if (canJumpText) {
 			return (
 				<button type="button" className="pos-link" onClick={() => jumpToPara(start)}>
@@ -698,8 +709,8 @@ export default function App() {
 	/** 版本对不上的定点想法:不挂原位(序号已指向别的内容),沉到「我的想法」。 */
 	const orphanNotes = canNote ? (note?.entries ?? []).filter((e) => e.target !== "general" && !inCurrentVersion(e)) : [];
 
-	/** N 线 · 一个锚点上的想法区:已有条目 + 「记一笔」入口。 */
-	function NoteSpot({ target, always }: { target: string; always?: boolean }) {
+	/** N 线 · 一个锚点上的想法区:已有条目 + 「记一笔」入口。同上,是函数不是组件。 */
+	function noteSpot(target: string, always?: boolean): ReactNode {
 		if (!canNote) return null;
 		const entries = (note?.entries ?? []).filter((e) => e.target === target && (target === "general" || inCurrentVersion(e)));
 		const open = noteAt === target;
@@ -999,7 +1010,7 @@ export default function App() {
 												<span className="ov-label ov-counter">反着想</span>
 												{result.overview.counter}
 											</p>
-											<NoteSpot target="overview" />
+											{noteSpot("overview")}
 										</div>
 									</section>
 								)}
@@ -1023,9 +1034,12 @@ export default function App() {
 													<article key={n.chapter} className={`note-ch${low ? " low" : ""}`}>
 														<header className="note-ch-head">
 															<span className="tc">
-																<Pos start={ch.start}>
-																	{fmtPos(ch.start)}–{fmtPos(ch.end)}
-																</Pos>
+																{pos(
+																	ch.start,
+																	<>
+																		{fmtPos(ch.start)}–{fmtPos(ch.end)}
+																	</>,
+																)}
 															</span>
 															<h3 className="note-title">
 																{low ? ch.gist : n.title}
@@ -1049,7 +1063,7 @@ export default function App() {
 																			{typeof kp.start === "number" && (
 																				<>
 																					{" · "}
-																					<Pos start={kp.start}>{fmtPos(kp.start)}</Pos>
+																					{pos(kp.start, fmtPos(kp.start))}
 																				</>
 																			)}
 																			{kp.anchored === false && (
@@ -1063,7 +1077,7 @@ export default function App() {
 															</ul>
 														)}
 														{n.filled && <p className="note-filled">· 覆盖检查发现这一段原本没有要点,已补上</p>}
-														{!low && <NoteSpot target={`ch:${n.chapter}`} />}
+														{!low && noteSpot(`ch:${n.chapter}`)}
 													</article>
 												);
 											})}
@@ -1107,7 +1121,7 @@ export default function App() {
 													{typeof kp.start === "number" && (
 														<>
 															{" · "}
-															<Pos start={kp.start}>{fmtPos(kp.start)}</Pos>
+															{pos(kp.start, fmtPos(kp.start))}
 														</>
 													)}
 													{kp.anchored === false && (
@@ -1119,7 +1133,7 @@ export default function App() {
 															</span>
 														)}
 												</div>
-												<NoteSpot target={`kp:${i}`} />
+												{noteSpot(`kp:${i}`)}
 											</li>
 										))}
 									</ul>
@@ -1140,14 +1154,17 @@ export default function App() {
 										{result.chapters.map((ch, i) => (
 											<li key={i} className={ch.value === "low" ? "low" : ""}>
 												<span className="tc">
-													<Pos start={ch.start}>
-														{fmtPos(ch.start)}–{fmtPos(ch.end)}
-													</Pos>
+													{pos(
+														ch.start,
+														<>
+															{fmtPos(ch.start)}–{fmtPos(ch.end)}
+														</>,
+													)}
 												</span>
 												<span className="gist">
 													{ch.gist}
 													{ch.tracked && <span className="tracked-chip">与你的追踪相关 · {ch.tracked}</span>}
-													<NoteSpot target={`ch:${i}`} />
+													{noteSpot(`ch:${i}`)}
 												</span>
 											</li>
 										))}
@@ -1204,7 +1221,7 @@ export default function App() {
 													</button>
 												</div>
 											))}
-											<NoteSpot target="general" always />
+											{noteSpot("general", true)}
 										</div>
 									</section>
 								)}

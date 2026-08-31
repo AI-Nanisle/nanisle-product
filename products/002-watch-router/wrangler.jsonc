@@ -53,9 +53,12 @@
 		"AI_MODEL": "deepseek-v4-pro",
 		// 轻任务档:用户级高亮小调用(docs/02 T4 第二次调用)
 		"FAST_AI_MODEL": "deepseek-v4-flash",
-		// 16384:V4 Pro 的 thinking 占输出预算,高密度长文在 8192 下被截断
-		// (finish=length,线上实测;Lambda 侧同值)
-		"AI_MAX_OUTPUT_TOKENS": "16384",
+		// 32768:V4 Pro 的 thinking 也占输出预算,所以这个数不是「产出能多长」而是
+		// 「思考 + 产出一共能多长」。8192 时高密度长文被截断(finish=length);16384
+		// 也已经贴着墙——2026-08-31 拿一小时视频实测,completion 用到 14896/16384,
+		// 其中 thinking 11812,只剩 9% 余量,思考多绕一圈就越界。抬到 32768(DeepSeek
+		// 与 Claude 都收)。用不到不花钱:计费按实际 token,这只是上限。Lambda 侧同值
+		"AI_MAX_OUTPUT_TOKENS": "32768",
 		"APP_URL": "https://nanisle.com/products/watch-router",
 		// 订阅日报发件地址(docs/05 §3.5)。域名身份 nanisle.com 在 001 的 SES 里已验证,同账号直接用
 		"EMAIL_FROM": "watch@nanisle.com",
