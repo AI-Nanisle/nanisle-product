@@ -15,6 +15,7 @@ import type { ExtractPath } from "../shared/schema";
 import { extractArticle, textToParagraphs } from "./extract";
 import {
 	CONTENT_CACHE_TTL_S,
+	INFLIGHT_FAST_TIMEOUT_MS,
 	MAX_NOTE_ENTRIES,
 	QUOTA_LIMITS,
 	QuotaExceededError,
@@ -22,7 +23,7 @@ import {
 	contentCacheKey,
 	readCachedContent,
 } from "../shared/store";
-import type { CachedContent, TaskRecord, TaskStep } from "../shared/store";
+import type { CachedContent, InflightRecord, TaskRecord, TaskStep } from "../shared/store";
 import { aiConfig, aiConfigFor, awsConfigured, fastAiConfigFor } from "./env";
 import type { AppEnv } from "./env";
 import { computeTracked, mergeTracked } from "./interop";
@@ -231,6 +232,26 @@ app.post("/api/submit", userAiGuard, async (c) => {
 		const ai = aiConfigFor(env, email);
 		const isMock = resolveProvider(ai) === "mock";
 
+		// 在跑的一单登记:快车道活在 waitUntil 里,页面关了也照跑,没有这条指针
+		// 就没人知道它还在跑(慢车道靠 taskId,快车道只能靠 Worker 自己报活)
+		const startedAt = Date.now();
+		const inflight: InflightRecord = {
+			lane: "fast",
+			url: url || "",
+			contentKey: cid.key,
+			startedAt,
+			updatedAt: startedAt,
+		};
+		let lastTouch = 0;
+		/** 报活:phase 变了必写,同一 phase 内(逐章笔记)最多 20 秒一次,别把 DDB 当日志。 */
+		const touch = async (phase: string, done?: number, total?: number) => {
+			const now = Date.now();
+			if (phase === inflight.phase && now - lastTouch < 20_000) return;
+			lastTouch = now;
+			Object.assign(inflight, { phase, done, total, updatedAt: now });
+			await store.putInflight(email, { ...inflight }).catch(() => {});
+		};
+
 		c.executionCtx.waitUntil(
 			(async () => {
 				const ping = setInterval(() => void send({ type: "ping" }), 10_000);
@@ -241,6 +262,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					let path: "article" | "paste";
 					if (url) {
 						await send({ type: "phase", phase: "extracting" });
+						await touch("extracting");
 						const ex = await extractArticle(url, env.JINA_KEY);
 						if (!ex.ok) {
 							await send({ type: "error", error: ex.error, needPaste: true });
@@ -272,6 +294,7 @@ app.post("/api/submit", userAiGuard, async (c) => {
 
 					// W5:一次编辑调用(mock 模式内部返回示例);W6:锚定校验
 					await send({ type: "phase", phase: "editing" });
+					await touch("editing");
 					let chars = 0;
 					let lastPush = 0;
 					let result;
@@ -303,12 +326,16 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					const totalChars = edited.paragraphs.reduce((s, p) => s + p.length, 0);
 					if (totalChars >= NOTES_MIN_CHARS) {
 						await send({ type: "phase", phase: "notes", done: 0, total: result.chapters.length });
+						await touch("notes", 0, result.chapters.length);
 						result = await buildNotes(ai, fastAiConfigFor(env, email), {
 							kind: "text",
 							source: edited.source,
 							result,
 							paragraphs: edited.paragraphs,
-							onChapter: (done, total) => void send({ type: "phase", phase: "notes", done, total }),
+							onChapter: (done, total) => {
+								void send({ type: "phase", phase: "notes", done, total });
+								void touch("notes", done, total);
+							},
 						});
 					}
 
@@ -336,6 +363,8 @@ app.post("/api/submit", userAiGuard, async (c) => {
 					await send({ type: "error", error: "处理失败,请稍后重试。" });
 				} finally {
 					clearInterval(ping);
+					// 无论成败都注销:成了的话结果已进内容缓存,接回的一方查缓存就够
+					await store.clearInflight(email).catch(() => {});
 					await writer.close().catch(() => {});
 				}
 			})(),
@@ -367,6 +396,17 @@ app.post("/api/submit", userAiGuard, async (c) => {
 		updatedAt: Date.now(),
 	};
 	await store.createTask(task);
+	// 登记在跑的一单;失败不拦路(顶多是刷新后接不回,不该连提交都做不成)
+	await store
+		.putInflight(email, {
+			lane: "slow",
+			url,
+			contentKey: cid.key,
+			taskId: task.id,
+			startedAt: task.createdAt,
+			updatedAt: task.createdAt,
+		})
+		.catch(() => {});
 
 	if (awsConfigured(c.env) && c.env.QUEUE_URL) {
 		await sendTask(c.env, {
@@ -493,6 +533,55 @@ app.post("/api/note/delete", userGuard, async (c) => {
 	if (next.length === note.entries.length) return c.json({ error: "没有这条想法。" }, 404);
 	await store.putNote(email, { ...note, entries: next, updatedAt: Date.now() });
 	return c.json({ ok: true });
+});
+
+// ---------- 接回在跑的一单(2026-08-30;刷新/换设备都不丢进度) ----------
+
+app.get("/api/inflight", userGuard, async (c) => {
+	const store = c.get("store");
+	const email = c.get("email");
+	const rec = await store.getInflight(email);
+	if (!rec) return c.json({ active: false });
+
+	if (rec.lane === "slow") {
+		const task = rec.taskId ? await store.getTask(rec.taskId) : null;
+		// 任务没了(24 小时 ttl)或已收场:指针自愈式清掉,页面按「没有在跑的一单」开。
+		// 收场时不在这里回结果——慢车道有 /api/task/:id 这条现成的路,让它一条路走到底
+		if (!task || task.status === "done" || task.status === "failed") {
+			await store.clearInflight(email);
+			return c.json({ active: false });
+		}
+		return c.json({ active: true, lane: "slow", taskId: rec.taskId, url: rec.url, step: task.step });
+	}
+
+	// 快车道:结果进没进内容缓存是唯一可信的完成信号(Worker 被回收不会留话)
+	const cached = await readCachedContent(c.env.WATCH, rec.contentKey);
+	if (cached) {
+		await store.clearInflight(email);
+		const merged = await withTracked(c.env, store, email, rec.contentKey, rec.url || cached.url || "", cached.result);
+		return c.json({
+			active: false,
+			done: true,
+			contentKey: rec.contentKey,
+			result: merged,
+			resultAt: cached.cachedAt,
+			...(cached.url ?? rec.url ? { url: cached.url ?? rec.url } : {}),
+			...(cached.paragraphs ? { paragraphs: cached.paragraphs } : {}),
+		});
+	}
+	if (Date.now() - rec.updatedAt > INFLIGHT_FAST_TIMEOUT_MS) {
+		await store.clearInflight(email);
+		return c.json({ active: false, failed: true, error: "上一单跑到一半断了(服务端被回收)。重新提交一次吧。" });
+	}
+	return c.json({
+		active: true,
+		lane: "fast",
+		contentKey: rec.contentKey,
+		url: rec.url,
+		phase: rec.phase,
+		done: rec.done,
+		total: rec.total,
+	});
 });
 
 // ---------- 任务轮询(W11) ----------

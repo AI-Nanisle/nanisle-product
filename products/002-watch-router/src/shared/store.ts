@@ -56,6 +56,34 @@ export interface TaskRecord {
 	origin?: "user" | "subscription";
 }
 
+/**
+ * 在跑的一单(2026-08-30 补:进度以前只活在浏览器 state 里,一刷新就失联)。
+ * 一个用户同一时刻只可能有一单在跑(收单按钮 busy 时禁用),所以是定长的
+ * USER#<email>/INFLIGHT 一条,不是列表。任何设备打开页面都读它接回进度。
+ *   lane=slow:靠 taskId 走既有的 /api/task/:id,进度由消费者报活
+ *   lane=fast:活在 Worker 的 waitUntil 里,没有消费者报活,Worker 自己边跑边写 phase;
+ *             「完成了没有」的唯一信号是内容缓存里有没有 contentKey
+ */
+export interface InflightRecord {
+	lane: "fast" | "slow";
+	url: string;
+	contentKey: string;
+	/** 慢车道任务 id;lane=fast 没有。 */
+	taskId?: string;
+	/** 快车道阶段:extracting | editing | notes(done/total 是逐章进度)。 */
+	phase?: string;
+	done?: number;
+	total?: number;
+	startedAt: number;
+	updatedAt: number;
+}
+
+/**
+ * 快车道没有消费者报活,只能靠「多久没更新 phase」判死。取 8 分钟:最长的一次
+ * 逐章笔记也就三四分钟,而 Worker 被回收时不会留下任何痕迹,不判死就永远挂着。
+ */
+export const INFLIGHT_FAST_TIMEOUT_MS = 8 * 60 * 1000;
+
 // ---------- 订阅模式(docs/05 §3.2;键约定见下) ----------
 //   SUBSCRIBERS / <email>                  有订阅的用户索引(cron 枚举用;最后一个订阅删掉时一并删)
 //   USER#<email> / SUB#<platform>:<id>     一条订阅
@@ -210,6 +238,11 @@ export interface Store {
 	claimSubRun(email: string, date: string, staleMs?: number): Promise<ClaimResult>;
 	getPrefs(email: string): Promise<UserPrefs>;
 	putPrefs(email: string, prefs: UserPrefs): Promise<void>;
+
+	// 在跑的一单(跨设备接回进度)
+	getInflight(email: string): Promise<InflightRecord | null>;
+	putInflight(email: string, rec: InflightRecord): Promise<void>;
+	clearInflight(email: string): Promise<void>;
 }
 
 export interface DdbConfig {
@@ -603,6 +636,33 @@ export class DdbStore implements Store {
 			Item: { PK: this.userPk(email), SK: { S: "PREFS" }, body: { S: JSON.stringify(prefs) } },
 		});
 	}
+
+	async getInflight(email: string): Promise<InflightRecord | null> {
+		const out = await this.call<{ Item?: { body?: { S?: string } } }>("GetItem", {
+			Key: { PK: this.userPk(email), SK: { S: "INFLIGHT" } },
+		});
+		try {
+			return out.Item?.body?.S ? (JSON.parse(out.Item.body.S) as InflightRecord) : null;
+		} catch {
+			return null;
+		}
+	}
+
+	async putInflight(email: string, rec: InflightRecord): Promise<void> {
+		await this.call("PutItem", {
+			Item: {
+				PK: this.userPk(email),
+				SK: { S: "INFLIGHT" },
+				body: { S: JSON.stringify(rec) },
+				// 清理漏了也不会永远挂着:一单最长十几分钟,一天的 ttl 是纯兜底
+				ttl: { N: String(Math.floor(rec.startedAt / 1000) + 24 * 3600) },
+			},
+		});
+	}
+
+	async clearInflight(email: string): Promise<void> {
+		await this.call("DeleteItem", { Key: { PK: this.userPk(email), SK: { S: "INFLIGHT" } } });
+	}
 }
 
 /** call() 内部用:条件写失败(到上限 / 任务不存在)与真故障分流的标记。 */
@@ -734,6 +794,21 @@ export class MemoryStore implements Store {
 
 	async putPrefs(email: string, prefs: UserPrefs): Promise<void> {
 		this.prefs.set(email, { ...prefs });
+	}
+
+	private inflight = new Map<string, InflightRecord>();
+
+	async getInflight(email: string): Promise<InflightRecord | null> {
+		const r = this.inflight.get(email);
+		return r ? { ...r } : null;
+	}
+
+	async putInflight(email: string, rec: InflightRecord): Promise<void> {
+		this.inflight.set(email, { ...rec });
+	}
+
+	async clearInflight(email: string): Promise<void> {
+		this.inflight.delete(email);
 	}
 }
 

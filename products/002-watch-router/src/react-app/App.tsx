@@ -112,6 +112,37 @@ const STEPS = [
 	["done", "完成"],
 ] as const;
 
+/**
+ * GET /api/inflight:「我现在有没有一单在跑」。两条车道都跑在服务端(慢车道是
+ * SQS→Lambda,快车道是 Worker 的 waitUntil),关掉页面它们照跑;可进度以前只活在
+ * 这个组件的 state 里,一刷新就失联。指针存服务端而不是 localStorage,是为了换
+ * 设备也能接回——手机上提交、电脑上打开,看到的是同一单。
+ */
+interface InflightResponse {
+	active: boolean;
+	lane?: "fast" | "slow";
+	taskId?: string;
+	contentKey?: string;
+	url?: string;
+	step?: string;
+	phase?: string;
+	done?: number;
+	total?: number;
+	/** 快车道刚好在这一跳之前跑完:结果直接随响应回来。 */
+	result?: WatchResult;
+	resultAt?: number;
+	paragraphs?: string[];
+	failed?: boolean;
+	error?: string;
+}
+
+/** 快车道状态行文案。SSE 推来的事件和接回时读的指针共用同一套措辞。 */
+function fastPhaseLabel(phase?: string, done?: number, total?: number): string {
+	if (phase === "extracting") return "抽取正文中";
+	if (phase === "notes") return `逐章写详细笔记 · ${done ?? 0}/${total ?? "?"} 章`;
+	return "编辑中(长文要一两分钟)";
+}
+
 function fmtTime(sec: number): string {
 	const m = Math.floor(sec / 60);
 	const s = Math.floor(sec % 60);
@@ -211,6 +242,9 @@ export default function App() {
 		// ?open=<contentKey>:订阅邮件的回链(docs/05 §3.5),直接重开这条记录
 		const open = params.get("open");
 		if (open) void openRecord({ contentKey: open, at: 0 });
+		// 刷新/重开页面:上一趟还没收场的那一单接着看,进度条不再凭空消失。
+		// ?open= 是读者点邮件回链明确要看某一条,别让接回抢了那块地方
+		if (!open) void resumeInflight();
 		fetch(apiPath("health"))
 			.then((r) => r.json() as Promise<Health>)
 			.then(setHealth)
@@ -426,13 +460,7 @@ export default function App() {
 					continue;
 				}
 				if (ev.type === "phase") {
-					setFastStatus(
-						ev.phase === "extracting"
-							? "抽取正文中"
-							: ev.phase === "notes"
-								? `逐章写详细笔记 · ${ev.done ?? 0}/${ev.total ?? "?"} 章`
-								: "编辑中(长文要一两分钟)",
-					);
+					setFastStatus(fastPhaseLabel(ev.phase, ev.done, ev.total));
 				} else if (ev.type === "delta" && typeof ev.chars === "number") {
 					setFastStatus(`编辑中 · 已生成 ${ev.chars} 字`);
 				} else if (ev.type === "result" && ev.result) {
@@ -444,13 +472,22 @@ export default function App() {
 		}
 	}
 
-	/** F6 · 慢车道:轮询任务直到 done/failed;超时由服务端判定。 */
-	async function pollTask(taskId: string) {
+	/**
+	 * F6 · 慢车道:轮询任务直到 done/failed;超时由服务端判定。
+	 * resume=true 是刷新后接回旧任务:第一次立刻问(别让读者再对着空状态等 2.5 秒),
+	 * 且任务已经不在时安静收场——过期/换账号不是读者这次操作造成的,不该弹错。
+	 */
+	async function pollTask(taskId: string, resume = false) {
+		let wait = !resume;
 		for (;;) {
-			await new Promise((r) => setTimeout(r, 2500));
+			if (wait) await new Promise((r) => setTimeout(r, 2500));
+			wait = true;
 			const res = await fetch(apiPath(`task/${taskId}`));
 			const data = (await res.json()) as TaskResponse;
 			if (!res.ok) {
+				// 接回时任务已经不在(24 小时 ttl 过期、换了账号)就安静收场:
+				// 不是读者这次操作造成的,不该拿一条红字迎接他
+				if (resume && res.status === 404) return;
 				setError((data as { error?: string }).error ?? `轮询失败(${res.status})`);
 				return;
 			}
@@ -464,6 +501,95 @@ export default function App() {
 				return;
 			}
 		}
+	}
+
+	/** 接回慢车道:状态行照常走那条五步进度。 */
+	async function resumeSlow(taskId: string, step?: string) {
+		setBusy(true);
+		setError("");
+		setStep(step ?? "queued");
+		try {
+			await pollTask(taskId, true);
+		} catch {
+			setError("网络错误,稍后再试。");
+		} finally {
+			setBusy(false);
+			setStep(null);
+			refreshUsage();
+		}
+	}
+
+	/**
+	 * 接回快车道。原来那条 SSE 随刷新一起断了,而且重连不了(写端在 Worker 的
+	 * waitUntil 里,拿不回来),所以接回改成轮询 /api/inflight——同一份指针,换个读法。
+	 */
+	async function resumeFast(contentKey: string, first: InflightResponse) {
+		setBusy(true);
+		setError("");
+		setFastStatus(fastPhaseLabel(first.phase, first.done, first.total));
+		try {
+			for (;;) {
+				await new Promise((r) => setTimeout(r, 2500));
+				const res = await fetch(apiPath("inflight"));
+				if (!res.ok) return;
+				const d = (await res.json()) as InflightResponse;
+				if (d.result) {
+					present({ contentKey: d.contentKey, result: d.result, resultAt: d.resultAt, paragraphs: d.paragraphs, url: d.url });
+					return;
+				}
+				if (d.active) {
+					setFastStatus(fastPhaseLabel(d.phase, d.done, d.total));
+					continue;
+				}
+				if (d.failed && d.error) {
+					setError(d.error);
+					return;
+				}
+				// 指针已注销、这一跳却没带结果:收尾与轮询错身了几百毫秒。直接问结果
+				// 本体——成了就照常呈现,确实没有才认定这一单断了
+				const got = await fetch(apiPath(`result/${encodeURIComponent(contentKey)}`));
+				if (got.ok) {
+					const r = (await got.json()) as SubmitResponse & { note?: NoteRecord };
+					if (r.result) {
+						setLoaded({ contentKey: r.contentKey, result: r.result, resultAt: r.resultAt, paragraphs: r.paragraphs, url: r.url });
+						setNote(r.note ?? null);
+						setNoteAt(null);
+						return;
+					}
+				}
+				setError("上一单跑到一半断了,重新提交一次吧(别人算过的话命中缓存,不花额度)。");
+				return;
+			}
+		} catch {
+			setError("网络错误,稍后再试。");
+		} finally {
+			setBusy(false);
+			setFastStatus(null);
+			refreshUsage();
+		}
+	}
+
+	/** 打开页面先问一句:有没有还没收场的一单要接回。 */
+	async function resumeInflight() {
+		let d: InflightResponse;
+		try {
+			const res = await fetch(apiPath("inflight"));
+			if (!res.ok) return; // 没登录 / 服务端出错,就当没有在跑的一单
+			d = (await res.json()) as InflightResponse;
+		} catch {
+			return;
+		}
+		if (d.result) {
+			// 刷新这一刻刚好跑完:直接呈现,进度条都不用走
+			present({ contentKey: d.contentKey, result: d.result, resultAt: d.resultAt, paragraphs: d.paragraphs, url: d.url });
+			return;
+		}
+		if (!d.active) return;
+		// 收单框回填原链接,让读者看见正在处理的是哪一条(?url= 预填优先)
+		const back = d.url;
+		if (back) setInput((cur) => cur || back);
+		if (d.lane === "slow" && d.taskId) await resumeSlow(d.taskId, d.step);
+		else if (d.lane === "fast" && d.contentKey) await resumeFast(d.contentKey, d);
 	}
 
 	/** regenUrl:对已生成的记录强制重算(跳过缓存,花一次额度;想法不动)。 */
