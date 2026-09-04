@@ -440,9 +440,14 @@ app.get("/api/usage", userGuard, async (c) => {
 // ---------- N 线 · 记录与想法(2026-08-26 用户需求;哲学同 001 N 线) ----------
 
 app.get("/api/history", userGuard, async (c) => {
-	const items = await c.get("store").listReadRecords(c.get("email"));
+	const store = c.get("store");
+	const email = c.get("email");
+	// 想法条数一次 Query 全拿到(SK 都是 NOTE# 前缀)。列表靠它决定哪几行出现
+	// 「导出 .md」——没记过想法的行不该给一个按下去是空文件的按钮
+	const [items, notes] = await Promise.all([store.listReadRecords(email), store.listNotes(email)]);
+	const counts = new Map(notes.map((n) => [n.contentKey, n.entries.length]));
 	return c.json({
-		items: items.map((r) => ({ contentKey: r.contentKey, url: r.url, title: r.title, at: r.at })),
+		items: items.map((r) => ({ contentKey: r.contentKey, url: r.url, title: r.title, at: r.at, notes: counts.get(r.contentKey) ?? 0 })),
 	});
 });
 

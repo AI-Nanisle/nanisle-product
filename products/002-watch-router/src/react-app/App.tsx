@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { buildNotesExport, exportFileName } from "../shared/export";
+import type { ExportItem } from "../shared/export";
 import type { WatchResult } from "../shared/schema";
 import { SiteHeader } from "./SiteChrome";
 import { apiPath } from "./paths";
@@ -42,6 +44,8 @@ interface HistoryItem {
 	url?: string;
 	title?: string;
 	at: number;
+	/** 这条内容上记过几条想法(服务端一次 Query 带回)。0 的行不出现导出按钮。 */
+	notes?: number;
 }
 
 /** 订阅模式(docs/05 §3):一条订阅 + 今天挑选结果。 */
@@ -167,6 +171,31 @@ function fmtDate(ms: number): string {
 	});
 }
 
+/** 想法导出的时区:文件里印的时刻要和读者刚刚在页面上看到的一致。 */
+function browserTimeZone(): string | undefined {
+	try {
+		return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * N 线 · 把一份 Markdown 下成文件。走 Blob + a[download],不经服务端也不碰剪贴板:
+ * 剪贴板 API 在非 HTTPS 和一部分移动浏览器上直接没有,而下载到处都有。
+ */
+function downloadMarkdown(filename: string, markdown: string) {
+	const href = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+	const a = document.createElement("a");
+	a.href = href;
+	a.download = filename;
+	document.body.appendChild(a);
+	a.click();
+	a.remove();
+	// 立刻 revoke 会让部分浏览器来不及取数据,让出一帧再回收
+	setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
 /** F4 · 视频平台的带秒跳转链接;不认识的平台返回 null(只显示时间不跳)。 */
 function jumpHref(url: string | undefined, startSec: number): string | null {
 	if (!url) return null;
@@ -226,6 +255,8 @@ export default function App() {
 	/** 正在写想法的锚点(同一时刻只开一个输入框)。 */
 	const [noteAt, setNoteAt] = useState<string | null>(null);
 	const [noteText, setNoteText] = useState("");
+	/** 记录页正在导出的那条(要跑一趟 /api/result 把结果与想法取回来);null = 没有在导。 */
+	const [exportKey, setExportKey] = useState<string | null>(null);
 
 	function refreshUsage() {
 		fetch(apiPath("usage"))
@@ -437,6 +468,67 @@ export default function App() {
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ contentKey: key, at }),
 		}).catch(() => {});
+	}
+
+	/**
+	 * N 线 · 导出当前这条的想法 + 精简 context。结果和想法都已经在手上,所以整份
+	 * Markdown 在浏览器里拼完就下下来,不跑服务端——记录页的批量导出才需要走后端
+	 * (那些内容的结果不在手上),两边用的是同一个 buildNotesExport。
+	 */
+	function exportCurrent() {
+		const key = loaded?.contentKey;
+		if (!key || !note || note.entries.length === 0) return;
+		const opts = { now: Date.now(), timeZone: browserTimeZone() };
+		const items: ExportItem[] = [
+			{
+				contentKey: key,
+				url: loaded?.url,
+				title: loaded?.result.meta.title ?? note.title,
+				entries: note.entries,
+				result: loaded?.result,
+				resultAt: loaded?.resultAt,
+			},
+		];
+		downloadMarkdown(exportFileName(items, opts), buildNotesExport(items, opts));
+	}
+
+	/**
+	 * N 线 · 记录页某一行的导出:不用先点开那条。结果、想法、版本戳都在现成的
+	 * /api/result/:key 里(重开记录走的就是它),取回来交给同一个 buildNotesExport。
+	 */
+	async function exportRecord(item: HistoryItem) {
+		setExportKey(item.contentKey);
+		setError("");
+		try {
+			const res = await fetch(apiPath(`result/${encodeURIComponent(item.contentKey)}`));
+			const d = (await res.json()) as SubmitResponse & { expired?: boolean; title?: string; note?: NoteRecord; error?: string };
+			if (!res.ok) {
+				setError(d.error ?? `导出失败(${res.status})`);
+				return;
+			}
+			const entries = d.note?.entries ?? [];
+			if (entries.length === 0) {
+				setError("这条还没记过想法。");
+				return;
+			}
+			const opts = { now: Date.now(), timeZone: browserTimeZone() };
+			// 缓存过期(60 天)的照导:想法是长期资产,少的只是 context(export.ts 取舍 ③)
+			const items: ExportItem[] = [
+				{
+					contentKey: item.contentKey,
+					url: d.url ?? item.url,
+					title: d.result?.meta.title ?? d.title ?? item.title,
+					entries,
+					result: d.result,
+					resultAt: d.resultAt,
+				},
+			];
+			downloadMarkdown(exportFileName(items, opts), buildNotesExport(items, opts));
+		} catch {
+			setError("网络错误,稍后再试。");
+		} finally {
+			setExportKey(null);
+		}
 	}
 
 	/** F2 · 快车道 SSE:phase → delta(字符数)→ result/error。 */
@@ -937,10 +1029,22 @@ export default function App() {
 							<ol className="history-list">
 								{history.map((h) => (
 									<li key={h.contentKey}>
-										<button type="button" onClick={() => void openRecord(h)}>
+										<button type="button" className="h-open" onClick={() => void openRecord(h)}>
 											<span className="h-title">{h.title || h.url || h.contentKey}</span>
 											<span className="h-date">{fmtDate(h.at)}</span>
 										</button>
+										{/* 导出这一条的想法。没记过想法的行不出现——省得给一个按下去是空文件的按钮 */}
+										{(h.notes ?? 0) > 0 && (
+											<button
+												type="button"
+												className="export-btn h-export"
+												disabled={exportKey !== null}
+												title={`下载这条记录的 ${h.notes} 条想法,连同它们当时挂着的上下文`}
+												onClick={() => void exportRecord(h)}
+											>
+												{exportKey === h.contentKey ? "正在取…" : ".md ↓"}
+											</button>
+										)}
 									</li>
 								))}
 							</ol>
@@ -1207,6 +1311,17 @@ export default function App() {
 										<div className="sec-head">
 											<span className="sec-no">{secNo("mine")}</span>
 											<h2>我的想法</h2>
+											{/* 导出:自己的想法自己拿得走。没记过就不出现,别给一个按下去是空文件的按钮 */}
+											{(note?.entries.length ?? 0) > 0 && (
+												<button
+													type="button"
+													className="export-btn"
+													title="下载一份 Markdown:你的想法 + 它当时挂着的那段上下文(判决、导读、对应的要点与引文)"
+													onClick={exportCurrent}
+												>
+													导出 .md ↓
+												</button>
+											)}
 										</div>
 										<div className="sec-body">
 											{/* 版本对不上的定点想法沉到这里:标注原锚点,内容一字不动 */}

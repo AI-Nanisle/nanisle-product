@@ -216,6 +216,8 @@ export interface Store {
 	listReadRecords(email: string): Promise<ReadRecord[]>;
 	getNote(email: string, contentKey: string): Promise<NoteRecord | null>;
 	putNote(email: string, note: NoteRecord): Promise<void>;
+	/** 想法账全集(N 线导出用),按最后写入时间新的在前。 */
+	listNotes(email: string): Promise<NoteRecord[]>;
 
 	// 订阅模式(docs/05 §3)
 	listSubscriptions(email: string): Promise<SubRecord[]>;
@@ -451,6 +453,10 @@ export class DdbStore implements Store {
 		});
 		const it = out.Item;
 		if (!it) return null;
+		return this.noteFromItem(contentKey, it);
+	}
+
+	private noteFromItem(contentKey: string, it: Record<string, { S?: string; N?: string }>): NoteRecord {
 		let entries: NoteEntry[] = [];
 		try {
 			entries = it.entries?.S ? (JSON.parse(it.entries.S) as NoteEntry[]) : [];
@@ -464,6 +470,19 @@ export class DdbStore implements Store {
 			entries,
 			updatedAt: Number(it.updatedAt?.N ?? 0),
 		};
+	}
+
+	async listNotes(email: string): Promise<NoteRecord[]> {
+		// 一次 Query 拿全(SK 都是 NOTE# 前缀),别逐条 GetItem——Worker 的子请求
+		// 预算很小,导出还要为每条内容再读一次 KV 拿 context。封顶同 listReadRecords。
+		const out = await this.call<{ Items?: Record<string, { S?: string; N?: string }>[] }>("Query", {
+			KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+			ExpressionAttributeValues: { ":pk": { S: `USER#${email.toLowerCase()}` }, ":pre": { S: "NOTE#" } },
+			Limit: 200,
+		});
+		return (out.Items ?? [])
+			.map((it) => this.noteFromItem((it.SK?.S ?? "").slice("NOTE#".length), it))
+			.sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
 	async putNote(email: string, note: NoteRecord): Promise<void> {
@@ -736,6 +755,13 @@ export class MemoryStore implements Store {
 
 	async putNote(email: string, note: NoteRecord): Promise<void> {
 		this.notes.set(`${email}:${note.contentKey}`, { ...note, entries: [...note.entries] });
+	}
+
+	async listNotes(email: string): Promise<NoteRecord[]> {
+		return [...this.notes.entries()]
+			.filter(([k]) => k.startsWith(`${email}:`))
+			.map(([, v]) => ({ ...v, entries: [...v.entries] }))
+			.sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 
 	// ---- 订阅模式 ----
