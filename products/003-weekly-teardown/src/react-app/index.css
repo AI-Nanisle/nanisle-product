@@ -1,0 +1,2685 @@
+@import "tailwindcss";
+
+/* ============================================================
+   003 · 领域拆解 — 从 002 物理复制底座(tokens / 页眉 / 版面 /
+   报头 / 收单台 / 错误框),不是 import:自包含是本仓家法。
+   与主站 Workspace v2、001、002 是同一门语言:米白台面、黑墨、
+   一点朱红,等宽字体做仪表读数。
+   本产品的隐喻是「档案」:一句原话立案,四节顺序就是信任链——
+   01 你的原话(只读) → 02 我理解的领域 → 03 我在意 / 我不在意
+   → 04 我拿这些词去搜。越往下越接近「下周你会看到什么」。
+   ============================================================ */
+:root {
+	--paper: #fafaf8;
+	--paper-deep: #f0f0ec;
+	--card: #ffffff;
+	--ink: #17181a;
+	--ink-2: #5c5d58;
+	--ink-3: #9a9a94;
+	--line: #e8e8e3;
+	--line-strong: #c9c9c2;
+	--line-input: #e0e0da;
+	--accent: #c2472e;
+	--accent-soft: rgba(194, 71, 46, 0.08);
+	--ok: #2e7d4f;
+	--warn: #a9702a;
+	--sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+	--mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
+	--serif: "Noto Serif SC", "Songti SC", "SimSun", Georgia, serif;
+}
+
+html {
+	background: var(--paper);
+}
+
+body {
+	margin: 0;
+	color: var(--ink);
+	font-family: var(--sans);
+	font-size: 15px;
+	line-height: 1.7;
+	/* 仪表台质感:极淡点阵网格,只在留白处提供肌理(001 同款) */
+	background:
+		radial-gradient(rgba(23, 24, 26, 0.045) 1px, transparent 1px) 0 0 / 24px 24px,
+		var(--paper);
+	-webkit-font-smoothing: antialiased;
+}
+
+::selection {
+	background: rgba(194, 71, 46, 0.15);
+}
+
+input::placeholder,
+textarea::placeholder {
+	color: var(--ink-3);
+}
+
+:where(a, button, input, textarea, select, summary):focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+@keyframes rise-in {
+	from {
+		opacity: 0;
+		transform: translateY(10px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+.rise {
+	animation: rise-in 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+/* 载入错峰(主站 landing 同款):结果区各段依次浮现,不齐步走 */
+.rise-1 { animation-delay: 0.07s; }
+.rise-2 { animation-delay: 0.14s; }
+.rise-3 { animation-delay: 0.21s; }
+.rise-4 { animation-delay: 0.28s; }
+
+/* ———————————————————— 页眉(001/主站同款) ———————————————————— */
+
+.site-header {
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	border-bottom: 1px solid var(--line);
+	background: rgba(250, 250, 248, 0.9);
+	backdrop-filter: blur(8px);
+}
+.site-header-in {
+	max-width: 1240px;
+	margin-inline: auto;
+	padding-inline: clamp(20px, 4vw, 40px);
+	height: 60px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 24px;
+}
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	color: var(--ink);
+	text-decoration: none;
+}
+.logo-wordmark {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	font-family: var(--mono);
+	font-size: 13.5px;
+	font-weight: 500;
+	letter-spacing: 0.045em;
+	line-height: 1;
+	white-space: nowrap;
+}
+.logo-wordmark svg {
+	flex: none;
+	overflow: visible;
+}
+@keyframes route-hop {
+	0%,
+	100% {
+		transform: translateY(0) rotate(0);
+	}
+	48% {
+		transform: translateY(-2px) rotate(7deg);
+	}
+}
+.logo-route-tile {
+	transform-box: fill-box;
+	transform-origin: center;
+}
+.brand:hover .logo-route-tile {
+	animation: route-hop 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.brand:hover .logo-route-tile:nth-child(2) { animation-delay: 35ms; }
+.brand:hover .logo-route-tile:nth-child(3) { animation-delay: 70ms; }
+.brand:hover .logo-route-tile:nth-child(4) { animation-delay: 105ms; }
+.brand:hover .logo-route-tile:nth-child(5) { animation-delay: 140ms; }
+.brand-cn {
+	font-size: 11.5px;
+	font-weight: 500;
+	letter-spacing: 0.18em;
+	margin-inline-end: -0.18em;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.site-nav {
+	display: flex;
+	align-items: center;
+	gap: clamp(14px, 3vw, 32px);
+	font-size: 13.5px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+.site-nav > a {
+	text-decoration: none;
+}
+.site-nav > a:not(.btn-ink):not(.btn-line) {
+	color: var(--ink-2);
+	transition: color 0.15s ease;
+}
+.site-nav > a:not(.btn-ink):not(.btn-line):hover {
+	color: var(--ink);
+}
+.nav-divider {
+	width: 1px;
+	height: 16px;
+	background: var(--line);
+}
+.btn-ink {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	background: var(--ink);
+	color: var(--paper);
+	border: none;
+	border-radius: 6px;
+	padding: 8px 18px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: background-color 0.15s ease;
+}
+.btn-ink:hover {
+	background: var(--accent);
+	color: var(--paper);
+}
+.btn-ink:disabled {
+	background: var(--line-strong);
+	cursor: default;
+}
+.btn-line {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	border: 1px solid var(--line-input);
+	background: var(--card);
+	color: var(--ink);
+	border-radius: 6px;
+	padding: 7px 16px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	white-space: nowrap;
+	transition: border-color 0.15s ease;
+}
+.btn-line:hover {
+	border-color: var(--ink);
+	color: var(--ink);
+}
+
+/* 版记章(001 同款):产品页上唯一的行动号召。双线方框来自报头
+   .masthead 的双细线——同一句话压成一枚章。方角不违和:圆角属于
+   内容容器,这枚是操作件,本就该分层。悬停转朱红,按下沉一格。 */
+.btn-stamp {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.55rem;
+	padding: 0.45rem 1.05rem;
+	border: 1.5px solid var(--ink);
+	border-radius: 0;
+	background: transparent;
+	color: var(--ink);
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: 0.08em;
+	line-height: 1.5;
+	white-space: nowrap;
+	cursor: pointer;
+	transition:
+		color 0.18s ease,
+		border-color 0.18s ease,
+		transform 0.12s ease;
+}
+.btn-stamp::after {
+	content: "";
+	position: absolute;
+	inset: 2.5px;
+	border: 1px solid var(--ink);
+	opacity: 0.45;
+	transition:
+		border-color 0.18s ease,
+		opacity 0.18s ease;
+}
+.btn-stamp:hover:not(:disabled) {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+.btn-stamp:hover:not(:disabled)::after {
+	border-color: var(--accent);
+	opacity: 0.5;
+}
+.btn-stamp:active:not(:disabled) {
+	transform: translateY(1px);
+}
+.btn-stamp:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+/* 三角标记与状态灯同源:一个等着开工,一个正在跑 */
+.btn-stamp .mark {
+	color: var(--accent);
+}
+.user-menu {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+.user-chip {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	border: 1px solid var(--line-input);
+	border-radius: 50%;
+	background: var(--ink);
+	color: var(--paper);
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1;
+	cursor: pointer;
+	overflow: hidden;
+	padding: 0;
+	transition: border-color 0.15s ease;
+}
+.user-chip:hover,
+.user-chip[aria-expanded="true"] {
+	border-color: var(--accent);
+}
+.user-chip img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	display: block;
+}
+.user-chip-ghost {
+	visibility: hidden;
+}
+.user-pop {
+	position: absolute;
+	top: calc(100% + 10px);
+	right: 0;
+	z-index: 90;
+	min-width: 200px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	box-shadow: 0 12px 32px rgba(23, 24, 26, 0.12);
+	padding: 6px;
+	animation: rise-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.user-pop-id {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 8px 10px 10px;
+	border-bottom: 1px solid var(--paper-deep);
+	margin-bottom: 6px;
+}
+.user-pop-id strong {
+	font-size: 13px;
+	font-weight: 600;
+}
+.user-pop-id span {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	word-break: break-all;
+}
+.user-pop-item {
+	display: block;
+	width: 100%;
+	text-align: left;
+	border: none;
+	background: transparent;
+	border-radius: 6px;
+	padding: 8px 10px;
+	font-family: inherit;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	cursor: pointer;
+	transition: background-color 0.12s ease, color 0.12s ease;
+}
+.user-pop-item:hover {
+	background: var(--paper);
+	color: var(--accent);
+}
+.user-pop-item:disabled {
+	cursor: default;
+	color: var(--ink-3);
+}
+@media (max-width: 680px) {
+	.nav-divider,
+	.btn-login {
+		display: none;
+	}
+	.site-nav {
+		font-size: 13px;
+		gap: 12px;
+	}
+}
+
+/* ———————————————————— 版面 ———————————————————— */
+
+.page {
+	max-width: 712px; /* 001 的正文测量宽 672 + 两侧留白 */
+	margin-inline: auto;
+	padding: 40px clamp(20px, 4vw, 40px) 80px;
+}
+
+/* ———— 报头(001 简报页同款结构):小签行 → 特大题字 →
+        读数行 → 双细线 → 双线下的状态行 ———— */
+
+.mast-top {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px 16px;
+}
+.mast-sig {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.05em;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	flex: none;
+}
+.dot-accent {
+	background: var(--accent);
+	box-shadow: 0 0 0 3px rgba(194, 71, 46, 0.14);
+}
+
+
+/* 特大题字:001 的报纸报头,不是小节标题 */
+.masthead h1 {
+	margin: 12px 0 0;
+	font-size: clamp(2.6rem, 9vw, 3.8rem);
+	font-weight: 900;
+	line-height: 1.2;
+	letter-spacing: 0.025em;
+}
+
+/* 读数行:mono 13px,第一个词 accent(001 的日期位) */
+.deck-line {
+	margin: 8px 0 12px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 16px;
+	font-family: var(--mono);
+	font-size: 13px;
+	color: var(--ink-2);
+}
+.deck-line .lead {
+	color: var(--accent);
+	font-weight: 500;
+}
+
+/* 报头双细线(001 .rule-double 同款) */
+.rule-double {
+	border-top: 3px solid var(--ink);
+	position: relative;
+}
+.rule-double::after {
+	content: "";
+	position: absolute;
+	top: 4px;
+	left: 0;
+	right: 0;
+	border-top: 1px solid var(--ink);
+}
+
+/* 双线下的状态行:平时一句读数,跑起来是进度;右侧额度圆签 */
+.status-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 16px;
+	padding-top: 8px;
+	font-family: var(--mono);
+	font-size: 12px;
+	color: var(--ink-2);
+}
+.status-row .mark {
+	color: var(--accent);
+}
+.status-row .right {
+	margin-left: auto;
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+/* 终端式光标:处理中的走字(001 同款) */
+@keyframes blink-caret {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0;
+	}
+}
+.caret {
+	display: inline-block;
+	width: 0.55em;
+	height: 1.05em;
+	background: var(--accent);
+	vertical-align: text-bottom;
+	animation: blink-caret 0.9s step-end infinite;
+	margin-left: 4px;
+}
+
+/* 额度圆签(001 同款语义:写「还剩几次」不写「用了几比几」;
+   剩 2 次以内转朱红提醒,用完换软底) */
+.quota-pill {
+	font-family: var(--mono);
+	font-size: 12px;
+	white-space: nowrap;
+	border: 1px solid var(--line-strong);
+	border-radius: 999px;
+	padding: 3px 10px;
+	color: var(--ink-2);
+}
+.quota-pill.warn {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+.quota-pill.out {
+	border-color: var(--accent);
+	background: var(--accent-soft);
+	color: var(--accent);
+}
+
+.mock-chip {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--warn);
+	border: 1px solid currentColor;
+	border-radius: 4px;
+	padding: 1px 6px;
+	vertical-align: 1px;
+}
+
+/* ———————————————————— 收单台 ———————————————————— */
+
+.console {
+	margin-top: 28px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	padding: 18px;
+	box-shadow: 0 1px 2px rgba(23, 24, 26, 0.04);
+}
+.console textarea {
+	width: 100%;
+	min-height: 96px;
+	resize: vertical;
+	border: 1px solid var(--line-input);
+	border-radius: 8px;
+	background: var(--paper);
+	padding: 12px 14px;
+	font-family: var(--mono);
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink);
+	box-sizing: border-box;
+	transition: border-color 0.15s ease;
+}
+.console textarea:focus {
+	border-color: var(--ink);
+	outline: none;
+}
+.console-row {
+	margin-top: 12px;
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	flex-wrap: wrap;
+}
+
+.error-box {
+	margin-top: 20px;
+	border: 1px solid rgba(194, 71, 46, 0.35);
+	background: var(--accent-soft);
+	border-radius: 10px;
+	padding: 12px 16px;
+	font-size: 13.5px;
+	color: var(--ink);
+}
+.error-box a {
+	color: var(--accent);
+	font-weight: 600;
+}
+
+/* ———————————————————— 档案(四节信任链) ———————————————————— */
+
+/* 一节 = 一张卡。节号用等宽朱红,与 001 的 01/02/03/04 同款——
+   四节的顺序本身有意义,所以序号必须看得见。 */
+.dsec {
+	margin-top: 26px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	padding: 18px 20px 20px;
+	box-shadow: 0 1px 2px rgba(23, 24, 26, 0.04);
+}
+.dsec-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 6px 12px;
+}
+.dsec-no {
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.08em;
+	color: var(--accent);
+	white-space: nowrap;
+}
+.dsec-head h2 {
+	margin: 0;
+	font-size: 17px;
+	font-weight: 700;
+	letter-spacing: 0.01em;
+}
+/* 只读徽记:节 01 唯一有它。做成边框章而不是一句灰字,是因为
+   「这一节 AI 不许动」是这个产品的立场,不是一条脚注。 */
+.dsec-lock {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.06em;
+	color: var(--ink-3);
+	border: 1px solid var(--line-strong);
+	border-radius: 4px;
+	padding: 1px 6px;
+}
+.dsec-count {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.dsec-count.warn {
+	color: var(--accent);
+}
+/* 每节下方那句「这一节为什么在这儿」。它不是装饰:问责的前提是
+   用户知道每个字段将来会产生什么后果。 */
+.dsec-why {
+	margin: 10px 0 0;
+	font-size: 12.5px;
+	line-height: 1.75;
+	color: var(--ink-2);
+}
+.dsec-why strong {
+	color: var(--ink);
+	font-weight: 600;
+}
+
+/* 节 01 的原话:衬线、粗竖线起头,像卷宗开头引的那句证词 */
+.sentence {
+	margin: 12px 0 0;
+	border-left: 3px solid var(--ink);
+	padding-left: 14px;
+	font-family: var(--serif);
+	font-size: 18px;
+	line-height: 1.8;
+	font-weight: 500;
+}
+/* 草稿态的「原样回显」证据:后端把 sentence 原封不动回显了,
+   这枚绿签就是当场自证「我没改你的话」。 */
+.verbatim {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.05em;
+	color: var(--ok);
+	border: 1px solid currentColor;
+	border-radius: 4px;
+	padding: 1px 6px;
+}
+
+/* 节 03:两栏。grid 的两列写死 1fr 1fr,不是「主 + 侧」的 2:1——
+   notCaresAbout 决定排除清单,是这份档案里唯一能立刻产生可见
+   效果的字段,版面上把它做小就是在说假话。 */
+.two-col {
+	margin-top: 14px;
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 16px;
+}
+@media (max-width: 640px) {
+	.two-col {
+		grid-template-columns: 1fr;
+	}
+}
+.col {
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 12px 14px 14px;
+	background: var(--paper);
+	display: flex;
+	flex-direction: column;
+}
+/* 两栏唯一的差别是顶上那条 2px 线的颜色(墨 / 朱):尺寸、内边距、
+   标题字号全同 —— 差异只表示「方向相反」,不表示「一主一次」。 */
+.col.ink {
+	box-shadow: inset 0 2px 0 var(--ink);
+}
+.col.accent {
+	box-shadow: inset 0 2px 0 var(--accent);
+}
+.col-head {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+.col-head h3 {
+	margin: 0;
+	font-size: 14.5px;
+	font-weight: 700;
+}
+.col.accent .col-head h3 {
+	color: var(--accent);
+}
+.col-count {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-3);
+	white-space: nowrap;
+}
+.col-note {
+	margin: 6px 0 0;
+	font-size: 11.5px;
+	line-height: 1.7;
+	color: var(--ink-3);
+}
+.col-body {
+	margin-top: 10px;
+	flex: 1;
+}
+
+/* 条目行:一行一条,悬停才露出改判/删除,平时是干净的读物 */
+.item-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	border-radius: 6px;
+	padding: 3px 4px 3px 8px;
+	font-size: 13.5px;
+	line-height: 1.6;
+	transition: background-color 0.12s ease;
+}
+.item:hover {
+	background: var(--paper-deep);
+}
+.col.accent .item:hover {
+	background: var(--accent-soft);
+}
+/* 条目正文是个 <button>,不是 <span>:就地编辑必须能用键盘 Tab 到、
+   回车打开,做成 span 加 onClick 就把这一整页锁死在鼠标上了。
+   所以这里把按钮的默认外观全部抹平,只留「可点的文本」这个样子。 */
+.item-text {
+	flex: 1;
+	min-width: 0;
+	cursor: text;
+	border: none;
+	border-bottom: 1px dashed transparent;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	padding: 0;
+	word-break: break-word;
+}
+.item:hover .item-text {
+	border-bottom-color: var(--line-strong);
+}
+.item-mono .item-text {
+	font-family: var(--mono);
+	font-size: 12.5px;
+}
+.item-idx {
+	font-family: var(--mono);
+	font-size: 10px;
+	color: var(--ink-3);
+	flex: none;
+	width: 1.4em;
+	text-align: right;
+}
+.item-act {
+	flex: none;
+	border: none;
+	background: transparent;
+	color: var(--ink-3);
+	font-family: var(--mono);
+	font-size: 12px;
+	line-height: 1;
+	padding: 3px 5px;
+	border-radius: 4px;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+}
+.item:hover .item-act,
+.item-act:focus-visible {
+	opacity: 1;
+}
+.item-act:hover:not(:disabled) {
+	background: var(--card);
+	color: var(--accent);
+}
+.item-act:disabled {
+	cursor: not-allowed;
+}
+/* 就地编辑那一行:输入框和「为什么没加进去」要能各占一行。
+   .item 本身是 flex 单行,所以编辑态改成允许换行,理由行 100% 宽度另起一行。 */
+.item.item-editing {
+	flex-wrap: wrap;
+}
+/* 被规则拦下的理由。**朱红、就贴在那个输入框下面**——这一页很长,页顶的
+   横幅在用户按回车时多半在屏幕外,那和不显示的差别很小(2026-09-01 评审 ①)。 */
+.reject-note {
+	flex-basis: 100%;
+	margin: 4px 0 0;
+	padding-left: 2px;
+	font-size: 11.5px;
+	line-height: 1.6;
+	color: var(--accent);
+}
+
+.item-add {
+	margin-top: 6px;
+	border: 1px dashed var(--line-strong);
+	background: transparent;
+	border-radius: 6px;
+	padding: 3px 10px;
+	font-size: 12.5px;
+	color: var(--ink-3);
+	cursor: pointer;
+	transition: border-color 0.15s ease, color 0.15s ease;
+}
+.item-add:hover:not(:disabled) {
+	border-color: var(--ink);
+	color: var(--ink);
+}
+.col.accent .item-add:hover:not(:disabled) {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+.item-add:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+.empty-note {
+	margin: 0;
+	font-size: 12.5px;
+	color: var(--ink-3);
+	padding: 3px 8px;
+	line-height: 1.7;
+}
+/* 就地编辑框:回车提交 / Esc 放弃(InlineInput.tsx) */
+.inline-input {
+	width: 100%;
+	box-sizing: border-box;
+	border: 1px solid var(--line-strong);
+	border-radius: 6px;
+	background: var(--card);
+	padding: 3px 8px;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--ink);
+	outline: none;
+}
+.inline-input.accent {
+	border-color: var(--accent);
+}
+.inline-input.mono {
+	font-family: var(--mono);
+	font-size: 12.5px;
+}
+.inline-input.multiline {
+	resize: vertical;
+	line-height: 1.7;
+}
+
+/* 节 02 的领域:点一下就能改的一行大字 */
+/* 同上:领域那一行也是 <button>,抹平默认外观。 */
+.domain-line {
+	margin: 12px 0 0;
+	font-size: 16px;
+	line-height: 1.75;
+	font-weight: 500;
+	cursor: text;
+	border: none;
+	border-bottom: 1px dashed var(--line-strong);
+	background: transparent;
+	color: inherit;
+	font-family: inherit;
+	text-align: left;
+	padding: 0 2px;
+	display: inline-block;
+	max-width: 100%;
+	word-break: break-word;
+}
+.domain-line:hover {
+	background: var(--accent-soft);
+}
+
+/* ———————————————————— 保存条 ———————————————————— */
+
+/* 吸底:四节撑得比一屏长,改完之后「保存在哪」不该要用户去找。 */
+.savebar {
+	position: sticky;
+	bottom: 0;
+	z-index: 15;
+	margin-top: 28px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 10px 14px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: rgba(255, 255, 255, 0.94);
+	backdrop-filter: blur(8px);
+	padding: 12px 16px;
+	box-shadow: 0 -2px 18px rgba(23, 24, 26, 0.07);
+}
+.savebar-msg {
+	font-size: 12.5px;
+	line-height: 1.65;
+	color: var(--ink-2);
+	flex: 1;
+	min-width: 180px;
+}
+.savebar-msg.warn {
+	color: var(--accent);
+}
+.savebar .right {
+	margin-left: auto;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.btn-quiet {
+	border: none;
+	background: transparent;
+	color: var(--ink-3);
+	font-family: var(--mono);
+	font-size: 11.5px;
+	cursor: pointer;
+	padding: 6px 4px;
+	transition: color 0.15s ease;
+}
+.btn-quiet:hover:not(:disabled) {
+	color: var(--accent);
+}
+.btn-quiet:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+/* 未保存横幅:草稿态第一眼就要看见「这还没存」 */
+.banner {
+	margin-top: 20px;
+	border: 1px dashed var(--accent);
+	background: var(--accent-soft);
+	border-radius: 10px;
+	padding: 12px 16px;
+	font-size: 13.5px;
+	line-height: 1.75;
+	color: var(--ink);
+}
+.banner strong {
+	color: var(--accent);
+}
+/* 保存成功的回执:说清「下次周扫会用哪一版」,不说「已保存」这种废话 */
+.receipt {
+	margin-top: 20px;
+	border: 1px solid rgba(46, 125, 79, 0.35);
+	background: rgba(46, 125, 79, 0.07);
+	border-radius: 10px;
+	padding: 12px 16px;
+	font-size: 13.5px;
+	line-height: 1.75;
+	color: var(--ink);
+}
+
+/* 删档二次确认:破坏性操作要有一块自己的地盘,不能只是一个红按钮 */
+.danger {
+	margin-top: 20px;
+	border: 1px solid var(--accent);
+	border-radius: 10px;
+	background: var(--card);
+	padding: 16px 18px;
+}
+.danger h3 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 700;
+	color: var(--accent);
+}
+.danger p {
+	margin: 8px 0 0;
+	font-size: 13px;
+	line-height: 1.75;
+	color: var(--ink-2);
+}
+.danger ul {
+	margin: 8px 0 0;
+	padding-left: 18px;
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink-2);
+}
+.danger-row {
+	margin-top: 14px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+.btn-danger {
+	border: 1px solid var(--accent);
+	background: var(--accent);
+	color: var(--paper);
+	border-radius: 6px;
+	padding: 7px 16px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+}
+.btn-danger:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+/* 骨架:等 GET /api/dossier 的那一两百毫秒给个有形状的空盒子,
+   不要让页面从「一片空白」直接跳成「四节」。 */
+@keyframes skeleton-pulse {
+	0%,
+	100% {
+		opacity: 0.55;
+	}
+	50% {
+		opacity: 0.9;
+	}
+}
+.skeleton {
+	margin-top: 26px;
+	border: 1px solid var(--line);
+	border-radius: 12px;
+	background: var(--card);
+	padding: 18px 20px;
+	animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+.skeleton-bar {
+	height: 10px;
+	border-radius: 999px;
+	background: var(--paper-deep);
+	margin-bottom: 10px;
+}
+
+/* 种子屏(新用户):一个输入框 + 一句引导,别的什么都没有 */
+.seed-hint {
+	margin: 14px 0 0;
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink-2);
+}
+.seed-hint code {
+	font-family: var(--mono);
+	font-size: 12px;
+	background: var(--paper-deep);
+	border-radius: 4px;
+	padding: 1px 5px;
+}
+.char-count {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+}
+.char-count.warn {
+	color: var(--accent);
+}
+
+/* 页脚:与 001/002 同一句 */
+.foot {
+	margin-top: 56px;
+	padding-top: 16px;
+	border-top: 1px solid var(--line);
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+}
+.foot a {
+	color: inherit;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+.foot a:hover {
+	color: var(--accent);
+}
+
+/* ============================================================
+   阶段 5 · 第一屏(本周清单)
+   设计立场:候选 / 排除 / 台账**三块并列**,不是「主内容 + 折叠的调试信息」。
+   所以排除清单和台账用的是和候选清单同一档的字号、同一套 .dsec 外框,
+   只在色带上区分「代码算的」和「模型判的」——那一条分色是产品承诺,
+   不是装饰(docs/01 决策 4)。
+   ============================================================ */
+
+/* ———————————— 两屏切换 ———————————— */
+
+.view-tabs {
+	display: flex;
+	gap: 2px;
+	margin-top: 14px;
+}
+.view-tab {
+	font: inherit;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--ink-3);
+	background: none;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	padding: 6px 2px;
+	margin-right: 20px;
+	cursor: pointer;
+}
+.view-tab:hover:not(:disabled) {
+	color: var(--ink);
+}
+.view-tab.on {
+	color: var(--ink);
+	border-bottom-color: var(--accent);
+}
+.view-tab:disabled {
+	color: var(--line-strong);
+	cursor: not-allowed;
+}
+
+/* ———————————— 诚实声明:页面顶部,不可折叠 ————————————
+   它没有折叠开关也没有关闭按钮,这是 docs/01 风险 1 缓解 2 的字面要求。
+   底色比正文重一档、左边一条朱红实边,让它在第一屏上躲不掉。 */
+
+.honesty {
+	margin-top: 22px;
+	padding: 16px 18px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--accent);
+	border-radius: 3px;
+}
+.honesty-lead {
+	margin: 0;
+	font-size: 14px;
+	line-height: 1.95;
+	color: var(--ink);
+}
+.honesty-hard {
+	margin: 10px 0 0;
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--accent);
+}
+.honesty-out {
+	margin: 6px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+/* 声明和台账里的每一个数字。等宽 + 略深,让人一眼数得清有几个数
+   —— 也是渲染层测试的抓手(断言 <b class="hn">298</b> 而不是断言 "298",
+   后者会在页面别处误命中)。 */
+.hn {
+	font-family: var(--mono);
+	font-size: 0.96em;
+	font-weight: 600;
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 0 4px;
+}
+
+/* 「这一周没跑完」「台账对不上」这类:必须显著。残的清单和全的清单
+   长得一模一样(docs/01 风险 1「错得很安静」),不喊出来就是我们自己在犯那个错。 */
+.scan-alarm {
+	display: block;
+	margin: 14px 0 0;
+	padding: 12px 14px;
+	font-size: 13px;
+	line-height: 1.85;
+	color: var(--ink);
+	background: var(--accent-soft);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+}
+
+/* ———————————— 01 候选清单 ———————————— */
+
+.cand-list {
+	list-style: none;
+	margin: 14px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.cand {
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+}
+.cand-appealed {
+	border-left: 3px solid var(--warn);
+}
+.cand-top {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+.cand-rank {
+	font-family: var(--mono);
+	font-size: 12px;
+	color: var(--ink-3);
+	min-width: 1.4em;
+}
+.cand-name {
+	font-family: var(--mono);
+	font-size: 14.5px;
+	font-weight: 600;
+	color: var(--ink);
+	text-decoration: none;
+	border-bottom: 1px solid var(--line-strong);
+}
+.cand-name:hover {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+.cand-stars {
+	font-family: var(--mono);
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+/* 双路检索对用户的兑现:哪些是「新冒出来的」要看得见(docs/02 决策 T3)。
+   updated 那一路单独上朱红——它捞回来的正是手工搜索找不到的那一类。 */
+.route-chip {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	letter-spacing: 0.02em;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	padding: 1px 8px;
+	cursor: help;
+}
+.route-hot {
+	color: var(--accent);
+	background: var(--accent-soft);
+	border-color: var(--accent);
+}
+.cand-facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 8px;
+}
+.fact {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 1px 6px;
+}
+.fact-warn {
+	color: var(--accent);
+	background: var(--accent-soft);
+}
+.fact-quiet {
+	color: var(--ink-3);
+	background: none;
+	padding-left: 0;
+}
+.cand-liner {
+	margin: 9px 0 0;
+	font-size: 13.5px;
+	line-height: 1.8;
+	color: var(--ink);
+}
+.cand-liner-missing {
+	color: var(--ink-2);
+}
+/* 「模型写的描述」这枚标记不许省:整块清单里只有这一句是模型产出的,
+   而这个产品全篇在区分「代码算的」和「模型说的」。 */
+.by-model {
+	display: inline-block;
+	font-family: var(--mono);
+	font-size: 10px;
+	color: var(--accent);
+	background: var(--accent-soft);
+	border-radius: 3px;
+	padding: 1px 6px;
+	margin-right: 8px;
+	vertical-align: 1px;
+	cursor: help;
+}
+.by-model-off {
+	color: var(--ink-3);
+	background: var(--paper-deep);
+}
+.cand-appeal-note {
+	margin: 8px 0 0;
+	font-size: 12px;
+	color: var(--warn);
+}
+
+/* ———————————— 02 排除清单 ———————————— */
+
+.excl-sum {
+	margin: 14px 0 0;
+	font-size: 13.5px;
+	color: var(--ink);
+}
+/* 三块:资格(代码算的)/ 判断(模型判的)/ 名次。
+   **左边那条色带是分色承诺的载体**,三块不许长成一个样。 */
+.excl-block {
+	margin-top: 16px;
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	border-left: 3px solid var(--line-strong);
+}
+.blk-rule {
+	border-left-color: var(--ink);
+}
+.blk-model {
+	border-left-color: var(--accent);
+	background: var(--accent-soft);
+}
+.blk-rank {
+	border-left-color: var(--warn);
+}
+.excl-block-title {
+	margin: 0;
+	font-size: 13.5px;
+	font-weight: 700;
+}
+.excl-block-lead {
+	margin: 5px 0 0;
+	font-size: 12.5px;
+	line-height: 1.8;
+	color: var(--ink-2);
+}
+.excl-block-lead code {
+	font-family: var(--mono);
+	font-size: 11.5px;
+}
+
+.excl-group {
+	margin-top: 10px;
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	background: var(--paper);
+}
+.excl-group[open] {
+	background: var(--card);
+}
+.excl-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px;
+	font-size: 13px;
+	cursor: pointer;
+	list-style: none;
+}
+.excl-head::-webkit-details-marker {
+	display: none;
+}
+.excl-head::before {
+	content: "▸";
+	font-size: 10px;
+	color: var(--ink-3);
+}
+.excl-group[open] > .excl-head::before {
+	content: "▾";
+}
+/* 规则 / 模型两枚徽记。**颜色和文字都不一样**,不是只差一点点:
+   混成一色等于让读者把判断当事实读(types.ts ReasonSource 的注释)。 */
+.src-chip {
+	font-family: var(--mono);
+	font-size: 10px;
+	border-radius: 3px;
+	padding: 1px 6px;
+	white-space: nowrap;
+}
+.src-chip-rule {
+	color: var(--paper);
+	background: var(--ink);
+}
+.src-chip-model {
+	color: var(--paper);
+	background: var(--accent);
+}
+.excl-label {
+	font-weight: 600;
+}
+.excl-count {
+	margin-left: auto;
+	font-family: var(--mono);
+	font-size: 12px;
+	color: var(--ink-2);
+}
+.excl-note {
+	margin: 0;
+	padding: 0 10px 8px 10px;
+	font-size: 12px;
+	line-height: 1.8;
+	color: var(--ink-2);
+}
+.excl-list {
+	list-style: none;
+	margin: 0;
+	padding: 0 10px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+.excl {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	padding: 4px 0;
+	border-top: 1px solid var(--line);
+	font-size: 12.5px;
+}
+.excl-rank {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+	min-width: 2.6em;
+}
+.excl-name {
+	font-family: var(--mono);
+	font-size: 12.5px;
+	color: var(--ink);
+	text-decoration: none;
+	border-bottom: 1px solid transparent;
+	flex: none;
+}
+.excl-name:hover {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+.excl-reason {
+	color: var(--ink-2);
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.excl-appeal {
+	font: inherit;
+	font-size: 11px;
+	color: var(--ink-2);
+	background: none;
+	border: 1px solid var(--line-strong);
+	border-radius: 3px;
+	padding: 1px 8px;
+	cursor: pointer;
+	flex: none;
+	opacity: 0.35;
+	transition: opacity 0.15s;
+}
+.excl:hover .excl-appeal,
+.excl-appeal:focus-visible {
+	opacity: 1;
+}
+.excl-appeal:hover:not(:disabled) {
+	color: var(--accent);
+	border-color: var(--accent);
+}
+.excl-appeal:disabled {
+	opacity: 1;
+	color: var(--accent);
+	cursor: progress;
+}
+.excl-done .excl-rank {
+	color: var(--ok);
+}
+
+/* 「差一点进清单的」:整组 153 条仍然折叠着,但第 6-10 名常驻。
+   这几行是这一块里唯一有个体信息量的东西(第 6 名是谁),折起来就浪费了。 */
+.near-miss {
+	margin-top: 10px;
+	padding: 8px 0 0;
+	border-top: 1px dashed var(--line-strong);
+}
+.near-miss h4 {
+	margin: 0 10px 4px;
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--warn);
+}
+
+/* ———————————— 03 检索台账 ———————————— */
+
+.ledger-line {
+	margin: 14px 0 0;
+	font-size: 14px;
+	line-height: 2;
+}
+.ledger-h {
+	margin: 18px 0 6px;
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--ink-2);
+}
+.query-list {
+	margin: 0;
+	padding-left: 22px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+.query-list code {
+	font-family: var(--mono);
+	font-size: 12.5px;
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 1px 6px;
+}
+/* 表格自己横向滚,页面 body 永远不横向滚 */
+.trace-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	background: var(--card);
+}
+.trace {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 12px;
+}
+.trace th,
+.trace td {
+	padding: 5px 10px;
+	text-align: left;
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+.trace th {
+	font-size: 11px;
+	color: var(--ink-2);
+	font-weight: 600;
+	background: var(--paper-deep);
+}
+.trace td {
+	font-family: var(--mono);
+	color: var(--ink-2);
+}
+.trace-bad td {
+	color: var(--accent);
+	background: var(--accent-soft);
+}
+.rate-line {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0;
+}
+
+/* ============================================================
+   阶段 7 · 深度报告(第三屏)
+
+   版面上有两条硬约束,不是审美偏好:
+   1. `.report-notes`(这份报告缺了什么)和 `.report-gate`(锚定与丢弃的账)
+      必须**看起来重**,而且不可折叠 —— 它们是这一屏唯一说得清「这份报告
+      残在哪」的东西,做轻了等于折叠了。
+   2. 事实层灰显(`.tl-unanchored`)和判断层已丢弃(`.dropped`)是两种相反的
+      处理,颜色和位置都必须一眼分得开,不然读者会当成排版不一致。
+   ============================================================ */
+
+/* ———————————— 生成中 ———————————— */
+
+.run-box {
+	margin: 18px 0 0;
+	padding: 16px 18px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--accent);
+	border-radius: 3px;
+}
+.run-top {
+	display: flex;
+	align-items: baseline;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+.run-name {
+	font-family: var(--mono);
+	font-size: 14px;
+	font-weight: 700;
+}
+.run-beat {
+	margin-left: auto;
+	font-size: 11.5px;
+	color: var(--ink-3);
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+.beat-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--line-strong);
+	display: inline-block;
+}
+/* 跳动的点 = 连接还活着。**它不是进度**,所以整条进度条一格都不动 */
+.beat-on {
+	background: var(--accent);
+	animation: beat 1.6s ease-in-out infinite;
+}
+@keyframes beat {
+	0%,
+	100% {
+		opacity: 0.25;
+		transform: scale(0.85);
+	}
+	50% {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+.run-steps {
+	list-style: none;
+	margin: 12px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.run-step {
+	display: grid;
+	grid-template-columns: 18px minmax(88px, auto) 1fr;
+	gap: 8px;
+	align-items: baseline;
+	font-size: 12.5px;
+	color: var(--ink-3);
+}
+.run-step .run-title {
+	font-weight: 600;
+}
+.run-done {
+	color: var(--ink-2);
+}
+.run-done .run-mark {
+	color: var(--ok);
+}
+.run-now {
+	color: var(--ink);
+}
+.run-now .run-mark {
+	color: var(--accent);
+}
+.run-now .run-title {
+	color: var(--accent);
+}
+.run-detail {
+	color: var(--ink-3);
+}
+.run-foot {
+	margin: 12px 0 0;
+	font-size: 12.5px;
+}
+.run-quiet {
+	color: var(--ink-3);
+}
+.run-resumed {
+	margin: 8px 0 0;
+	font-size: 12px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 8px 10px;
+}
+.run-resumed code {
+	font-family: var(--mono);
+	font-size: 11.5px;
+}
+
+/* ———————————— 报告抬头 ———————————— */
+
+.report-id {
+	margin-top: 18px;
+}
+.report-name {
+	margin: 0;
+	font-family: var(--mono);
+	font-size: 20px;
+	letter-spacing: -0.01em;
+}
+.report-name a {
+	color: var(--ink);
+	text-decoration: none;
+	border-bottom: 2px solid var(--accent);
+}
+.report-facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 8px 0 0;
+}
+
+/* ———————————— ② 这份报告缺了什么(**永不折叠**) ———————————— */
+
+.report-notes {
+	margin: 18px 0 0;
+	padding: 14px 16px;
+	background: var(--card);
+	border: 1px solid var(--warn);
+	border-left: 3px solid var(--warn);
+	border-radius: 3px;
+}
+.notes-h {
+	margin: 0 0 8px;
+	font-size: 13px;
+	font-weight: 700;
+	color: var(--warn);
+}
+.notes-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 7px;
+}
+.note {
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	font-size: 13px;
+}
+.note-kind {
+	flex: none;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--warn);
+	border: 1px solid var(--warn);
+	border-radius: 2px;
+	padding: 0 5px;
+	opacity: 0.8;
+}
+.notes-foot {
+	margin: 10px 0 0;
+	font-size: 11.5px;
+	color: var(--ink-3);
+}
+
+/* ———————————— ① 锚定与丢弃的账 + ③ 那句必须写清的话 ———————————— */
+
+.report-gate {
+	margin: 14px 0 0;
+	padding: 14px 16px;
+	background: var(--paper-deep);
+	border-radius: 3px;
+}
+.gate-ratio {
+	margin: 0 0 8px;
+	font-size: 14px;
+}
+.gate-note {
+	margin: 0 0 4px;
+	font-size: 13px;
+	color: var(--ink-2);
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+}
+.gate-tag {
+	flex: none;
+	font-size: 10.5px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--ink);
+	background: var(--card);
+	border: 1px solid var(--line-strong);
+	border-radius: 2px;
+	padding: 0 6px;
+}
+/* 决策 T4 的核心诚实点。这一句在版面上要重,它不是脚注 */
+.gate-hard {
+	margin: 12px 0 0;
+	font-family: var(--serif);
+	font-size: 16px;
+	font-weight: 700;
+	line-height: 1.6;
+	border-left: 3px solid var(--accent);
+	padding-left: 12px;
+}
+.gate-why {
+	margin: 8px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+
+/* ———————————— 两层的对照 ———————————— */
+
+.layer-legend {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+	gap: 10px;
+	margin: 12px 0 0;
+}
+.layer {
+	padding: 12px 14px;
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	background: var(--card);
+}
+.layer h4 {
+	margin: 0 0 6px;
+	font-size: 12.5px;
+	letter-spacing: 0.02em;
+}
+.layer p {
+	margin: 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+.layer-fact {
+	border-top: 3px solid var(--line-strong);
+}
+.layer-fact h4 {
+	color: var(--ink-2);
+}
+.layer-judge {
+	border-top: 3px solid var(--accent);
+}
+.layer-judge h4 {
+	color: var(--accent);
+}
+
+/* ———————————— 节 1 · HN 与时间线 ———————————— */
+
+.hn-story {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 10px;
+	margin: 12px 0 0;
+	padding: 10px 12px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+}
+.hn-title {
+	font-weight: 600;
+	color: var(--ink);
+	text-decoration: none;
+	border-bottom: 1px solid var(--line-strong);
+}
+.hn-facts {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-left: auto;
+}
+.fact-link {
+	color: var(--accent);
+	text-decoration: none;
+}
+/* 「HN 上没有记录」不是空态,是一条结论:它得看起来像一条结论 */
+.hn-none {
+	margin: 12px 0 0;
+	padding: 10px 12px;
+	font-size: 13px;
+	background: var(--card);
+	border: 1px dashed var(--line-strong);
+	border-radius: 3px;
+	color: var(--ink-2);
+}
+
+.tl {
+	list-style: none;
+	margin: 14px 0 0;
+	padding: 0 0 0 14px;
+	border-left: 2px solid var(--line);
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+.tl-node {
+	position: relative;
+}
+.tl-node::before {
+	content: "";
+	position: absolute;
+	left: -19px;
+	top: 8px;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--ink);
+}
+/* **事实层锚不上 = 灰显不删**(决策 T4)。整个节点降到 55% 不透明,
+   并且节点上多一枚「未能在原文中定位」的字 —— 色盲用户读得到字。 */
+.tl-unanchored {
+	opacity: 0.55;
+}
+.tl-unanchored::before {
+	background: var(--line-strong);
+}
+.tl-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px;
+}
+.tl-at {
+	font-family: var(--mono);
+	font-size: 12px;
+	color: var(--ink-3);
+}
+.tl-kind {
+	font-size: 10.5px;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 2px;
+	padding: 0 6px;
+}
+.tl-label {
+	font-size: 14px;
+	font-weight: 600;
+}
+.tl-off {
+	font-size: 11px;
+	color: var(--warn);
+	border: 1px solid var(--warn);
+	border-radius: 2px;
+	padding: 0 5px;
+}
+.tl-why {
+	margin: 4px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+
+/* ———————————— 证据卡 ———————————— */
+
+.ev {
+	margin: 6px 0 0;
+	padding: 10px 12px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--ink-2);
+	border-radius: 3px;
+}
+.ev-off {
+	border-left-color: var(--line-strong);
+	background: var(--paper-deep);
+}
+.ev-quote {
+	margin: 0;
+	font-family: var(--serif);
+	font-size: 14px;
+	line-height: 1.75;
+}
+.ev-quote::before {
+	content: "「";
+	color: var(--ink-3);
+}
+.ev-quote::after {
+	content: "」";
+	color: var(--ink-3);
+}
+.ev-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: baseline;
+	margin-top: 6px;
+	font-size: 11.5px;
+	color: var(--ink-3);
+}
+.ev-src {
+	font-family: var(--mono);
+}
+.ev-ok {
+	color: var(--ok);
+}
+.ev-bad {
+	color: var(--warn);
+}
+.ev-link {
+	color: var(--accent);
+	text-decoration: none;
+	border-bottom: 1px solid var(--accent-soft);
+}
+.ev-ctx {
+	margin-top: 6px;
+	font-size: 11.5px;
+	color: var(--ink-3);
+}
+.ev-ctx summary {
+	cursor: pointer;
+}
+.ev-ctx pre {
+	white-space: pre-wrap;
+	word-break: break-word;
+	margin: 6px 0 0;
+	font-family: var(--mono);
+	font-size: 11.5px;
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 8px;
+}
+.ev-missing {
+	margin: 6px 0 0;
+	font-size: 12.5px;
+	color: var(--accent);
+}
+
+/* ———————————— 判断层 ———————————— */
+
+.tk-h {
+	margin: 20px 0 0;
+	font-size: 13px;
+	letter-spacing: 0.04em;
+}
+.tk-list {
+	list-style: none;
+	margin: 10px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+.tk {
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-top: 3px solid var(--accent);
+	border-radius: 3px;
+}
+.tk-text {
+	margin: 0;
+	font-size: 15px;
+	line-height: 1.75;
+	font-weight: 600;
+}
+.tk-cares {
+	margin: 6px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: baseline;
+}
+.tk-cares-tag {
+	flex: none;
+	font-size: 10.5px;
+	font-weight: 700;
+	color: var(--accent);
+	border: 1px solid var(--accent);
+	border-radius: 2px;
+	padding: 0 6px;
+}
+.tk-basis {
+	margin-top: 8px;
+}
+.tk-basis-h {
+	margin: 0;
+	font-size: 11.5px;
+	letter-spacing: 0.04em;
+	color: var(--ink-3);
+}
+
+/* 被丢弃的判断:可以折叠,但入口常驻 */
+.dropped {
+	margin: 12px 0 0;
+	border: 1px dashed var(--line-strong);
+	border-radius: 3px;
+	background: var(--paper-deep);
+}
+.dropped-head {
+	cursor: pointer;
+	list-style: none;
+	padding: 8px 12px;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+}
+.dropped-head::-webkit-details-marker {
+	display: none;
+}
+.dropped-count {
+	font-family: var(--mono);
+	font-weight: 700;
+	color: var(--warn);
+}
+.dropped-list {
+	list-style: none;
+	margin: 0;
+	padding: 0 12px 10px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.drop-text {
+	margin: 0;
+	font-size: 13px;
+	color: var(--ink-2);
+	text-decoration: line-through;
+	text-decoration-color: var(--line-strong);
+}
+.drop-why {
+	margin: 2px 0 0;
+	font-size: 11.5px;
+	color: var(--ink-3);
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+}
+.drop-kind {
+	font-family: var(--mono);
+	flex: none;
+}
+.dropped-none {
+	margin: 12px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-3);
+}
+.dropped .dsec-why {
+	padding: 0 12px 10px;
+}
+
+/* ———————————— 节 2 · 读过哪几个文件 ———————————— */
+
+.report-alarm {
+	margin: 12px 0 0;
+	padding: 10px 12px;
+	font-size: 13px;
+	color: var(--accent);
+	background: var(--accent-soft);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+}
+.files-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--line);
+	border-radius: 3px;
+	background: var(--card);
+	margin-top: 12px;
+}
+.files {
+	border-collapse: collapse;
+	width: 100%;
+	font-size: 12px;
+}
+.files th,
+.files td {
+	padding: 5px 10px;
+	text-align: left;
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+.files th {
+	font-size: 11px;
+	color: var(--ink-2);
+	font-weight: 600;
+	background: var(--paper-deep);
+}
+.files td {
+	font-family: var(--mono);
+	color: var(--ink-2);
+}
+.files td a {
+	color: var(--ink);
+}
+.files-why {
+	white-space: normal;
+	font-family: var(--sans);
+	min-width: 220px;
+}
+
+/* ———————————— 档案快照 ———————————— */
+
+.cares-snap {
+	margin: 10px 0 0;
+	padding-left: 22px;
+	font-size: 13.5px;
+	color: var(--ink-2);
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+/* ———————————— 清单屏上那个贵按钮 ———————————— */
+
+.teardown-cost {
+	margin: 0 0 12px;
+	padding: 10px 12px;
+	font-size: 12.5px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 3px;
+}
+.cand-teardown {
+	font: inherit;
+	font-size: 11.5px;
+	font-weight: 600;
+	margin-left: auto;
+	flex: none;
+	color: var(--accent);
+	background: none;
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+	padding: 1px 10px;
+	cursor: pointer;
+}
+.cand-teardown:hover:not(:disabled) {
+	color: var(--paper);
+	background: var(--accent);
+}
+.cand-teardown:disabled {
+	opacity: 0.45;
+	cursor: progress;
+}
+
+/* ---------------------------------------------------------------------------
+   门铃邮件的订阅开关(阶段 9)。档案屏底部,和「删掉重建」并排。
+
+   刻意**不用 .danger 那套红框**:退订不是危险操作,它随时可以改回来
+   (整条改动的存在理由就是「让它改得回来」)。用中性卡片 + 一枚状态徽记 ——
+   徽记才是这一块的主角,因为一个不说明当前状态的开关等于让人猜。
+   --------------------------------------------------------------------------- */
+.mailbox {
+	margin-top: 20px;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	background: var(--card);
+	padding: 16px 18px;
+}
+.mailbox-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.mailbox-head h3 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 700;
+	color: var(--ink);
+}
+/* 「在收 / 已退订」。默认是灰的(已退订),在收时才点亮 —— 亮的那个是
+   「有东西会寄到你邮箱」,这一状态值得被看见。 */
+.mailbox-state {
+	border: 1px solid var(--line-strong);
+	border-radius: 999px;
+	padding: 1px 9px;
+	font-size: 11px;
+	letter-spacing: 0.04em;
+	color: var(--ink-3);
+}
+.mailbox-state.on {
+	border-color: var(--ok);
+	color: var(--ok);
+}
+.mailbox-now {
+	margin: 10px 0 0;
+	font-size: 13.5px;
+	line-height: 1.75;
+	color: var(--ink);
+}
+.mailbox .dsec-why {
+	margin-top: 8px;
+}
+.mailbox .warn-line {
+	color: var(--warn);
+}
+.mailbox-row {
+	margin-top: 14px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+.mailbox-hint {
+	font-size: 12px;
+	line-height: 1.7;
+	color: var(--ink-3);
+}
+
+/* ============================================================
+   跨周变化(第四屏 · 2026-09-01 上线前终审)
+   ------------------------------------------------------------
+   这一屏的版面只有一个任务:让**三对容易被混成一句话的东西**在视觉上
+   一眼分得开。三对都是「说错了不会报错、只会安静地骗人」的那一类:
+     ① 「没有跨周记录」 vs 「记了、一个变化都没有」 —— 前者用中性灰框
+        (什么都没发生过),后者用朱红提示条(这是一条真结论);
+     ② 「没查成」 vs 「已经没了」 —— 三栏并列,颜色一冷一暖,
+        中间那栏(没查成)刻意压成灰色:它不是坏消息,是**没有消息**;
+     ③ 「掉出清单」 vs 「出事了」 —— 一个是灰徽记一个是朱红徽记,
+        同一行上并排出现,读者一眼看得到两件事都发生了。
+   底座的 token 一个没新增,全用 :root 里那七个颜色。
+   ============================================================ */
+
+/* ———————————— 翻周那一列 ———————————— */
+
+.week-list {
+	list-style: none;
+	margin: 14px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.week-row {
+	margin: 0;
+}
+.week-pick {
+	width: 100%;
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 10px;
+	padding: 10px 12px;
+	text-align: left;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--line);
+	border-radius: 3px;
+	cursor: pointer;
+	font: inherit;
+	color: inherit;
+	transition:
+		border-color 0.14s ease,
+		background 0.14s ease;
+}
+.week-pick:hover:not(:disabled) {
+	border-color: var(--line-strong);
+	border-left-color: var(--ink);
+}
+.week-pick:disabled {
+	cursor: default;
+	opacity: 0.65;
+}
+/* 选中那一周:左边一条黑墨实边。这一屏的读者随时要能回答「我现在看的是哪一周」 */
+.week-on .week-pick {
+	background: var(--paper-deep);
+	border-color: var(--line-strong);
+	border-left-color: var(--ink);
+}
+.week-of {
+	font-family: var(--mono);
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--ink);
+}
+.week-tag {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border: 1px solid var(--line);
+	border-radius: 999px;
+	padding: 1px 8px;
+}
+.week-facts {
+	font-size: 12.5px;
+	color: var(--ink-2);
+}
+.week-rev {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--ink-3);
+}
+/* 残缺的那几周:拿它当基准比出来的「新进清单」里会混进假货,必须一眼看得见 */
+.week-stopped {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--accent);
+	background: var(--accent-soft);
+	border: 1px solid var(--accent);
+	border-radius: 999px;
+	padding: 1px 8px;
+	cursor: help;
+}
+.week-partial .week-pick {
+	border-left-color: var(--accent);
+}
+
+/* ———————————— 「没有记录」 vs 「没有变化」 ———————————— */
+
+/* 中性灰框:这里什么都没发生过。**刻意不用朱红** —— 朱红在这一屏里
+   代表「有一条真结论」,而「没记过」恰恰是它的反面。 */
+.xw-none {
+	margin-top: 14px;
+	padding: 14px 16px;
+	background: var(--paper-deep);
+	border: 1px dashed var(--line-strong);
+	border-radius: 3px;
+}
+.xw-none-lead {
+	margin: 0;
+	font-size: 14px;
+	line-height: 1.85;
+	color: var(--ink);
+}
+.xw-why-list {
+	margin: 8px 0 0;
+	padding-left: 20px;
+	font-size: 12.5px;
+	line-height: 1.85;
+	color: var(--ink-2);
+}
+/* 第一周:同样是中性的,因为它也不是一条结论 —— 是「还没得比」 */
+.xw-first {
+	margin-top: 14px;
+	padding: 14px 16px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--line-strong);
+	border-radius: 3px;
+}
+.xw-first-lead {
+	margin: 0;
+	font-size: 14.5px;
+	line-height: 1.8;
+	color: var(--ink);
+}
+
+.xw-lead {
+	margin: 14px 0 0;
+	font-size: 14px;
+	line-height: 1.85;
+	color: var(--ink);
+}
+.xw-lead-why {
+	color: var(--ink-2);
+	font-size: 12.5px;
+}
+/* 「比过了,没有变化」:这是**一条真结论**,所以它拿朱红那条边 */
+.xw-quiet {
+	margin: 12px 0 0;
+	padding: 10px 14px;
+	font-size: 13.5px;
+	line-height: 1.8;
+	color: var(--ink);
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-left: 3px solid var(--ok);
+	border-radius: 3px;
+}
+
+/* ———————————— 四类变化 ———————————— */
+
+.xw-grid {
+	margin-top: 14px;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+	gap: 10px;
+}
+.xw-cell {
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+}
+/* 有内容的格子才提亮:一屏四个格子全都一样重的话,读者得逐个读数字 */
+.xw-cell-on {
+	border-color: var(--line-strong);
+	box-shadow: inset 3px 0 0 var(--accent);
+}
+.xw-cell-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 8px;
+}
+.xw-cell-label {
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--ink);
+}
+.xw-cell-hint {
+	margin: 4px 0 0;
+	font-size: 11.5px;
+	line-height: 1.7;
+	color: var(--ink-3);
+}
+.xw-cell-none {
+	margin: 8px 0 0;
+	font-size: 12.5px;
+	color: var(--ink-3);
+}
+.xw-list {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+.xw-list li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px;
+}
+.xw-name {
+	font-family: var(--mono);
+	font-size: 12.5px;
+	color: var(--ink);
+	text-decoration: none;
+	border-bottom: 1px solid var(--line-strong);
+}
+.xw-name:hover {
+	color: var(--accent);
+	border-bottom-color: var(--accent);
+}
+.xw-delta {
+	font-family: var(--mono);
+	font-size: 11.5px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border-radius: 3px;
+	padding: 0 6px;
+}
+
+/* ———————————— 复查:三栏 ———————————— */
+
+.rk-lead {
+	margin: 14px 0 0;
+	font-size: 14px;
+	line-height: 1.9;
+	color: var(--ink);
+}
+.rk-cols {
+	margin-top: 14px;
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 12px;
+}
+.rk-col {
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+}
+/* 出事了 —— 朱红。这一栏是加复查这个功能的全部理由 */
+.rk-col-changed {
+	border-left: 3px solid var(--accent);
+}
+/* 没查成 —— 灰。**刻意压下去**:它不是坏消息,是「没有消息」。
+   给它一个警示色的话,每一次 GitHub 抖一下都会在页面上长得像出了事。 */
+.rk-col-unchecked {
+	border-left: 3px solid var(--line-strong);
+	background: var(--paper-deep);
+}
+/* 查过没事 —— 绿 */
+.rk-col-fine {
+	border-left: 3px solid var(--ok);
+}
+.rk-h {
+	margin: 0;
+	font-size: 13.5px;
+	font-weight: 700;
+	color: var(--ink);
+}
+.rk-note {
+	margin: 6px 0 0;
+	font-size: 12px;
+	line-height: 1.75;
+	color: var(--ink-2);
+}
+.rk-list {
+	list-style: none;
+	margin: 10px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.rk-list-quiet .xw-name {
+	color: var(--ink-2);
+}
+.rk-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 8px;
+	font-size: 12.5px;
+	line-height: 1.7;
+}
+.rk-kind {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	border-radius: 999px;
+	padding: 1px 8px;
+	border: 1px solid var(--line);
+	background: var(--paper-deep);
+	color: var(--ink-2);
+}
+/* 「已经没了」是这一屏最重的一个词,给它最重的一枚徽记 */
+.rk-kind-gone {
+	color: var(--card);
+	background: var(--accent);
+	border-color: var(--accent);
+	font-weight: 700;
+}
+.rk-kind-archived,
+.rk-kind-license {
+	color: var(--accent);
+	background: var(--accent-soft);
+	border-color: var(--accent);
+}
+.rk-why {
+	font-size: 11.5px;
+	color: var(--ink-2);
+}
+/* 「掉出清单」和「出事了」是两件事:一个灰、一个朱红,同一行上并排 */
+.rk-dropped {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-2);
+	background: var(--paper-deep);
+	border: 1px dashed var(--line-strong);
+	border-radius: 999px;
+	padding: 1px 8px;
+}
+.rk-listed {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--ink-3);
+}
+
+/* ———————————— 那一周的完整清单(折叠) ———————————— */
+
+.week-bundle {
+	margin-top: 14px;
+	padding: 12px 14px;
+	background: var(--card);
+	border: 1px solid var(--line);
+	border-radius: 3px;
+}
+.week-bundle-head {
+	cursor: pointer;
+	font-size: 13.5px;
+	font-weight: 600;
+	color: var(--ink);
+	list-style: none;
+}
+.week-bundle-head::-webkit-details-marker {
+	display: none;
+}
+.week-bundle-head::before {
+	content: "▸ ";
+	color: var(--accent);
+}
+.week-bundle[open] .week-bundle-head::before {
+	content: "▾ ";
+}
+
+/* ———————————— 重跑回执里那两栏 ———————————— */
+
+.rerun-appeals {
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink);
+}
+/* 「下次会自动回来」那句话必须显眼:少掉的那一行会被读成「我那次申诉白点了」,
+   而下一步他多半会再点一次,再花一次额度做一件系统已经答应会自动做的事。 */
+.rerun-missing {
+	font-size: 13px;
+	line-height: 1.8;
+	color: var(--ink);
+	border-left: 3px solid var(--warn);
+	padding-left: 10px;
+}

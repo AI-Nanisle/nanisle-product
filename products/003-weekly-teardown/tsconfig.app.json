@@ -1,0 +1,30 @@
+{
+	"compilerOptions": {
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+		"target": "ES2020",
+		"useDefineForClassFields": true,
+		"lib": ["ES2020", "DOM", "DOM.Iterable"],
+		"module": "ESNext",
+		"skipLibCheck": true,
+
+		/* Bundler mode */
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"isolatedModules": true,
+		"moduleDetection": "force",
+		"noEmit": true,
+		"jsx": "react-jsx",
+
+		/* Linting */
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+		"noUncheckedSideEffectImports": true
+	},
+	// 测试文件由 `npm test`(node --test,自带 node 类型环境)运行,不进这个
+	// 项目——这里没有 @types/node,认不得 node:test。理由与做法都与
+	// tsconfig.worker.json 排除 src/worker/*.test.ts 完全一致。
+	"exclude": ["src/react-app/*.test.ts"],
+	"include": ["src/react-app"]
+}

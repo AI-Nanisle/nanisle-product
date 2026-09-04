@@ -1,0 +1,18 @@
+{
+	"extends": "./tsconfig.node.json",
+	"compilerOptions": {
+		"tsBuildInfoFile": "./node_modules/.tmp/tsconfig.worker.tsbuildinfo",
+		"types": ["@cloudflare/workers-types", "vite/client"]
+	},
+	// 测试文件由 `npm test`(node --test,自带 node 类型环境)运行,
+	// 不进 worker 项目——这里的 types 是 workers-types,认不得 node:test。
+	"exclude": ["src/worker/*.test.ts", "src/shared/*.test.ts"],
+	// src/shared 必须显式列出,不能只靠「被 src/worker import」进来。
+	//
+	// 2026-09-01 两个 agent 各自撞到同一件事:阶段 6 新写的 src/shared/anchor.ts
+	// 当时还没有任何人 import 它,于是 `tsc -b` 直接跳过整个文件,`npm run check`
+	// 绿着而那 250 行一次都没被类型检查过。靠 import 传递进来的覆盖面有个隐蔽
+	// 性质:**它只覆盖已经接线的代码**,而刚写完还没接线的代码正是最需要检查
+	// 的那一批。显式 include 之后,src/shared 下任何一个文件从落盘那一刻起就在闸内。
+	"include": ["src/worker", "src/shared"]
+}

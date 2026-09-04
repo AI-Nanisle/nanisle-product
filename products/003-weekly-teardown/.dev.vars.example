@@ -1,0 +1,140 @@
+# 本地开发配置(`npm run dev` 读它)。复制成 `.dev.vars`(已 gitignore)再改。
+# 真值永远不进仓库;线上用 `wrangler secret put <NAME>`。
+#
+# 三件事先说在前面,别让你以为「没配就跑不了」:
+#
+#   1. 不设 DEEPSEEK_API_KEY 会自动落回 mock。措辞是假的,链路是真的——
+#      整个应用端到端跑得通,不需要任何 key。这是本仓的零配置规矩。
+#
+#      **发现层在 mock 下跑的是真东西。**这是 003 相对 001/002 的一个实打实的
+#      优势:它们的 mock 是回放固定样本,而这里 AI_PROVIDER=mock 时,
+#      GitHub 双路检索、规则过滤、门 1(真的 GET /repos 拿 200)、台账四个数
+#      全部照常真跑真算——**唯一假的是每个候选仓那句「一句话形态描述」**
+#      (会带 [mock] 前缀,好让几个月后的人分得清)。所以 fork 之后不配任何 key
+#      也能看到一份真实的周扫结果,而不是一份演示数据。
+#
+#   2. 不设 GITHUB_PAT 走匿名档 60 次/小时(search 10 次/分钟),
+#      **跑的仍然是真网络真数据**,不是回放的样本。配了 PAT 提到
+#      5000 次/小时(search 30 次/分钟)。匿名档下一趟周扫会在退避里等一两分钟,
+#      这是正常的——现在走的是哪一档,POST /api/scan 的响应里 rate.authenticated
+#      会说,GET /api/health 的 hasPat 也会说。
+#      (PAT 是账号级共享桶,不是按用户分的——周扫因此必须串行 + 按响应头退避。)
+#   3. 不设 EMAIL_UNSUB_SECRET = 不发门铃邮件,其余功能完整。发信要一组只有
+#      ses:SendEmail 权限的 AWS 凭证;fork 的人拿不到,那条链路对他们是死的,
+#      别的都能用。
+
+# --- AI 接缝 -----------------------------------------------------------------
+# deepseek(生产默认)| mock(零配置)| anthropic(自带 key)| gateway(Anthropic 兼容代理)
+# 不配 = 用 wrangler.jsonc vars 里的值(deepseek);那一档没有 key 时代码再落回 mock
+AI_PROVIDER=mock
+# 判断层:节 1 发展史、节 2 源码 takeaway。不配 = 走对应 provider 的默认型号(ai.ts)
+# AI_MODEL=deepseek-v4-pro
+# 轻任务档:一句话拆档案、候选仓的形态描述。两行都不配 = 轻任务和判断层用同一档
+# (贵一点、慢一点,但结果一样对)
+# 一次「拆解」允许花的总墙钟(毫秒,默认 45000)。生产不用配 —— 它存在的理由是
+# 让超时那条路能被真的跑一遍:draft 底下叠着三层重试(语义补足 1 轮 x
+# JsonShapeError 1 次 x deepseek 的空 content 重试 1 次),最坏一次 draft 会发出
+# 8 个真实生成请求,串行下来足以把交互端点拖过 CF 那条「100 秒无字节即 524」的
+# 线 —— 用户会拿到 524 而不是那句「模型这次没按格式说话」,而 ai 额度已经扣了。
+# DRAFT_BUDGET_MS=45000
+
+# FAST_AI_PROVIDER=deepseek
+# FAST_AI_MODEL=deepseek-v4-flash
+# 思考 + 产出一共能用多少 token(V4 Pro 的 thinking 也占输出预算)。
+# 不配 = 用 wrangler.jsonc vars 里的 32768;调小了深度报告会被截断(节 2 读 5 份源码)
+# AI_MAX_OUTPUT_TOKENS=32768
+# 出事时的总闸:置 1 后所有花 token 的端点 503,其余照常。不配 = 不停机
+# AI_DISABLED=1
+
+# AI_PROVIDER=deepseek
+# DEEPSEEK_API_KEY=sk-...
+# AI_PROVIDER=anthropic(platform.claude.com 自己的 key)
+# ANTHROPIC_API_KEY=sk-ant-...
+# AI_PROVIDER=gateway(任何 Anthropic 兼容端点:LiteLLM、自建 shim)
+# 这两行只在 AI_PROVIDER=gateway 时被读;那一档缺了 URL 会当场报错,不会静默落回别处
+# AI_GATEWAY_URL=https://your-gateway.example.com
+# AI_GATEWAY_KEY=your-virtual-key
+
+# --- 站长专线(可选;不设 = 没有专线) ----------------------------------------
+# 名单里的账号改走另一套 provider,其余用户不受影响;专线请求不计入 $3/天全局花费闸
+# OWNER_AI_EMAILS=you@example.com
+# OWNER_AI_PROVIDER=gateway
+# OWNER_AI_MODEL=opus
+# OWNER_FAST_AI_MODEL=sonnet
+# OWNER_AI_MAX_OUTPUT_TOKENS=32768
+# OWNER_AI_GATEWAY_URL=https://your-gateway.example.com
+# OWNER_AI_GATEWAY_KEY=your-virtual-key
+
+# --- 门禁与身份 --------------------------------------------------------------
+# 与南屿主站共享的手递票密钥。不设 = 不做登录门禁,所有请求算 DEV_EMAIL 那个人
+# NANISLE_SSO_SECRET=must-match-the-main-site
+# 站长凭证(x-access-code),/api/__spike 这类诊断端点的门。不设 = 开放
+# ACCESS_CODE=pick-a-long-random-string
+# 只在没配 NANISLE_SSO_SECRET 时生效:本地冒充谁。留空 = dev@local
+# DEV_EMAIL=dev@local
+
+# --- 外部数据源 --------------------------------------------------------------
+# 可选。不设走匿名 60 次/小时(真数据);设了 5000 次/小时
+# GITHUB_PAT=github_pat_...
+# 一趟周扫整体的墙钟预算(毫秒,默认 75000)。生产不用配 —— POST /api/scan 是
+# 普通 JSON 响应,跑完才回字节,而 CF 那条「100 秒无字节即 524」的线在等着;
+# 到点不是抛错,是提前收工出一份诚实的台账(响应里的 stopped 会说为什么)。
+# SCAN_BUDGET_MS=75000
+# **只给测试用**:把 GitHub API 根地址指到一个假服务器。生产/本地开发都别配,
+# 配了就等于把发现层的数据源换掉了。阶段 7 起它还顺带把 raw.githubusercontent.com
+# (加 /__raw 前缀)、github.com(/__web)、HN Algolia(/__hn)一起指过去 ——
+# 一个开关切一整套,免得出现「文件树来自假服务器、源码正文来自真 GitHub」这种
+# 跑出来看上去完全正常的混合状态(env.ts githubBases)。
+# GITHUB_API_BASE=http://127.0.0.1:8788
+
+# --- 深度报告(阶段 7) --------------------------------------------------------
+# 一份深度报告整趟的墙钟预算(毫秒,默认 180000)。可以远大于 SCAN_BUDGET_MS,
+# 因为这条端点走 SSE:响应体一直在滴字节,「100 秒无字节即 524」那条线不适用。
+# 它挡的是另一件事 —— 上游卡住时别让一趟 $0.4-0.6 的调用无限期挂着。
+# REPORT_BUDGET_MS=180000
+# SSE 心跳的间隔(毫秒,默认 10000)。**只给测试用,生产别配。**
+# 心跳是 thinking 那几十秒里唯一的字节;要验「它真的一直在发」,按 10 秒一发的
+# 用例得跑半分钟,那样的用例没人会跑,于是心跳会永远停在「写了但没验过」——
+# 和没有心跳在代码上长得一模一样。
+# REPORT_PING_MS=10000
+
+# --- 门铃邮件(阶段 8;SigV4 直调 SES v2,不引入任何 AWS 侧计算) -------------
+# **三样缺一样就不发信,其余功能完整**:周扫照跑、清单照落库、网页照常能看,
+# cron 会把本该发出去的正文原样打进日志(所以本地不配凭证也看得见邮件长什么样)。
+# 缺的是发信这一步,不是产品。
+#   EMAIL_UNSUB_SECRET   退订 token 的 HMAC 密钥。**专用,不复用 NANISLE_SSO_SECRET**
+#                        ——那是登录信物,泄漏面不该为一个退订链接扩大;这把钥匙
+#                        最坏的后果只是被人退订。不设 = 不发邮件。
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#                        只有 ses:SendEmail 的最小权限 IAM 用户。域名身份
+#                        nanisle.com 在 001 的 SES 账号里已验证,不需要新建 AWS 资源。
+# EMAIL_UNSUB_SECRET=another-long-random-string
+# AWS_ACCESS_KEY_ID=AKIA...
+# AWS_SECRET_ACCESS_KEY=...
+#   AWS_REGION           SES 所在 region。不配 = us-east-1
+#   EMAIL_FROM           发件地址(裸地址,显示名在代码里统一加)。
+#                        不配 = teardown@nanisle.com(域名身份已在 001 的 SES 账号里验证)
+# AWS_REGION=us-east-1
+# EMAIL_FROM=teardown@nanisle.com
+
+# --- 每周 cron(阶段 8) ------------------------------------------------------
+# 本地触发:`wrangler dev --local --test-scheduled`,然后打
+#   curl "http://127.0.0.1:8787/cdn-cgi/handler/scheduled?cron=0+8+*+*+1"
+# **不是 `/__scheduled`**(阶段 8 实测):本产品有 assets,那条路径会被资产层按
+# not_found_handling 吞掉,返回 SPA 的 index.html —— 看起来 200,cron 一次都没跑。
+#
+# cron 里**单个用户**的周扫预算(毫秒,默认 300000 = 5 分钟)。它和上面的
+# SCAN_BUDGET_MS(75 秒)差一个数量级,因为那 75 秒是被「100 秒无字节即 524」
+# 逼出来的,而那条线是边缘代理对 **HTTP 响应**的规矩 —— cron 没有请求、没有响应、
+# 没有浏览器在等。定时触发器在「间隔 >= 1 小时」这一档有 15 分钟预算。
+# CRON_SCAN_BUDGET_MS=300000
+# **整趟** cron 的预算(毫秒,默认 780000 = 13 分钟,留 2 分钟余量)。到点之后
+# 还没轮到的用户记一条 notReached 计数,而不是被运行时静默掐断。
+# CRON_BUDGET_MS=780000
+
+# --- 站点地址(本地一般不用改;线上在 wrangler.jsonc 的 vars 里) -------------
+# 主站根地址,未登录时往哪儿送人。不配 = https://nanisle.com(再不行就从 APP_URL 取 origin)
+# NANISLE_URL=http://localhost:3000
+# 本产品的公开挂载点(无尾斜杠)。**门铃邮件里那两条链接就是拿它拼的**,
+# 配错了信照发,只是链接点不开。不配 = https://nanisle.com/products/weekly-teardown
+# APP_URL=http://localhost:3000/products/weekly-teardown

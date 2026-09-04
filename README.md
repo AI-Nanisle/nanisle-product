@@ -10,6 +10,7 @@
 |---|---------|-----------|------|--------|
 | 001 | Daily Brief | A finite daily brief that routes you to originals — never replaces them | _soon_ | [products/001-daily-brief](products/001-daily-brief/) |
 | 002 | Watch Router | AI watches the hour-long video first: verdict, verified key points, and a chapter map back to the good minutes | _building_ | [products/002-watch-router](products/002-watch-router/) |
+| 003 | Weekly Teardown | One sentence in; every Monday, 5 candidate open-source projects, what changed since last week, and a deep teardown whose every claim links back to a commit-pinned line | _building_ | [products/003-weekly-teardown](products/003-weekly-teardown/) |
 
 ## Principles
 

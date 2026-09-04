@@ -10,6 +10,7 @@
 |---|------|--------|------|------|
 | 001 | 每日简报 Daily Brief | 有限、有终点的每日简报,每条都是通往原文的路由器 | _即将上线_ | [products/001-daily-brief](products/001-daily-brief/) |
 | 002 | 长视频总结 Watch Router | 一小时的视频 AI 先替你看完:判决、带原文实证的要点、能跳回原片的分段地图 | _开发中_ | [products/002-watch-router](products/002-watch-router/) |
+| 003 | 领域拆解 Weekly Teardown | 给一句话,每周一早收到 5 个候选开源项目和与上一周的差异;点一个才跑深度拆解,每句判断都挂着能点回源码某一行的永久链接 | _开发中_ | [products/003-weekly-teardown](products/003-weekly-teardown/) |
 
 ## 三条原则
 

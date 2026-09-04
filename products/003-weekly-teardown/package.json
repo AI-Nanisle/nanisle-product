@@ -1,0 +1,36 @@
+{
+	"name": "nanisle-003-weekly-teardown",
+	"description": "领域拆解：每周一早五个候选开源项目 + 与上周的差异，点一个跑带逐字引文和永久回链的深度拆解（nanisle 003）",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"test": "node --experimental-strip-types --test src/worker/index.test.ts src/worker/sso.test.ts src/worker/guard.test.ts src/worker/env.test.ts src/worker/dossier.test.ts src/worker/scan.test.ts src/worker/report.test.ts src/worker/cron.test.ts src/shared/anchor.test.ts src/shared/ai.test.ts src/shared/store.test.ts src/shared/scan-rules.test.ts src/shared/scan-groups.test.ts src/shared/github.test.ts src/shared/scan-diff.test.ts src/shared/email.test.ts src/react-app/dossier-edit.test.ts src/react-app/render.test.ts src/react-app/scan-render.test.ts src/react-app/report-render.test.ts src/react-app/changes-render.test.ts",
+		"recall-check": "node --experimental-strip-types scripts/recall-check.ts",
+		"build": "tsc -b && vite build",
+		"check": "tsc -b && vite build && wrangler deploy --dry-run",
+		"deploy": "npm run build && wrangler deploy",
+		"cf-typegen": "wrangler types"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "^0.117.1",
+		"aws4fetch": "^1.0.20",
+		"hono": "4.11.1",
+		"react": "19.2.1",
+		"react-dom": "19.2.1"
+	},
+	"devDependencies": {
+		"@cloudflare/vite-plugin": "1.52.1",
+		"@cloudflare/workers-types": "^5.20260816.1",
+		"@tailwindcss/vite": "^4.3.3",
+		"@types/node": "^22.20.1",
+		"@types/react": "19.2.7",
+		"@types/react-dom": "19.2.3",
+		"@vitejs/plugin-react": "5.1.1",
+		"esbuild": "^0.28.2",
+		"tailwindcss": "^4.3.3",
+		"typescript": "5.9.3",
+		"vite": "^7.0.0",
+		"wrangler": "4.123.0"
+	}
+}

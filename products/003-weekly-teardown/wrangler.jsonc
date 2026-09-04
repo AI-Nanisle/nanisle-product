@@ -1,0 +1,86 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "nanisle-003-weekly-teardown",
+	"main": "./src/worker/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	// 周扫(docs/02 决策 T5):每周一 08:00 UTC = 美东周日 03:00/04:00,用户
+	// 周一早上打开邮箱时清单已经躺在那儿。「间隔 >= 1 小时」这一档的 cron
+	// 有 15 分钟 CPU 预算,串行扫几十个用户绰绰有余(时间全花在等网络上)。
+	// scheduled() 在阶段 8 实现,现在先把触发器占住。
+	//
+	// >>> 改这个 cron 的时候,src/shared/types.ts 的 WEEKLY_SCAN_SCHEDULE 要一起改
+	// >>> (前端的保存回执要告诉用户下一次周扫是什么时候;Worker 运行时读不到
+	// >>> 这个文件,所以只能两处各写一份)。`npm test` 有一条用例读这一行、把
+	// >>> 两者钉在一起,改了一边不改另一边测试当场红。
+	"triggers": { "crons": ["0 8 * * 1"] },
+	"assets": {
+		"directory": "./dist/client",
+		"binding": "ASSETS",
+		"not_found_handling": "single-page-application",
+		// SPA fallback 会在 Worker 之前吞掉**导航**请求,这三条必须打到 Worker:
+		// /auth/sso 种会话 cookie,/api/* 是纯 JSON,/products/weekly-teardown/*
+		// 是主站 Service Binding 转发进来的原始路径。不列 /auth/* 的话
+		// /auth/sso 根本进不了 Worker(docs/02「主站接入」)。
+		"run_worker_first": [
+			"/api/*",
+			"/auth/*",
+			"/products/weekly-teardown/*"
+		]
+	},
+	// 全部有主状态都在 D1(docs/02 决策 T2):档案、周扫快照、候选、排除、
+	// 报告、inflight、配额、日花费。表结构在 migrations/0001_init.sql(阶段 2)。
+	//
+	// >>> 人工门:站长在阶段 2 之前跑
+	// >>>   wrangler d1 create nanisle-weekly-teardown
+	// >>> 本产品的库已经建好(2026-09-01),id 就填在下面。fork 的人要自己跑一次
+	//     上面那条命令,再把返回的 database_id 换掉。
+	// >>>   wrangler d1 migrations apply nanisle-weekly-teardown --local|--remote
+	// 不换成自己的 id 的话 `wrangler deploy` 会失败(找不到库/无权访问)——这是好事,
+	// 失败比静默连到别人的库好。
+	"d1_databases": [
+		{
+			"binding": "TEARDOWN_DB",
+			"database_name": "nanisle-weekly-teardown",
+			"database_id": "bfef8852-f59f-449b-8286-774af9b55d5c",
+			"migrations_dir": "migrations"
+		}
+	],
+	// Non-secret configuration. Secrets are NEVER written here or in any file —
+	// set them with `wrangler secret put <NAME>` (prod) or in .dev.vars (local, gitignored):
+	//   NANISLE_SSO_SECRET     与主站共享的手递票密钥(src/worker/sso.ts);不设 = 不做登录门禁
+	//   ACCESS_CODE            站长凭证(x-access-code),/api/__spike 这类诊断端点的门
+	//   DEEPSEEK_API_KEY       AI_PROVIDER=deepseek(生产默认)才用;不设自动落回 mock
+	//   GITHUB_PAT             GitHub API 提额到 5000 次/小时(docs/02 T5);不设走匿名档
+	//                          60 次/小时,**仍然是真网络真数据**,不是回放
+	//   EMAIL_UNSUB_SECRET     门铃邮件退订 token 的 HMAC 密钥;不设 = 不发邮件,其余功能完整
+	//   AWS_ACCESS_KEY_ID      最小权限 IAM 用户,只用来 SigV4 直调 SES v2 发信
+	//   AWS_SECRET_ACCESS_KEY    (nanisle.com 域名身份在 001 的 SES 账号里已验证,不需要新建 AWS 资源)
+	//   OWNER_AI_EMAILS / OWNER_AI_PROVIDER / OWNER_AI_MODEL / OWNER_FAST_AI_MODEL /
+	//   OWNER_AI_MAX_OUTPUT_TOKENS / OWNER_AI_GATEWAY_URL / OWNER_AI_GATEWAY_KEY
+	//                          站长专线(主仓 backend/docs/01),全部可选;不设 = 没有专线。
+	//                          专线请求不计入 docs/02 T6 的 $3/天全局花费闸
+	"vars": {
+		// 生产默认 deepseek;没配 DEEPSEEK_API_KEY 时代码自动落回 mock(fork
+		// 零配置照样跑通,误配的实例在 /api/health 里看得见)
+		"AI_PROVIDER": "deepseek",
+		// 判断层(节 1 发展史、节 2 源码 takeaway)走 pro,默认开 thinking
+		"AI_MODEL": "deepseek-v4-pro",
+		// 轻任务档:一句话 → 档案字段、候选仓的形态描述(批量一次调用)
+		"FAST_AI_MODEL": "deepseek-v4-flash",
+		// 32768:与 002 同值。V4 Pro 的 thinking 也占输出预算,所以这个数是
+		// 「思考 + 产出一共能多长」。002 实测一小时视频用到 14896/16384、其中
+		// thinking 11812,只剩 9% 余量;003 节 2 要读 5 份源码正文,思考量只会
+		// 更大。用不到不花钱:计费按实际 token,这只是上限。
+		"AI_MAX_OUTPUT_TOKENS": "32768",
+		"APP_URL": "https://nanisle.com/products/weekly-teardown",
+		"NANISLE_URL": "https://nanisle.com",
+		// 门铃邮件发件地址(裸地址;显示名在代码里统一加)。域名身份 nanisle.com
+		// 在 001 的 SES 账号里已验证,同账号直接用。
+		"EMAIL_FROM": "teardown@nanisle.com"
+	}
+}
