@@ -676,6 +676,14 @@ export default function App() {
 			present({ contentKey: d.contentKey, result: d.result, resultAt: d.resultAt, paragraphs: d.paragraphs, url: d.url });
 			return;
 		}
+		// 上一单是在页面关着的时候收场的:慢车道失败,或快车道跑到一半 Worker 被
+		// 回收。服务端已经把指针清掉了,这一次响应是唯一一次把原因讲出来的机会——
+		// 在这之前这两个字段谁都没读,失败就是一张白页(2026-09-04 事故)。
+		if (d.failed) {
+			setError(d.error ?? "上一单没能跑完。重新提交一次吧。");
+			if (d.url) setInput((cur) => cur || d.url!);
+			return;
+		}
 		if (!d.active) return;
 		// 收单框回填原链接,让读者看见正在处理的是哪一条(?url= 预填优先)
 		const back = d.url;

@@ -550,9 +550,26 @@ app.get("/api/inflight", userGuard, async (c) => {
 
 	if (rec.lane === "slow") {
 		const task = rec.taskId ? await store.getTask(rec.taskId) : null;
-		// 任务没了(24 小时 ttl)或已收场:指针自愈式清掉,页面按「没有在跑的一单」开。
-		// 收场时不在这里回结果——慢车道有 /api/task/:id 这条现成的路,让它一条路走到底
-		if (!task || task.status === "done" || task.status === "failed") {
+		// 任务没了(24 小时 ttl):指针自愈式清掉,页面按「没有在跑的一单」开
+		if (!task) {
+			await store.clearInflight(email);
+			return c.json({ active: false });
+		}
+		// 失败必须说出来(2026-09-04 事故):任务是在页面关着的时候失败的,读者
+		// 回来只看到一张白页——花掉的一次额度、跑掉的三十秒、失败的原因,一样都
+		// 没交代。指针在这里被清掉,所以这是唯一一次把话讲给他听的机会。
+		if (task.status === "failed") {
+			await store.clearInflight(email);
+			return c.json({
+				active: false,
+				failed: true,
+				error: task.error || "上一单没能跑完,也没留下原因。重新提交一次吧。",
+				...(rec.url ? { url: rec.url } : {}),
+			});
+		}
+		// done 不在这里回结果——慢车道有 /api/task/:id 这条现成的路,让它一条路走到底;
+		// 页面关着的时候跑完的那些,结果在「记录」里等着
+		if (task.status === "done") {
 			await store.clearInflight(email);
 			return c.json({ active: false });
 		}

@@ -17,7 +17,15 @@ RUN dnf install -y tar xz && dnf clean all
 # yt-dlp 用官方单文件 Linux 二进制(自带 Python 运行时,x86_64)——
 # 不走 dnf python3 + pip:基础镜像里那套 python 缺 SSL 模块,pip 连不上
 # PyPI(构建实测)。版本钉死,YouTube 反爬升级时改这一行重新部署。
-RUN curl -sL https://github.com/yt-dlp/yt-dlp/releases/download/2026.06.09/yt-dlp_linux \
+#
+# >>> 这一行是本产品**最容易过期的一处**,过期的症状是任务在下载这一步猝死:
+# >>>   字幕 429 Too Many Requests / 音频 403 Forbidden
+# >>> 看着像被限流或被封 IP,其实是 YouTube 把旧版用的那个 player client 关了。
+# >>> 2026-09-04 就栽在这里:钉着 2026.06.09,线上任务 30 秒失败;同一条视频
+# >>> 换 2026.08.19 直接成功(它改用 visionos 客户端),本机直连、走代理都一样。
+# >>> **别再往代理和限流上查**——先把这一行升到最新 release 重建镜像试一次:
+# >>>   https://github.com/yt-dlp/yt-dlp/releases/latest
+RUN curl -sL https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux \
       -o /usr/local/bin/yt-dlp && \
     chmod +x /usr/local/bin/yt-dlp && \
     /usr/local/bin/yt-dlp --version
