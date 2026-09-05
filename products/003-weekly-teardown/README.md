@@ -4,7 +4,7 @@ One sentence: describe the technical field you're watching in one sentence — e
 
 **[Story & context](https://nanisle.com/products/weekly-teardown)** · Week 003 of [nanisle](https://nanisle.com)
 
-> **Status: feature-complete, not deployed.** Phases 1-9 of 10 are in: scaffold, main-site mount, SSO handoff, the D1 schema with per-account/per-IP quota and a $3/day global spend cap, the dossier (one sentence in, four editable sections out), the discovery layer (dual-route GitHub search → rule filter → ledger), the first screen with its exclusion list and search ledger, the deep teardown over SSE with verbatim anchoring, the Monday cron with its doorbell email, the week-over-week recheck, and the email subscription switch. What is left is phase 10: deploying it and living with it for a week. Plan and every landing record: [`docs/02-技术方案.md`](docs/02-技术方案.md).
+> **Status: deployed on 2026-09-04, now living with it.** Phases 1-9 of 10 are in: scaffold, main-site mount, SSO handoff, the D1 schema with per-account/per-IP quota and a $3/day global spend cap, the dossier (one sentence in, four editable sections out), the discovery layer (dual-route GitHub search → rule filter → ledger), the first screen with its exclusion list and search ledger, the deep teardown over SSE with verbatim anchoring, the Monday cron with its doorbell email, the week-over-week recheck, and the email subscription switch. Phase 10 (deploy) landed on 2026-09-04; what is left is living with it for a week and the honest review it commits to. Plan and every landing record: [`docs/02-技术方案.md`](docs/02-技术方案.md); the deploy record and post-launch checks: [`docs/03-上线清单.md`](docs/03-上线清单.md).
 
 ## Why I built this
 
@@ -143,7 +143,7 @@ That table is a summary; the authority is `.dev.vars.example`, and `npm test` ha
 
 ## Deploy
 
-**Not deployed yet** — phase 10. When it is: `wrangler d1 create nanisle-weekly-teardown` first and paste the returned id into `wrangler.jsonc` (the id checked in belongs to this project's own database; a fork's deploy will fail with "database not found" until you replace it — failing beats silently connecting to someone else's database). Then create the tables on the remote database with `wrangler d1 migrations apply nanisle-weekly-teardown --remote`, run `npm run deploy`, and set the secrets above with `wrangler secret put`.
+Deployed on 2026-09-04 — the record, including what the first production checks found, is in [`docs/03-上线清单.md`](docs/03-上线清单.md). To deploy your own fork: `wrangler d1 create nanisle-weekly-teardown` first and paste the returned id into `wrangler.jsonc` (the id checked in belongs to this project's own database; a fork's deploy will fail with "database not found" until you replace it — failing beats silently connecting to someone else's database). Then create the tables on the remote database with `wrangler d1 migrations apply nanisle-weekly-teardown --remote`, run `npm run deploy`, and set the secrets above with `wrangler secret put`.
 
 ## What I learned
 
